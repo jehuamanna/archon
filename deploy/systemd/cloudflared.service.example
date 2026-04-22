@@ -1,0 +1,37 @@
+# Example systemd unit for Cloudflare Tunnel (cloudflared).
+# Install:
+#   sudo cp cloudflared.service.example /etc/systemd/system/cloudflared.service
+#   sudoedit /etc/systemd/system/cloudflared.service   # fix User/Group, paths, tunnel UUID
+#   # User and Group must exist. If User=root, set Group=root (or omit Group=). Do not use
+#   # Group=cloudflared unless that group exists (216/GROUP = bad/missing group).
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cloudflared
+#
+# Docs: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/tunnel-guide/
+
+[Unit]
+Description=Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Default: root + root (config often lives in /root/.cloudflared or a user's home).
+# NEVER mix User=root with Group=cloudflared — that causes status=216/GROUP unless that group exists
+# and root is a member (it usually is not).
+User=root
+Group=root
+#
+# Option — dedicated user (uncomment User/Group below; remove User=root and Group=root above;
+# create account first: groupadd -r cloudflared && useradd -r -g cloudflared -s /usr/sbin/nologin cloudflared):
+# User=cloudflared
+# Group=cloudflared
+ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml run YOUR_TUNNEL_UUID
+Restart=on-failure
+RestartSec=5
+
+# Hardening (optional; drop if cloudflared fails to start)
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

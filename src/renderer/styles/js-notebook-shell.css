@@ -1,0 +1,4 @@
+/* JS notebook workspace: hide idle hint once output is mounted. */
+.archon-notebook-output-root:not(:empty) + .archon-notebook-output-hint {
+  display: none;
+}

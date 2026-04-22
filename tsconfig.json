@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "esnext",
+    "lib": ["ES2020", "DOM"],
+    "jsx": "react",
+    "baseUrl": ".",
+    "paths": {
+      "@archon/ui-types": ["./src/shared/archon-preload-public-types.ts"],
+      "@archon/platform": ["./packages/archon-platform/src/index.ts"],
+      "@modelcontextprotocol/sdk/client/index.js": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.d.ts"],
+      "@modelcontextprotocol/sdk/client/stdio.js": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/client/stdio.d.ts"],
+      "@modelcontextprotocol/sdk/client/sse.js": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/client/sse.d.ts"],
+      "@modelcontextprotocol/sdk/client/streamableHttp.js": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.d.ts"],
+      "@modelcontextprotocol/sdk/shared/transport.js": ["./node_modules/@modelcontextprotocol/sdk/dist/esm/shared/transport.d.ts"]
+    },
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "outDir": "./build/tsc",
+    "rootDir": "."
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "build", "dist", "src/**/*.test.ts"]
+}

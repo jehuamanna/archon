@@ -1,0 +1,47 @@
+<!-- Snapshot-style fixture: single outer gutter (.archon-app-pad), no nested shell padding -->
+<div id="root">
+  <div
+    class="archon-app-pad box-border flex h-screen min-h-0 flex-col bg-muted/45 text-foreground dark:bg-muted/25"
+  >
+    <div
+      class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-border bg-background shadow-sm box-border"
+    >
+      <div
+        class="min-h-0 min-w-0 flex-1 box-border"
+        data-panel-group=""
+        data-panel-group-direction="horizontal"
+      >
+        <div class="archon-panel-shell" data-panel="">
+          <aside
+            class="flex h-full min-h-0 min-w-0 w-full flex-col border-sidebar-border border-r bg-sidebar text-sidebar-foreground"
+          >
+            <header class="border-sidebar-border border-b px-3 py-3">
+              <h1 class="text-[13px] font-semibold">Archon</h1>
+            </header>
+            <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3">
+              <p class="mb-2 text-[11px] font-semibold uppercase text-sidebar-foreground/45">
+                Notes
+              </p>
+            </div>
+            <footer class="shrink-0 border-sidebar-border border-t px-3 py-3">
+              <p class="text-[11px] text-sidebar-foreground/50">Footer</p>
+            </footer>
+          </aside>
+        </div>
+        <div class="archon-panel-sash" role="separator"></div>
+        <div class="archon-panel-shell" data-panel="">
+          <main class="box-border h-full min-h-0 flex-1 overflow-hidden">
+            <div class="flex h-full min-h-0 flex-col bg-background text-foreground">
+              <header class="shrink-0 border-b border-border px-4 py-3">
+                <h2 class="text-[13px] font-semibold">Title</h2>
+              </header>
+              <div class="flex min-h-0 flex-1 flex-col overflow-auto px-4 py-3">
+                <div class="min-h-0 flex-1">Body</div>
+              </div>
+            </div>
+          </main>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

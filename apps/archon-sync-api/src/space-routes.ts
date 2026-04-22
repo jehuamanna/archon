@@ -1,0 +1,473 @@
+import type { FastifyInstance } from "fastify";
+import { ObjectId } from "mongodb";
+import { requireAuth, signAccessToken } from "./auth.js";
+import {
+  getActiveDb,
+  getOrgMembershipsCollection,
+  getProjectSharesCollection,
+  getSpaceMembershipsCollection,
+  getSpacesCollection,
+  getUsersCollection,
+  getWorkspaceSharesCollection,
+  getWpnProjectsCollection,
+  getWpnWorkspacesCollection,
+  type UserDoc,
+} from "./db.js";
+import { requireOrgRole } from "./org-auth.js";
+import {
+  addSpaceMemberBody,
+  createSpaceBody,
+  setActiveSpaceBody,
+  setSpaceMemberRoleBody,
+  updateSpaceBody,
+  type SpaceRole,
+} from "./org-schemas.js";
+import { recordAudit } from "./audit.js";
+import { getEffectiveSpaceRoles } from "./permission-resolver.js";
+import {
+  requireSpaceManage,
+  requireSpaceMember,
+  requireSpaceRole,
+} from "./space-auth.js";
+
+function isObjectIdHex(s: string): boolean {
+  return /^[a-f0-9]{24}$/i.test(s);
+}
+
+export function registerSpaceRoutes(
+  app: FastifyInstance,
+  opts: { jwtSecret: string },
+): void {
+  const { jwtSecret } = opts;
+
+  /** List spaces in an org that the caller is a member of. Admins see all. */
+  app.get("/orgs/:orgId/spaces", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { orgId } = request.params as { orgId: string };
+    const orgMember = await getOrgMembershipsCollection().findOne({
+      orgId,
+      userId: auth.sub,
+    });
+    if (!orgMember) {
+      return reply.status(404).send({ error: "Organization not found" });
+    }
+    const allSpaces = await getSpacesCollection().find({ orgId }).toArray();
+    const memberRoleBySpace = await getEffectiveSpaceRoles(auth.sub);
+    const visible = allSpaces.filter((s) => {
+      if (orgMember.role === "admin") return true;
+      return memberRoleBySpace.has(s._id.toHexString());
+    });
+    return reply.send({
+      spaces: visible.map((s) => ({
+        spaceId: s._id.toHexString(),
+        orgId: s.orgId,
+        name: s.name,
+        kind: s.kind,
+        role: memberRoleBySpace.get(s._id.toHexString()) ?? null,
+        createdAt: s.createdAt,
+      })),
+    });
+  });
+
+  /** Any org member: create a Space inside an Org. Caller becomes Space Owner. */
+  app.post("/orgs/:orgId/spaces", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { orgId } = request.params as { orgId: string };
+    const ctx = await requireOrgRole(request, reply, auth, orgId, "member");
+    if (!ctx) {
+      return;
+    }
+    const parsed = createSpaceBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const ins = await getSpacesCollection().insertOne({
+      orgId,
+      name: parsed.data.name,
+      kind: "normal",
+      createdByUserId: auth.sub,
+      createdAt: new Date(),
+    } as never);
+    const spaceIdHex = ins.insertedId.toHexString();
+    await getSpaceMembershipsCollection().insertOne({
+      spaceId: spaceIdHex,
+      userId: auth.sub,
+      role: "owner",
+      addedByUserId: auth.sub,
+      joinedAt: new Date(),
+    } as never);
+    await recordAudit({
+      orgId,
+      actorUserId: auth.sub,
+      action: "space.create",
+      targetType: "space",
+      targetId: spaceIdHex,
+      metadata: { name: parsed.data.name },
+    });
+    return reply.send({
+      spaceId: spaceIdHex,
+      orgId,
+      name: parsed.data.name,
+      kind: "normal",
+      role: "owner" as SpaceRole,
+    });
+  });
+
+  /** Owner-only: rename a Space. (Default-kind spaces can be renamed too.) */
+  app.patch("/spaces/:spaceId", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { spaceId } = request.params as { spaceId: string };
+    const ctx = await requireSpaceManage(request, reply, auth, spaceId);
+    if (!ctx) {
+      return;
+    }
+    const parsed = updateSpaceBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const patch: Record<string, unknown> = {};
+    if (parsed.data.name) {
+      patch.name = parsed.data.name;
+    }
+    if (Object.keys(patch).length === 0) {
+      return reply.status(400).send({ error: "No fields to update" });
+    }
+    await getSpacesCollection().updateOne(
+      { _id: new ObjectId(spaceId) },
+      { $set: patch },
+    );
+    return reply.status(204).send();
+  });
+
+  /**
+   * Owner-only: delete a Space. Refuses to delete the org's default space, or
+   * any space that still has WPN content (workspaces) — caller must move/delete
+   * workspaces first. Cascades the membership rows.
+   */
+  app.delete("/spaces/:spaceId", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { spaceId } = request.params as { spaceId: string };
+    const ctx = await requireSpaceManage(request, reply, auth, spaceId);
+    if (!ctx) {
+      return;
+    }
+    if (ctx.space.kind === "default") {
+      return reply.status(400).send({ error: "Cannot delete the default space" });
+    }
+    const wsCount = await getActiveDb()
+      .collection("wpn_workspaces")
+      .countDocuments({ spaceId });
+    if (wsCount > 0) {
+      return reply
+        .status(409)
+        .send({ error: "Space still has workspaces; move or delete them first" });
+    }
+    await getSpaceMembershipsCollection().deleteMany({ spaceId });
+    await getSpacesCollection().deleteOne({ _id: new ObjectId(spaceId) });
+    return reply.status(204).send();
+  });
+
+  /** List members of a Space. Any space member may read this list. */
+  app.get("/spaces/:spaceId/members", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { spaceId } = request.params as { spaceId: string };
+    const ctx = await requireSpaceMember(request, reply, auth, spaceId);
+    if (!ctx) {
+      return;
+    }
+    const rows = await getSpaceMembershipsCollection()
+      .find({ spaceId })
+      .toArray();
+    const userIds = rows.map((r) => r.userId).filter(isObjectIdHex);
+    const users = (await getUsersCollection()
+      .find({ _id: { $in: userIds.map((u) => new ObjectId(u)) } })
+      .toArray()) as UserDoc[];
+    const usersById = new Map(users.map((u) => [u._id.toHexString(), u]));
+    return reply.send({
+      members: rows.map((m) => {
+        const u = usersById.get(m.userId);
+        return {
+          userId: m.userId,
+          email: u?.email ?? "(unknown)",
+          displayName: u?.displayName ?? null,
+          role: m.role,
+          joinedAt: m.joinedAt,
+        };
+      }),
+    });
+  });
+
+  /** Owner-only: add an existing org member to a Space. */
+  app.post("/spaces/:spaceId/members", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { spaceId } = request.params as { spaceId: string };
+    const ctx = await requireSpaceManage(request, reply, auth, spaceId);
+    if (!ctx) {
+      return;
+    }
+    const parsed = addSpaceMemberBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const isOrgMember = await getOrgMembershipsCollection().findOne({
+      orgId: ctx.space.orgId,
+      userId: parsed.data.userId,
+    });
+    if (!isOrgMember) {
+      return reply
+        .status(400)
+        .send({ error: "User must be a member of the parent organization" });
+    }
+    await getSpaceMembershipsCollection().updateOne(
+      { spaceId, userId: parsed.data.userId },
+      {
+        $setOnInsert: {
+          spaceId,
+          userId: parsed.data.userId,
+          role: parsed.data.role,
+          addedByUserId: auth.sub,
+          joinedAt: new Date(),
+        },
+      },
+      { upsert: true },
+    );
+    await recordAudit({
+      orgId: ctx.space.orgId,
+      actorUserId: auth.sub,
+      action: "space.member.add",
+      targetType: "space_membership",
+      targetId: parsed.data.userId,
+      metadata: { spaceId, role: parsed.data.role },
+    });
+    return reply.status(204).send();
+  });
+
+  /** Owner-only: change a member's role. Last owner cannot demote themselves. */
+  app.patch(
+    "/spaces/:spaceId/members/:userId/role",
+    async (request, reply) => {
+      const auth = await requireAuth(request, reply, jwtSecret);
+      if (!auth) {
+        return;
+      }
+      const { spaceId, userId } = request.params as {
+        spaceId: string;
+        userId: string;
+      };
+      const ctx = await requireSpaceManage(request, reply, auth, spaceId);
+      if (!ctx) {
+        return;
+      }
+      const parsed = setSpaceMemberRoleBody.safeParse(request.body);
+      if (!parsed.success) {
+        return reply.status(400).send({ error: parsed.error.flatten() });
+      }
+      const target = await getSpaceMembershipsCollection().findOne({
+        spaceId,
+        userId,
+      });
+      if (!target) {
+        return reply.status(404).send({ error: "Member not found" });
+      }
+      if (
+        target.role === "owner" &&
+        parsed.data.role !== "owner" &&
+        target.userId === auth.sub
+      ) {
+        const ownerCount = await getSpaceMembershipsCollection().countDocuments({
+          spaceId,
+          role: "owner",
+        });
+        if (ownerCount <= 1) {
+          return reply
+            .status(400)
+            .send({ error: "Cannot demote the last owner of the space" });
+        }
+      }
+      await getSpaceMembershipsCollection().updateOne(
+        { _id: target._id },
+        { $set: { role: parsed.data.role } },
+      );
+      return reply.status(204).send();
+    },
+  );
+
+  /** Owner-only: remove a member from a Space (last owner protected). */
+  app.delete(
+    "/spaces/:spaceId/members/:userId",
+    async (request, reply) => {
+      const auth = await requireAuth(request, reply, jwtSecret);
+      if (!auth) {
+        return;
+      }
+      const { spaceId, userId } = request.params as {
+        spaceId: string;
+        userId: string;
+      };
+      const ctx = await requireSpaceManage(request, reply, auth, spaceId);
+      if (!ctx) {
+        return;
+      }
+      const target = await getSpaceMembershipsCollection().findOne({
+        spaceId,
+        userId,
+      });
+      if (!target) {
+        return reply.status(404).send({ error: "Member not found" });
+      }
+      if (target.role === "owner") {
+        const ownerCount = await getSpaceMembershipsCollection().countDocuments({
+          spaceId,
+          role: "owner",
+        });
+        if (ownerCount <= 1) {
+          return reply
+            .status(400)
+            .send({ error: "Cannot remove the last owner of the space" });
+        }
+      }
+      await getSpaceMembershipsCollection().deleteOne({ _id: target._id });
+      // Phase 8: cascade — drop any workspace/project share rows the removed
+      // user held within this space, so there are no orphaned grants that
+      // become active if they're re-added later.
+      const wsIds = (
+        await getWpnWorkspacesCollection()
+          .find({ spaceId }, { projection: { id: 1 } })
+          .toArray()
+      ).map((w) => w.id);
+      if (wsIds.length > 0) {
+        await getWorkspaceSharesCollection().deleteMany({
+          userId,
+          workspaceId: { $in: wsIds },
+        });
+      }
+      const projIds = (
+        await getWpnProjectsCollection()
+          .find({ spaceId }, { projection: { id: 1 } })
+          .toArray()
+      ).map((p) => p.id);
+      if (projIds.length > 0) {
+        await getProjectSharesCollection().deleteMany({
+          userId,
+          projectId: { $in: projIds },
+        });
+      }
+      return reply.status(204).send();
+    },
+  );
+
+  /** Switch active space context. Re-issues the access token. */
+  app.post("/spaces/active", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const parsed = setActiveSpaceBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const ctx = await requireSpaceMember(
+      request,
+      reply,
+      auth,
+      parsed.data.spaceId,
+    );
+    if (!ctx) {
+      return;
+    }
+    await getUsersCollection().updateOne(
+      { _id: new ObjectId(auth.sub) },
+      {
+        $set: {
+          lastActiveOrgId: ctx.space.orgId,
+          lastActiveSpaceId: parsed.data.spaceId,
+        },
+      },
+    );
+    const token = signAccessToken(jwtSecret, {
+      sub: auth.sub,
+      email: auth.email,
+      ...(auth.activeOrgId ? { activeOrgId: auth.activeOrgId } : { activeOrgId: ctx.space.orgId }),
+      activeSpaceId: parsed.data.spaceId,
+    });
+    return reply.send({
+      token,
+      activeSpaceId: parsed.data.spaceId,
+      activeOrgId: ctx.space.orgId,
+    });
+  });
+
+  /** List effective space memberships across all orgs (direct ∪ team grants). */
+  app.get("/spaces/me", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const roleBySpace = await getEffectiveSpaceRoles(auth.sub);
+    if (roleBySpace.size === 0) {
+      return reply.send({ spaces: [], activeSpaceId: auth.activeSpaceId ?? null });
+    }
+    const spaceIds = [...roleBySpace.keys()].filter(isObjectIdHex);
+    const spaces = await getSpacesCollection()
+      .find({ _id: { $in: spaceIds.map((s) => new ObjectId(s)) } })
+      .toArray();
+    return reply.send({
+      spaces: spaces.map((s) => ({
+        spaceId: s._id.toHexString(),
+        orgId: s.orgId,
+        name: s.name,
+        kind: s.kind,
+        role: roleBySpace.get(s._id.toHexString()) ?? "member",
+      })),
+      activeSpaceId: auth.activeSpaceId ?? null,
+    });
+  });
+
+  /**
+   * Space-scoped workspace listing — filters wpn_workspaces by spaceId and
+   * enforces space membership. Phase 2 forward path; legacy `/wpn/workspaces`
+   * remains userId-scoped for back-compat until Phase 4 lockdown.
+   */
+  app.get("/spaces/:spaceId/workspaces", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { spaceId } = request.params as { spaceId: string };
+    const ctx = await requireSpaceMember(request, reply, auth, spaceId);
+    if (!ctx) {
+      return;
+    }
+    const rows = await getActiveDb()
+      .collection("wpn_workspaces")
+      .find({ spaceId })
+      .sort({ sort_index: 1 })
+      .toArray();
+    return reply.send({
+      workspaces: rows.map((r) => {
+        const { _id, userId, settings, ...pub } = r as Record<string, unknown> & {
+          _id: unknown;
+        };
+        return pub;
+      }),
+    });
+  });
+}

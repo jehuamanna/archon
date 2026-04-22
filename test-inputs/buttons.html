@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Archon — note row buttons (fixture)</title>
+    <style>
+      :root {
+        --primary: 239 64% 48%;
+        --sidebar-ring: 222.2 84% 4.9%;
+        --sidebar-background: 210 24% 98%;
+        --sidebar-foreground: 222.2 47% 11%;
+        --sidebar-accent: 210 40% 96.1%;
+        --badge-markdown-bg: 214.3 95% 93%;
+        --badge-markdown-fg: 224.3 76% 48%;
+        --badge-text-bg: 142 76% 92%;
+        --badge-text-fg: 142 72% 29%;
+      }
+      html.dark {
+        --primary: 234 86% 70%;
+        --sidebar-ring: 212.7 26.8% 83.9%;
+        --sidebar-background: 222.2 84% 4.9%;
+        --sidebar-foreground: 210 40% 98%;
+        --sidebar-accent: 217.2 32.6% 17.5%;
+        --badge-markdown-bg: 224.3 76% 20%;
+        --badge-markdown-fg: 213.3 97% 87%;
+        --badge-text-bg: 142 40% 18%;
+        --badge-text-fg: 142 70% 75%;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 20px;
+        font-family: system-ui, sans-serif;
+        background: hsl(var(--sidebar-background));
+        color: hsl(var(--sidebar-foreground));
+      }
+      .row {
+        margin-bottom: 8px;
+      }
+      /* Mirrors Sidebar.tsx note buttons */
+      .note-btn {
+        position: relative;
+        display: flex;
+        width: 100%;
+        flex-direction: column;
+        align-items: stretch;
+        gap: 6px;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 12px;
+        text-align: left;
+        font: inherit;
+        cursor: pointer;
+        outline: none;
+        transition: background-color 0.15s ease;
+      }
+      .note-btn:hover {
+        background: hsl(var(--sidebar-accent) / 0.7);
+      }
+      .note-btn:focus-visible {
+        z-index: 1;
+        box-shadow: 0 0 0 2px hsl(var(--sidebar-background)),
+          0 0 0 4px hsl(var(--sidebar-ring));
+      }
+      .note-btn--selected {
+        background: hsl(var(--sidebar-accent));
+        color: hsl(var(--sidebar-foreground));
+      }
+      .note-btn--selected::before {
+        content: "";
+        position: absolute;
+        left: 6px;
+        top: 8px;
+        bottom: 8px;
+        width: 4px;
+        border-radius: 9999px;
+        background: hsl(var(--primary));
+        pointer-events: none;
+      }
+      .note-btn__title {
+        font-size: 13px;
+        line-height: 1.35;
+      }
+      .note-btn--selected .note-btn__title {
+        font-weight: 600;
+      }
+      .note-btn:not(.note-btn--selected) .note-btn__title {
+        font-weight: 400;
+      }
+      .note-btn__badge {
+        align-self: flex-start;
+        max-width: 100%;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-family: ui-monospace, monospace;
+        font-size: 11px;
+        font-weight: 500;
+        line-height: 1.2;
+        box-shadow: inset 0 0 0 1px hsl(var(--sidebar-foreground) / 0.1);
+      }
+      .badge-md {
+        background: hsl(var(--badge-markdown-bg));
+        color: hsl(var(--badge-markdown-fg));
+      }
+      .badge-txt {
+        background: hsl(var(--badge-text-bg));
+        color: hsl(var(--badge-text-fg));
+      }
+      #toggle {
+        margin-bottom: 16px;
+        padding: 6px 10px;
+        font: inherit;
+        font-size: 12px;
+        border-radius: 6px;
+        border: 1px solid hsl(var(--sidebar-foreground) / 0.2);
+        background: hsl(var(--sidebar-accent));
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <button type="button" id="toggle">Toggle dark</button>
+    <p style="font-size: 11px; opacity: 0.6; margin: 0 0 12px">
+      Tab to each row — focus ring uses <code>sidebar-ring</code> + offset.
+    </p>
+    <div class="row">
+      <button type="button" class="note-btn note-btn--selected">
+        <span class="note-btn__title">Markdown Note</span>
+        <span class="note-btn__badge badge-md">markdown</span>
+      </button>
+    </div>
+    <div class="row">
+      <button type="button" class="note-btn">
+        <span class="note-btn__title">Rich Text Note</span>
+        <span class="note-btn__badge badge-txt">text</span>
+      </button>
+    </div>
+    <script>
+      document.getElementById("toggle").onclick = () =>
+        document.documentElement.classList.toggle("dark");
+    </script>
+  </body>
+</html>

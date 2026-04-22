@@ -1,0 +1,32 @@
+import type { Note } from "../shared/plugin-api";
+import { Registry } from "./registry";
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/**
+ * Registers `mdx` in the main-process registry so create-note IPC and the Notes
+ * explorer type picker include it. Editing uses the same shell editor as markdown
+ * ({@link useRegisterMarkdownNotePlugin}).
+ */
+export function registerBuiltinMdxNoteRenderer(reg: Registry): void {
+  if (reg.getRenderer("mdx")) {
+    return;
+  }
+  reg.registerRenderer(
+    "builtin.mdx-note",
+    "mdx",
+    {
+      render: async (note: Note) => {
+        const body = escapeHtml((note.content ?? "").slice(0, 12_000));
+        return `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>MDX</title></head><body style="margin:0;font:13px system-ui,sans-serif;background:#fafafa;color:#171717;padding:12px;"><p style="opacity:.75;margin:0 0 8px">MDX — use the Archon shell for the full editor.</p><pre style="white-space:pre-wrap;word-break:break-word;margin:0;font-family:ui-monospace,monospace;font-size:12px">${body}</pre></body></html>`;
+      },
+    },
+    { theme: "inherit", hostTier: "user" },
+  );
+}

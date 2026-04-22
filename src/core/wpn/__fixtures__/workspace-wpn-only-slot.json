@@ -1,0 +1,45 @@
+{
+  "fileVersion": 1,
+  "appMeta": {},
+  "legacy": { "v": 1, "records": [], "order": {} },
+  "wpnMeta": [{ "key": "schema_version", "value": "1" }],
+  "workspaces": [
+    {
+      "id": "ws-fixture-1",
+      "owner_id": "jehu",
+      "name": "Fixture",
+      "sort_index": 0,
+      "color_token": null,
+      "created_at_ms": 1,
+      "updated_at_ms": 2
+    }
+  ],
+  "projects": [
+    {
+      "id": "pr-fixture-1",
+      "workspace_id": "ws-fixture-1",
+      "name": "Inbox",
+      "sort_index": 0,
+      "color_token": null,
+      "created_at_ms": 3,
+      "updated_at_ms": 4
+    }
+  ],
+  "notes": [
+    {
+      "id": "n-fixture-1",
+      "project_id": "pr-fixture-1",
+      "parent_id": null,
+      "type": "markdown",
+      "title": "Hello",
+      "content": "body",
+      "metadata_json": null,
+      "sibling_index": 0,
+      "created_at_ms": 5,
+      "updated_at_ms": 6
+    }
+  ],
+  "explorer": [{ "project_id": "pr-fixture-1", "expanded_ids": [] }],
+  "wpnWorkspaceSettings": {},
+  "wpnProjectSettings": {}
+}

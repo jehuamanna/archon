@@ -1,0 +1,24 @@
+{
+  "name": "@archon/web",
+  "private": true,
+  "scripts": {
+    "prebuild": "npm --prefix ../.. run build:lib -w @archon/sync-api && node scripts/copy-bundled-docs.mjs",
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000 -H 0.0.0.0",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@archon/sync-api": "*",
+    "@archon/platform": "*",
+    "next": "^16.2.3",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@next/env": "16.2.3",
+    "@tailwindcss/postcss": "^4.2.2",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8"
+  }
+}

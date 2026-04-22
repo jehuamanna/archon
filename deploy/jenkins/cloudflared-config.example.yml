@@ -1,0 +1,19 @@
+# Example Cloudflare Tunnel config for Archon on the Jenkins agent host.
+# Copy to e.g. /etc/cloudflared/config.yml or ~/.cloudflared/config.yml and replace placeholders.
+#
+# cloudflared must run on the SAME machine as the Docker daemon Jenkins uses.
+# Point at the nginx gateway (default host port 8080), not :3000 on the web container.
+#
+# Docs: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/
+# Systemd: ../systemd/cloudflared.service.example and ../systemd/README.md
+
+tunnel: YOUR_TUNNEL_UUID
+credentials-file: /path/to/YOUR_TUNNEL_UUID.json
+
+ingress:
+  - hostname: archon.example.com
+    service: http://127.0.0.1:8080
+  - service: http_status:404
+
+# If docker-compose uses ARCHON_GATEWAY_PORT other than 8080, match it here, e.g.:
+#   service: http://127.0.0.1:9090

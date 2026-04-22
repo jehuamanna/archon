@@ -1,0 +1,60 @@
+# Local Drone server + Docker runner (no bundled Git host).
+# Uses GitHub for login and repo webhooks (see deploy/drone/env.example).
+#
+# 1. Copy deploy/drone/env.example → deploy/drone/.env and set secrets.
+# 2. npm run drone:up
+# 3. Open Drone, sign in with GitHub, activate this repository.
+#
+# GitHub cannot POST webhooks to localhost. For builds on every git push, expose Drone with a
+# tunnel (e.g. ngrok, Cloudflare Tunnel) and set DRONE_SERVER_HOST / DRONE_SERVER_PROTO to match,
+# including in the GitHub OAuth app callback URL. Otherwise use “New build” in the Drone UI.
+#
+# Does not start with the main archon stack (docker-compose.yml).
+
+services:
+  drone:
+    image: drone/drone:2
+    container_name: archon-drone-server
+    ports:
+      - "${DRONE_HTTP_PORT:-8888}:80"
+    volumes:
+      - drone-server-data:/data
+    environment:
+      DRONE_DATABASE_DRIVER: sqlite3
+      DRONE_DATABASE_DATASOURCE: /data/database.sqlite
+      DRONE_GIT_ALWAYS_AUTH: "false"
+      DRONE_RPC_SECRET: ${DRONE_RPC_SECRET:-CHANGE_ME_use_openssl_rand_hex_16}
+      DRONE_SERVER_PROTO: ${DRONE_SERVER_PROTO:-http}
+      DRONE_SERVER_HOST: ${DRONE_SERVER_HOST:-localhost:8888}
+      DRONE_USER_CREATE: username:admin,admin:true
+      DRONE_GITHUB_CLIENT_ID: ${DRONE_GITHUB_CLIENT_ID:-}
+      DRONE_GITHUB_CLIENT_SECRET: ${DRONE_GITHUB_CLIENT_SECRET:-}
+    networks:
+      - drone-net
+    restart: unless-stopped
+
+  drone-runner-docker:
+    image: drone/drone-runner-docker:1
+    container_name: archon-drone-runner
+    ports:
+      - "${DRONE_RUNNER_METRICS_PORT:-9393}:3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      DRONE_RPC_PROTO: http
+      DRONE_RPC_HOST: drone:80
+      DRONE_RPC_SECRET: ${DRONE_RPC_SECRET:-CHANGE_ME_use_openssl_rand_hex_16}
+      DRONE_RUNNER_CAPACITY: 2
+      DRONE_RUNNER_NAME: local-docker
+    depends_on:
+      - drone
+    networks:
+      - drone-net
+    restart: unless-stopped
+
+networks:
+  drone-net:
+    name: archon-drone-net
+
+volumes:
+  drone-server-data:

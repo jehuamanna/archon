@@ -1,0 +1,17 @@
+node_modules
+.git
+.webpack
+.webpack-cache
+out
+dist
+coverage
+*.log
+.env
+.env.*
+claude-docs
+# Marketplace plugins are built into dist/plugins by CI and container builds.
+# If you keep local marketplace sources, place them under plugins/marketplace/.
+plugins
+.plans
+.cursor
+**/.DS_Store

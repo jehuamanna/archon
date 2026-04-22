@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Template for another bare repo under /srv/git (copy to that repo's hooks/post-receive).
+#
+# Install the shared script once: /srv/git/bin/post-receive-shared.sh (same as archon).
+# If this project is not Node/Docker/archon-style, fork post-receive-shared.sh or replace
+# the npm/deploy section with your own commands.
+
+export BARE_GIT_DIR="/srv/git/OTHER_PROJECT/other.git"
+export DEPLOY_ROOT="/var/lib/other-project/checkout"
+export DEPLOY_LOCK="/var/lib/other-project/deploy.lock"
+# export GITHUB_REMOTE=github
+# export TAG_PATTERN='^v'
+
+SHARED="${POST_RECEIVE_SHARED:-/srv/git/bin/post-receive-shared.sh}"
+if [[ ! -f "$SHARED" ]]; then
+  echo "[post-receive] Missing $SHARED" >&2
+  exit 1
+fi
+exec bash "$SHARED"

@@ -1,0 +1,8 @@
+@import "./styles/tokens.css";
+@import "tailwindcss";
+
+@source "../**/*.{ts,tsx,html}";
+
+@import "./styles/tailwind-app.css";
+@import "./styles/js-notebook-shell.css";
+@import "../../node_modules/@observablehq/inspector/dist/inspector.css";

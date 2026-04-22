@@ -1,0 +1,9 @@
+{
+  "name": "ci-minimal",
+  "version": "0.1.0",
+  "type": "backend",
+  "main": "index.js",
+  "mode": "development",
+  "displayName": "CI minimal",
+  "description": "Minimal plugin built from test-inputs for CI releases."
+}

@@ -1,0 +1,236 @@
+/* User-authored MDX often stores class names in the DB, not in repo source files, so Tailwind
+   content globs will not see them. Prefer styling via @archon/ui; raw utilities need an explicit
+   safelist if you expand that policy. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary) / <alpha-value>);
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive) / <alpha-value>);
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --color-sidebar: hsl(var(--sidebar-background));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+
+  --color-editor-background: hsl(var(--editor-background));
+  --color-editor-foreground: hsl(var(--editor-foreground));
+  --color-editor-muted-foreground: hsl(var(--editor-muted-foreground));
+  --color-editor-border: hsl(var(--editor-border));
+  --color-editor-line-highlight: hsl(var(--editor-line-highlight));
+  --color-editor-selection: hsl(var(--editor-selection));
+  --color-editor-selection-foreground: hsl(var(--editor-selection-foreground));
+  --color-code-background: hsl(var(--code-background));
+  --color-code-foreground: hsl(var(--code-foreground));
+
+  --color-resize-handle: hsl(var(--resize-handle));
+  --color-resize-handle-hover: hsl(var(--resize-handle-hover));
+  --color-resize-handle-active: hsl(var(--resize-handle-active));
+
+  --color-badge-markdown-bg: hsl(var(--badge-markdown-bg));
+  --color-badge-markdown-fg: hsl(var(--badge-markdown-fg));
+  --color-badge-text-bg: hsl(var(--badge-text-bg));
+  --color-badge-text-fg: hsl(var(--badge-text-fg));
+  --color-badge-code-bg: hsl(var(--badge-code-bg));
+  --color-badge-code-fg: hsl(var(--badge-code-fg));
+  --color-badge-default-bg: hsl(var(--badge-default-bg));
+  --color-badge-default-fg: hsl(var(--badge-default-fg));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/* In @layer so Tailwind utilities (padding, etc.) reliably override this reset */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+    margin: 0;
+  }
+}
+
+body {
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root,
+#__next {
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.archon-panel-sash {
+  cursor: col-resize;
+}
+
+/* Electron/Chromium: native button fill can hide Tailwind bg-* / text-* on <button> */
+button.archon-primary-fill {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(var(--primary));
+  color: hsl(var(--primary-foreground));
+}
+
+button.archon-auth-submit {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(var(--foreground));
+  color: hsl(var(--background));
+}
+button.archon-auth-submit:hover:not(:disabled) {
+  filter: brightness(0.97);
+}
+button.archon-auth-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.dark button.archon-auth-submit:hover:not(:disabled) {
+  filter: brightness(1.03);
+}
+
+/*
+ * Neutral action buttons (black / white / gray only — no blue/red fills).
+ * Use on <button> so Electron native chrome does not override fills.
+ */
+button.archon-btn-neutral {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(220 6% 14%);
+  color: hsl(0 0% 98%);
+  border: 1px solid hsl(220 6% 22%);
+}
+button.archon-btn-neutral:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+button.archon-btn-neutral:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.dark button.archon-btn-neutral {
+  background-color: hsl(0 0% 88%);
+  color: hsl(220 10% 8%);
+  border: 1px solid hsl(0 0% 72%);
+}
+.dark button.archon-btn-neutral:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+
+/** Stronger emphasis (destructive flows) — still grayscale */
+button.archon-btn-neutral-strong {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(220 8% 8%);
+  color: hsl(0 0% 98%);
+  border: 1px solid hsl(220 6% 16%);
+}
+button.archon-btn-neutral-strong:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+button.archon-btn-neutral-strong:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.dark button.archon-btn-neutral-strong {
+  background-color: hsl(0 0% 72%);
+  color: hsl(220 10% 6%);
+  border: 1px solid hsl(0 0% 52%);
+}
+.dark button.archon-btn-neutral-strong:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+/* Portaled dialogs: same neutral system */
+button.archon-dialog-btn-primary {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(220 6% 14%);
+  color: hsl(0 0% 98%);
+  border: 1px solid hsl(220 6% 22%);
+}
+button.archon-dialog-btn-primary:hover {
+  filter: brightness(0.94);
+}
+.dark button.archon-dialog-btn-primary {
+  background-color: hsl(0 0% 88%);
+  color: hsl(220 10% 8%);
+  border: 1px solid hsl(0 0% 72%);
+}
+.dark button.archon-dialog-btn-primary:hover {
+  filter: brightness(0.96);
+}
+
+button.archon-dialog-btn-danger {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: none;
+  cursor: pointer;
+  background-color: hsl(220 8% 8%);
+  color: hsl(0 0% 98%);
+  border: 1px solid hsl(220 6% 16%);
+}
+button.archon-dialog-btn-danger:hover {
+  filter: brightness(0.92);
+}
+.dark button.archon-dialog-btn-danger {
+  background-color: hsl(0 0% 72%);
+  color: hsl(220 10% 6%);
+  border: 1px solid hsl(0 0% 52%);
+}
+.dark button.archon-dialog-btn-danger:hover {
+  filter: brightness(0.94);
+}
+
+/*
+ * App shell spacing as plain CSS (not only Tailwind) so padding is never
+ * zeroed by reset / layer ordering issues with arbitrary utilities.
+ */
+/* Single window gutter — do not stack with inner .archon-app-pad */
+.archon-app-pad {
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+/* Panel flex host only; content padding lives in Sidebar / NoteViewer / etc. */
+.archon-panel-shell {
+  box-sizing: border-box;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+  flex-direction: column;
+  padding: 0;
+}

@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Example hooks/post-receive for the archon bare repo (thin wrapper).
+#
+# Layout: bare repos under /srv/git (see SERVER-LAYOUT.md).
+#
+# On the server:
+#   1) sudo install -d -m 0755 /srv/git/bin
+#   2) sudo install -m 0755 deploy/git-server/post-receive-shared.sh /srv/git/bin/post-receive-shared.sh
+#   3) Copy this file to /srv/git/archon/archon.git/hooks/post-receive && chmod +x
+#      Edit paths if your tree differs.
+#
+# Test from a clone without installing to /srv/git/bin:
+#   export POST_RECEIVE_SHARED=/path/to/archon/deploy/git-server/post-receive-shared.sh
+
+export BARE_GIT_DIR="${BARE_GIT_DIR:-/srv/git/archon/archon.git}"
+export DEPLOY_ROOT="${DEPLOY_ROOT:-/var/lib/archon/checkout}"
+export DEPLOY_LOCK="${DEPLOY_LOCK:-/var/lib/archon/deploy.lock}"
+# export GITHUB_REMOTE=github
+# export TAG_PATTERN='^v'
+
+SHARED_SCRIPT="${POST_RECEIVE_SHARED:-/srv/git/bin/post-receive-shared.sh}"
+if [[ ! -f "$SHARED_SCRIPT" ]]; then
+  echo "[archon-post-receive] Missing shared script: $SHARED_SCRIPT" >&2
+  echo "Install: sudo install -m 0755 post-receive-shared.sh /srv/git/bin/post-receive-shared.sh" >&2
+  exit 1
+fi
+exec bash "$SHARED_SCRIPT"

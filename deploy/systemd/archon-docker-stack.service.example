@@ -1,0 +1,31 @@
+# Example systemd unit: start the Archon Docker stack on boot (Mongo + sync-api + web blue + gateway).
+# Requires images from a prior `npm run deploy` (this unit does not build).
+#
+# Install:
+#   sudo cp archon-docker-stack.service.example /etc/systemd/system/archon-docker-stack.service
+#   sudoedit /etc/systemd/system/archon-docker-stack.service
+#     - Set WorkingDirectory= to your absolute repo checkout
+#     - Optionally EnvironmentFile=-/path/to/archon.env (JWT_SECRET, MONGODB_URI + ARCHON_LOCAL_MONGO=0 for remote Mongo, NEXT_PUBLIC_ARCHON_SYNC_API_URL for web builds, ARCHON_HOST_PROJECT for --profile legacy, etc.)
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now archon-docker-stack
+#
+# Order: enable docker.service first; enable cloudflared separately if you use a tunnel.
+
+[Unit]
+Description=Archon Docker stack (compose)
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/srv/archon-studio/archon
+# Optional: secrets and overrides (leading - means ignore if missing)
+# EnvironmentFile=-/etc/archon/archon.env
+ExecStart=/srv/archon-studio/archon/scripts/docker-stack-boot.sh
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

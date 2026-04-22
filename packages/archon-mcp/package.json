@@ -1,0 +1,34 @@
+{
+  "name": "@archon-studio/mcp",
+  "version": "0.0.13",
+  "description": "MCP server (stdio / SSE / Streamable HTTP) for Archon WPN — cloud sync-api or Electron loopback",
+  "type": "module",
+  "files": [
+    "dist",
+    "bin"
+  ],
+  "bin": {
+    "mcp": "bin/archon-mcp.js",
+    "archon-mcp": "bin/archon-mcp.js",
+    "archon-mcp-http": "bin/archon-mcp-http.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "dev": "tsx src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/resolve-note.test.ts src/find-wpn.test.ts src/resolve-parent-in-tree.test.ts src/wpn-client.cache.test.ts src/wpn-client.switch-org.test.ts src/mcp-cloud-auth-persist.test.ts src/note-link-extract.test.ts src/note-vfs-resolve.test.ts src/get-image-note.test.ts src/strip-image-metadata.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "express": "^5.2.1",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

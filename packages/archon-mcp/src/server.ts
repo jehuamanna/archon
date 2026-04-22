@@ -1,0 +1,1615 @@
+import fs from "node:fs";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { loadMcpAuthRuntime, type McpAuthRuntime } from "./config.js";
+import {
+  clearPersistedMcpAuth,
+  writePersistedMcpAuth,
+} from "./mcp-cloud-auth-persist.js";
+import { mapWpnCaughtError, unauthenticatedToolResult } from "./mcp-unauthenticated.js";
+import { findNotesByQuery, findProjectsByQuery } from "./find-wpn.js";
+import { parseParentWpnPath, resolveParentInTree } from "./resolve-parent-in-tree.js";
+import { resolveNoteFromCatalog } from "./resolve-note.js";
+import { errorResult, jsonResult, type ToolReturn } from "./text-result.js";
+import {
+  WpnHttpClient,
+  type WpnNoteDetail,
+  type WpnNoteListItem,
+  type WpnNoteWithContextRow,
+} from "./wpn-client.js";
+import {
+  DEFAULT_MAX_BYTES as GET_IMAGE_NOTE_DEFAULT_MAX_BYTES,
+  handleGetImageNote,
+} from "./get-image-note.js";
+import { extractReferencedLinksFromMarkdown } from "./note-link-extract.js";
+import {
+  canonicalVfsPathFromRow,
+  resolveVfsHrefToNoteId,
+} from "./note-vfs-resolve.js";
+
+const resolveInput = z.object({
+  workspaceName: z.string().describe("Workspace name (trimmed, case-insensitive match)"),
+  projectName: z.string().describe("Project name (trimmed, case-insensitive match)"),
+  noteTitle: z.string().describe("Note title (trimmed, case-insensitive match)"),
+});
+
+const getNoteInput = z.object({
+  noteId: z.string().describe("Canonical note UUID"),
+});
+
+const getImageNoteInput = z.object({
+  noteId: z.string().describe("Canonical note UUID of an image-type note"),
+  mode: z
+    .enum(["auto", "inline", "base64", "url", "thumbnail"])
+    .optional()
+    .describe(
+      "Delivery mode. 'auto' (default) returns a native MCP image block unless the file exceeds maxBytes, in which case a signed URL is returned instead. 'inline' forces a native image block. 'base64' returns bytes as a JSON string. 'url' returns only a time-limited signed URL (no bytes). 'thumbnail' returns the PLAN-04 WebP thumb if present.",
+    ),
+  maxBytes: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Size ceiling for inline/base64 delivery. Over cap, falls back to 'url' with a reason string. Default 524288 (512 KiB).",
+    ),
+});
+
+const getNoteTitleInput = z.object({
+  noteId: z.string().describe("Canonical note UUID"),
+});
+
+const getNoteWithLinksInput = z.object({
+  noteId: z.string().describe("Canonical note UUID of the target note"),
+  maxNotes: z
+    .number()
+    .int()
+    .min(1)
+    .max(1000)
+    .optional()
+    .describe(
+      "Hard cap on total notes fetched (target + linked). Defaults to 200. When the cap is hit, stats.truncated is true and remaining ids are not fetched.",
+    ),
+  includeBacklinks: z
+    .boolean()
+    .optional()
+    .describe(
+      "When true (default), also include one-hop backlinks for the target note (notes referencing it).",
+    ),
+});
+
+const noteRenameInput = z.object({
+  noteId: z.string().describe("Canonical note UUID"),
+  title: z.string().describe("Full new title for the note (same as WPN PATCH title)."),
+});
+
+const findProjectsInput = z.object({
+  query: z.string().describe("Project name or project UUID"),
+  workspaceQuery: z
+    .string()
+    .optional()
+    .describe("Optional workspace name or UUID to limit search (required if project name clashes across workspaces)."),
+});
+
+const findNotesInput = z.object({
+  query: z.string().describe("Note title or note UUID"),
+  workspaceQuery: z
+    .string()
+    .optional()
+    .describe("Optional workspace name or UUID to narrow results"),
+  projectQuery: z
+    .string()
+    .optional()
+    .describe("Optional project name or UUID to narrow results"),
+});
+
+const executeNoteInput = z.object({
+  noteQuery: z
+    .string()
+    .describe("Note title or canonical note UUID (same matching rules as archon_find_notes)."),
+  workspaceQuery: z
+    .string()
+    .optional()
+    .describe("Optional workspace name or UUID to narrow results before fetch."),
+  projectQuery: z
+    .string()
+    .optional()
+    .describe("Optional project name or UUID to narrow results before fetch."),
+});
+
+const listWpnOverride = {
+  orgId: z
+    .string()
+    .optional()
+    .describe(
+      "Optional: override active org for this single call. Does not change the session's active org; use archon_set_active_org for that.",
+    ),
+  spaceId: z
+    .string()
+    .optional()
+    .describe("Optional: override active space for this single call."),
+};
+
+const listWpnInput = z.discriminatedUnion("scope", [
+  z.object({ scope: z.literal("workspaces"), ...listWpnOverride }),
+  z.object({
+    scope: z.literal("projects"),
+    workspaceId: z.string().describe("Workspace id from scope=workspaces"),
+    ...listWpnOverride,
+  }),
+  z.object({
+    scope: z.literal("notes"),
+    projectId: z.string().describe("Project id from scope=projects"),
+    ...listWpnOverride,
+  }),
+  z.object({ scope: z.literal("full_tree"), ...listWpnOverride }),
+]);
+
+const setActiveOrgInput = z.object({
+  orgId: z.string().min(1).describe("Target organization UUID (from archon_list_orgs)."),
+});
+
+const writeBackChildInput = z.object({
+  taskNoteId: z
+    .string()
+    .describe(
+      "The Archon note id the agent worked from; the write-back is created as a new direct child of this note.",
+    ),
+  title: z.string().describe("Title for the new child note (e.g. session summary or task outcome)."),
+  content: z.string().describe("Body for the new child note (markdown or plain text)."),
+  type: z
+    .string()
+    .optional()
+    .describe("Note type; defaults to markdown when omitted."),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
+
+const createChildNoteInput = z
+  .object({
+    parentNoteId: z
+      .string()
+      .optional()
+      .describe("Parent note UUID. When set, workspace/project/path fields are ignored."),
+    workspaceName: z
+      .string()
+      .optional()
+      .describe("With projectName + parentPathTitles, names the workspace (trim, case-insensitive)."),
+    projectName: z.string().optional().describe("Project name (trim, case-insensitive)."),
+    parentPathTitles: z
+      .array(z.string())
+      .optional()
+      .describe("Titles from a project root note down to the parent; each step is among direct children."),
+    parentWpnPath: z
+      .string()
+      .optional()
+      .describe('Convenience: "Workspace / Project / Title1 / …" split on ` / ` (space-slash-space).'),
+    title: z.string().describe("Title for the new child note."),
+    content: z.string().describe("Body for the new child note."),
+    type: z.string().optional().describe("Note type; defaults to markdown when omitted."),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  })
+  .superRefine((data, ctx) => {
+    const idTrim = data.parentNoteId?.trim() ?? "";
+    const hasId = idTrim.length > 0;
+    const pathTrim = data.parentWpnPath?.trim() ?? "";
+    const hasWpnPath = pathTrim.length > 0;
+    const ws = data.workspaceName?.trim() ?? "";
+    const proj = data.projectName?.trim() ?? "";
+    const titles = data.parentPathTitles;
+    const hasStruct =
+      ws.length > 0 && proj.length > 0 && Array.isArray(titles) && titles.length > 0;
+
+    const modes = (hasId ? 1 : 0) + (hasWpnPath ? 1 : 0) + (hasStruct ? 1 : 0);
+    if (modes !== 1) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Provide exactly one parent selector: parentNoteId, OR parentWpnPath, OR workspaceName + projectName + parentPathTitles (non-empty array).",
+      });
+      return;
+    }
+    if (hasStruct && titles) {
+      for (let i = 0; i < titles.length; i++) {
+        if (typeof titles[i] !== "string" || titles[i]!.trim() === "") {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `parentPathTitles[${i}] must be a non-empty string.`,
+          });
+          return;
+        }
+      }
+    }
+  });
+
+const writeNoteInput = z.discriminatedUnion("mode", [
+  z.object({
+    mode: z.literal("patch_existing"),
+    noteId: z.string(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    type: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
+  }),
+  z.object({
+    mode: z.literal("create_root"),
+    projectId: z.string(),
+    type: z.string(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }),
+  z.object({
+    mode: z.literal("create_child"),
+    projectId: z.string(),
+    anchorId: z.string(),
+    type: z.string(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }),
+  z.object({
+    mode: z.literal("create_sibling"),
+    projectId: z.string(),
+    anchorId: z.string(),
+    type: z.string(),
+    title: z.string().optional(),
+    content: z.string().optional(),
+    metadata: z.record(z.string(), z.unknown()).optional(),
+  }),
+]);
+
+const createWorkspaceInput = z.object({
+  name: z.string().min(1).describe("Name for the new workspace."),
+});
+
+const updateWorkspaceInput = z.object({
+  workspaceId: z.string().describe("Workspace UUID."),
+  name: z.string().optional().describe("New name for the workspace."),
+  sort_index: z.number().optional().describe("Sort order index."),
+  color_token: z.string().nullable().optional().describe("Color token string, or null to clear."),
+});
+
+const deleteWorkspaceInput = z.object({
+  workspaceId: z.string().describe("Workspace UUID to delete. Deletes all contained projects and notes."),
+});
+
+const createProjectInput = z.object({
+  workspaceId: z.string().describe("Parent workspace UUID."),
+  name: z.string().min(1).describe("Name for the new project."),
+});
+
+const updateProjectInput = z.object({
+  projectId: z.string().describe("Project UUID."),
+  name: z.string().optional().describe("New name for the project."),
+  sort_index: z.number().optional().describe("Sort order index."),
+  color_token: z.string().nullable().optional().describe("Color token string, or null to clear."),
+  workspace_id: z.string().optional().describe("Move project to a different workspace by id."),
+});
+
+const deleteProjectInput = z.object({
+  projectId: z.string().describe("Project UUID to delete. Deletes all contained notes."),
+});
+
+const deleteNotesInput = z.object({
+  ids: z.array(z.string()).min(1).describe("Array of note UUIDs to delete (bulk). Descendants are also removed."),
+});
+
+const moveNoteInput = z.object({
+  projectId: z.string().describe("Project UUID the note belongs to."),
+  draggedId: z.string().describe("Note UUID to move."),
+  targetId: z.string().describe("Note UUID that is the drop target."),
+  placement: z.enum(["before", "after", "into"]).describe(
+    "Where to place relative to target: before (sibling above), after (sibling below), into (first child of target).",
+  ),
+});
+
+const duplicateSubtreeInput = z.object({
+  projectId: z.string().describe("Project UUID."),
+  noteId: z.string().describe("Root note UUID of the subtree to duplicate."),
+});
+
+const backlinksInput = z.object({
+  noteId: z.string().describe("Note UUID to find backlinks for (notes whose content references this note)."),
+});
+
+const exportWorkspacesInput = z.object({
+  workspaceIds: z
+    .array(z.string())
+    .optional()
+    .describe("Optional list of workspace UUIDs to export. Omit to export all."),
+});
+
+const importWorkspacesInput = z.object({
+  zipBase64: z.string().describe("Base64-encoded ZIP file content from a previous export."),
+});
+
+const archonLoginInput = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+
+const archonLoginBrowserPollInput = z.object({
+  device_code: z.string().min(10).describe("Secret from archon_login_browser_start; do not log."),
+});
+
+function requireCloudAccess(runtime: McpAuthRuntime, client: WpnHttpClient): ToolReturn | null {
+  if (runtime.cloudSession && !client.getHolder().hasAccess()) {
+    return unauthenticatedToolResult(
+      "No access token. Call archon_login_browser_start (open verification_uri, complete login in browser, then archon_login_browser_poll), or archon_login, or set ARCHON_ACCESS_TOKEN.",
+    );
+  }
+  return null;
+}
+
+function wpnCatch(e: unknown, runtime: McpAuthRuntime): ToolReturn {
+  const mapped = mapWpnCaughtError(e, runtime.cloudSession);
+  if (mapped) {
+    return mapped;
+  }
+  const msg = e instanceof Error ? e.message : String(e);
+  return errorResult(msg);
+}
+
+/** Compose "Workspace / Project / Title" for an image note, or null when the context catalog misses it. */
+async function resolveNotePathForImage(
+  client: WpnHttpClient,
+  note: WpnNoteDetail,
+): Promise<string | null> {
+  try {
+    const rows = await client.getNotesWithContext();
+    const row = rows.find((r) => r.id === note.id);
+    if (!row) return null;
+    return `${row.workspace_name} / ${row.project_name} / ${row.title}`;
+  } catch {
+    return null;
+  }
+}
+
+/** GET a signed R2 URL and return its raw bytes. */
+async function fetchSignedImageBytes(
+  url: string,
+): Promise<{ bytes: Uint8Array; mimeType: string }> {
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`signed-URL GET failed (${res.status})`);
+  }
+  const mimeType = res.headers.get("content-type") ?? "";
+  const buf = await res.arrayBuffer();
+  return { bytes: new Uint8Array(buf), mimeType };
+}
+
+function persistIfNeeded(runtime: McpAuthRuntime): void {
+  if (runtime.mode !== "cloud_session" || !runtime.persistPath) {
+    return;
+  }
+  const h = runtime.holder;
+  if (!h.hasAccess()) {
+    return;
+  }
+  writePersistedMcpAuth(runtime.persistPath, {
+    accessToken: h.accessToken,
+    refreshToken: h.refreshToken ?? "",
+  });
+}
+
+async function postJsonUnauthed(
+  baseUrl: string,
+  apiPath: string,
+  body: unknown,
+): Promise<{ ok: boolean; status: number; json: unknown }> {
+  const p = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+  const url = `${baseUrl}${p}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  let json: unknown = {};
+  try {
+    json = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    json = {};
+  }
+  return { ok: res.ok, status: res.status, json };
+}
+
+function parseJwtUnverified(accessToken: string): {
+  unverified_sub?: string;
+  access_expires_at_ms?: number;
+} {
+  const parts = accessToken.split(".");
+  if (parts.length < 2) {
+    return {};
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as {
+      sub?: string;
+      exp?: number;
+    };
+    const out: { unverified_sub?: string; access_expires_at_ms?: number } = {};
+    if (typeof payload.sub === "string") {
+      out.unverified_sub = payload.sub;
+    }
+    if (typeof payload.exp === "number" && Number.isFinite(payload.exp)) {
+      out.access_expires_at_ms = payload.exp * 1000;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+const MCP_INSTRUCTIONS =
+  "Archon WPN tools: archon_list_wpn lists workspaces / projects / notes or a full_tree; " +
+  "archon_create_workspace / archon_update_workspace / archon_delete_workspace manage workspaces; " +
+  "archon_create_project / archon_update_project / archon_delete_project manage projects; " +
+  "archon_find_projects / archon_find_notes resolve by name or UUID with path (Workspace / Project / Title) and ambiguity hints; " +
+  "archon_resolve_note finds a noteId from workspace+project+title; archon_get_note reads a note (markdown + metadata, never image bytes); " +
+  "archon_get_image_note delivers an image-type note's bytes (auto|inline|base64|url|thumbnail), defaulting to a native MCP image block and falling back to a signed URL over the 512 KiB cap — EXIF/text metadata is stripped for JPEG/PNG/WebP in byte-returning modes (url mode streams raw R2 bytes); " +
+  "archon_get_note_title returns only { noteId, title } for composing renames; archon_note_rename PATCHes the full title (duplicate sibling title → error); " +
+  "archon_execute_note resolves by title or id, returns ambiguity (path + noteId per candidate) for the user to pick, or returns the full note when unique — then the agent follows note.content; " +
+  "archon_create_child_note creates a direct child under a parent given by parentNoteId OR by workspace+project+nested title path OR parentWpnPath string; " +
+  "archon_write_note patches or creates notes; archon_delete_notes bulk-deletes notes by id; archon_move_note reparents/reorders a note (before/after/into); archon_duplicate_subtree copies a note branch; " +
+  "archon_backlinks finds notes referencing a given note id; archon_export_workspaces / archon_import_workspaces handle ZIP-based backup and restore; " +
+  "archon_write_back_child creates a child under a task note after completing work scoped to that note. " +
+  "Write-back policy: when you finish work that was driven by a specific Archon note, call archon_write_back_child with taskNoteId equal to that note so the outcome is attached as a new direct child (audit trail). " +
+  "If that note already has other children, still attach the write-back as a new direct child of the same task note unless the user asked for a different placement. " +
+  "Tool overlap is intentional: archon_execute_note equals find_notes then get_note when unique; archon_write_back_child equals get_note then write_note create_child when you only have taskNoteId; archon_create_child_note overlaps write_back when you need path-based parent resolution. " +
+  "Auth: use ARCHON_SYNC_API_BASE + ARCHON_ACCESS_TOKEN (cloud), ARCHON_LOCAL_WPN_URL + ARCHON_LOCAL_WPN_TOKEN (Electron loopback), or ARCHON_MCP_CLOUD_SESSION=1 for browser (archon_login_browser_*) or password (archon_login). " +
+  "If any tool returns JSON with error \"unauthenticated\" and suggested_tools, call archon_login_browser_start first (preferred), complete the browser step, use archon_login_browser_poll with device_code until authorized, or use archon_login — do not use archon_logout for that case. " +
+  "archon_auth_status reports session state without exposing secrets. " +
+  "Cross-org: archon_list_orgs lists the user's orgs; archon_set_active_org flips the session to another org (re-issues JWT, resets active space); archon_list_wpn accepts optional orgId/spaceId for a one-shot read against a different org without changing the session.";
+
+/**
+ * Create a fully-configured McpServer with all Archon WPN tools registered.
+ * Reusable across transports (stdio, SSE, Streamable HTTP).
+ */
+export function createArchonMcpServer(
+  runtime: McpAuthRuntime,
+  client: WpnHttpClient,
+): McpServer {
+  const mcp = new McpServer(
+    { name: "archon-mcp", version: "0.0.0" },
+    {
+      capabilities: {
+        tools: {},
+      },
+      instructions: MCP_INSTRUCTIONS,
+    },
+  );
+
+  mcp.registerTool(
+    "archon_find_projects",
+    {
+      description:
+        "Find project(s) by name or id. Returns status unique | ambiguous | none | workspace_ambiguous; " +
+        "each match includes projectId, names, and path \"Workspace / Project\". On clash, all candidates are listed.",
+      inputSchema: findProjectsInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const result = await findProjectsByQuery(client, args.query, args.workspaceQuery);
+        return jsonResult(result);
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_find_notes",
+    {
+      description:
+        "Find note(s) by title or id using GET /wpn/notes-with-context. Optional workspaceQuery / projectQuery narrow scope. " +
+        "Returns status unique | ambiguous | none | workspace_ambiguous | project_ambiguous; " +
+        "each match includes noteId, title, and path \"Workspace / Project / Title\".",
+      inputSchema: findNotesInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const rows = await client.getNotesWithContext();
+        const result = findNotesByQuery(
+          rows,
+          args.query,
+          args.workspaceQuery,
+          args.projectQuery,
+        );
+        return jsonResult(result);
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_list_wpn",
+    {
+      description:
+        "List WPN data: workspaces (GET /wpn/workspaces), projects in a workspace, flat note tree for a project, or full_tree (all nested). " +
+        "Optional orgId / spaceId override the active context for this single call only (restored afterwards).",
+      inputSchema: listWpnInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      const orgOverride = args.orgId?.trim() || null;
+      const spaceOverride = args.spaceId?.trim() || null;
+      const prevOrg = runtime.holder.activeOrgId;
+      const prevSpace = runtime.holder.activeSpaceId;
+      const restoreHolder = orgOverride !== null || spaceOverride !== null;
+      if (restoreHolder) {
+        if (orgOverride !== null) runtime.holder.setActiveOrg(orgOverride);
+        if (spaceOverride !== null) runtime.holder.setActiveSpace(spaceOverride);
+        client.invalidateNotesWithContextCache();
+      }
+      try {
+        if (args.scope === "workspaces") {
+          const workspaces = await client.getWorkspaces();
+          return jsonResult({ scope: "workspaces", workspaces });
+        }
+        if (args.scope === "projects") {
+          const projects = await client.getProjects(args.workspaceId);
+          return jsonResult({
+            scope: "projects",
+            workspaceId: args.workspaceId,
+            projects,
+          });
+        }
+        if (args.scope === "notes") {
+          const notes = await client.getNotesFlat(args.projectId);
+          return jsonResult({ scope: "notes", projectId: args.projectId, notes });
+        }
+        const workspaces = await client.getWorkspaces();
+        type Row = { id: string; name?: string };
+        const wsRows = workspaces as Row[];
+        const tree: {
+          workspace: Row;
+          projects: { project: Row; notes: unknown[] }[];
+        }[] = [];
+        for (const w of wsRows) {
+          const projectsRaw = await client.getProjects(w.id);
+          const projects = projectsRaw as Row[];
+          const projectBlocks: { project: Row; notes: unknown[] }[] = [];
+          for (const p of projects) {
+            const notes = await client.getNotesFlat(p.id);
+            projectBlocks.push({ project: p, notes });
+          }
+          tree.push({ workspace: w, projects: projectBlocks });
+        }
+        return jsonResult({ scope: "full_tree", tree });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      } finally {
+        if (restoreHolder) {
+          runtime.holder.setActiveOrg(prevOrg);
+          runtime.holder.setActiveSpace(prevSpace);
+          client.invalidateNotesWithContextCache();
+        }
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_create_workspace",
+    {
+      description:
+        "Create a new workspace. Returns the workspace id and name.",
+      inputSchema: createWorkspaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const workspace = await client.createWorkspace(args.name);
+        return jsonResult({ ok: true as const, workspace });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_update_workspace",
+    {
+      description: "Update a workspace (rename, reorder, change color). Returns the updated workspace.",
+      inputSchema: updateWorkspaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const patch: { name?: string; sort_index?: number; color_token?: string | null } = {};
+        if (args.name !== undefined) patch.name = args.name;
+        if (args.sort_index !== undefined) patch.sort_index = args.sort_index;
+        if (args.color_token !== undefined) patch.color_token = args.color_token;
+        const workspace = await client.updateWorkspace(args.workspaceId, patch);
+        return jsonResult({ ok: true as const, workspace });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_delete_workspace",
+    {
+      description:
+        "Delete a workspace and all its projects and notes. This is irreversible.",
+      inputSchema: deleteWorkspaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.deleteWorkspace(args.workspaceId);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_create_project",
+    {
+      description:
+        "Create a new project inside a workspace. Returns the project id and name.",
+      inputSchema: createProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const project = await client.createProject(args.workspaceId, args.name);
+        return jsonResult({ ok: true as const, project });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_update_project",
+    {
+      description:
+        "Update a project (rename, reorder, change color, move to different workspace). Returns the updated project.",
+      inputSchema: updateProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const patch: { name?: string; sort_index?: number; color_token?: string | null; workspace_id?: string } = {};
+        if (args.name !== undefined) patch.name = args.name;
+        if (args.sort_index !== undefined) patch.sort_index = args.sort_index;
+        if (args.color_token !== undefined) patch.color_token = args.color_token;
+        if (args.workspace_id !== undefined) patch.workspace_id = args.workspace_id;
+        const project = await client.updateProject(args.projectId, patch);
+        return jsonResult({ ok: true as const, project });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_delete_project",
+    {
+      description:
+        "Delete a project and all its notes. This is irreversible.",
+      inputSchema: deleteProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.deleteProject(args.projectId);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_delete_notes",
+    {
+      description:
+        "Bulk delete notes by id. Descendants of each note are also removed. This is irreversible.",
+      inputSchema: deleteNotesInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.deleteNotes(args.ids);
+        return jsonResult({ ok: true as const, deletedIds: args.ids });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_move_note",
+    {
+      description:
+        "Move a note within its project tree. Placement: 'before' (sibling above target), 'after' (sibling below target), 'into' (first child of target).",
+      inputSchema: moveNoteInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.moveNote(args.projectId, args.draggedId, args.targetId, args.placement);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_duplicate_subtree",
+    {
+      description:
+        "Duplicate a note and all its descendants within the same project. Returns the new root note id.",
+      inputSchema: duplicateSubtreeInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const result = await client.duplicateSubtree(args.projectId, args.noteId);
+        return jsonResult({ ok: true as const, ...((result && typeof result === "object") ? result : {}) });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_backlinks",
+    {
+      description:
+        "Find all notes that reference a given note id in their content (backlinks / incoming references). Returns source note ids, titles, and project ids.",
+      inputSchema: backlinksInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const sources = await client.getBacklinks(args.noteId);
+        return jsonResult({ noteId: args.noteId, sources });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_export_workspaces",
+    {
+      description:
+        "Export workspaces as a ZIP archive (base64-encoded). Optionally filter by workspace ids. Returns base64 string of the ZIP.",
+      inputSchema: exportWorkspacesInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const buf = await client.exportWorkspaces(args.workspaceIds);
+        const b64 = Buffer.from(buf).toString("base64");
+        return jsonResult({ ok: true as const, zipBase64Length: b64.length, zipBase64: b64 });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_import_workspaces",
+    {
+      description:
+        "Import workspaces from a base64-encoded ZIP archive (from a previous archon_export_workspaces). Merges imported data.",
+      inputSchema: importWorkspacesInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const buf = Buffer.from(args.zipBase64, "base64");
+        const result = await client.importWorkspaces(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        return jsonResult({ ok: true as const, result });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.tool(
+    "archon_resolve_note",
+    "Resolve a note to its canonical UUID using workspace name, project name, and note title. " +
+      "Matching is trim + case-insensitive. Returns an error if zero or multiple notes match.",
+    resolveInput.shape,
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const rows = await client.getNotesWithContext();
+        const r = resolveNoteFromCatalog(rows, {
+          workspaceName: args.workspaceName,
+          projectName: args.projectName,
+          noteTitle: args.noteTitle,
+        });
+        if (!r.ok) {
+          return errorResult(
+            JSON.stringify(
+              {
+                error:
+                  r.reason === "none"
+                    ? "No note matched workspace/project/title."
+                    : "Multiple notes matched; disambiguate titles or use noteId from candidates.",
+                reason: r.reason,
+                candidates: r.candidates,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+        return jsonResult({
+          noteId: r.noteId,
+          workspaceId: r.workspaceId,
+          workspaceName: r.workspaceName,
+          projectId: r.projectId,
+          projectName: r.projectName,
+          title: r.title,
+          type: r.type,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.tool(
+    "archon_get_note",
+    "Fetch a single note by id (includes content and metadata).",
+    getNoteInput.shape,
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const note = await client.getNote(args.noteId);
+        return jsonResult({ note });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.tool(
+    "archon_get_image_note",
+    `Fetch an image-type note's bytes in an MCP-friendly form. Modes: 'auto' (native image block, falls back to signed URL over ${GET_IMAGE_NOTE_DEFAULT_MAX_BYTES} bytes), 'inline' (force native image block), 'base64' (JSON with dataBase64), 'url' (no bytes, just a short-lived signed URL), 'thumbnail' (PLAN-04 WebP thumb). Always returns metadata { noteId, title, path, mimeType, sizeBytes, width, height }. Byte-returning modes strip EXIF / text metadata for JPEG / PNG / WebP (url mode streams raw R2 bytes). Errors on non-image notes; callers should use archon_get_note for markdown.`,
+    getImageNoteInput.shape,
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        return await handleGetImageNote(args, {
+          getNote: (id) => client.getNote(id),
+          resolvePath: (note) => resolveNotePathForImage(client, note),
+          signAssetKey: (key) => client.signAssetKey(key),
+          fetchBytes: fetchSignedImageBytes,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_get_note_with_links",
+    {
+      description:
+        "Fetch a note plus the full transitive set of notes it links to (forward refs in markdown content), deduped by noteId, with optional one-hop backlinks. " +
+        "Walks both `[label](#/n/<id>)` and `[label](#/w/<vfsPath>)` references breadth-first. VFS paths support canonical (`Workspace/Project/Title`), same-project-relative (`./Title`), and tree-relative (`../sibling`) forms. " +
+        "Skips already-visited ids (cycle-safe). Stops fetching when the hard cap is reached and reports stats.truncated=true. Id-fetch errors land in `unresolved`; unresolvable VFS paths land in `unresolvedVfsLinks`.",
+      inputSchema: getNoteWithLinksInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      const cap = args.maxNotes ?? 200;
+      const includeBacklinks = args.includeBacklinks ?? true;
+      try {
+        const catalog = await client.getNotesWithContext();
+        const catalogById = new Map<string, WpnNoteWithContextRow>();
+        const catalogByCanonical = new Map<string, string>();
+        for (const r of catalog) {
+          catalogById.set(r.id, r);
+          catalogByCanonical.set(canonicalVfsPathFromRow(r), r.id);
+        }
+        const projectTreeCache = new Map<string, WpnNoteListItem[]>();
+        const getProjectTree = async (projectId: string): Promise<WpnNoteListItem[]> => {
+          const hit = projectTreeCache.get(projectId);
+          if (hit) return hit;
+          const tree = await client.getNotesFlat(projectId);
+          projectTreeCache.set(projectId, tree);
+          return tree;
+        };
+
+        const seed = await client.getNote(args.noteId);
+        const visited = new Set<string>([seed.id]);
+        const linkedNotes: Record<string, WpnNoteDetail> = {};
+        const unresolved: { id: string; error: string }[] = [];
+        const unresolvedVfsLinks: {
+          vfsPath: string;
+          baseNoteId: string;
+          reason: string;
+        }[] = [];
+        const queue: string[] = [];
+        let truncated = false;
+
+        const enqueueLinksFrom = async (n: WpnNoteDetail) => {
+          const { noteIds, vfsHrefPaths } = extractReferencedLinksFromMarkdown(
+            n.content ?? "",
+          );
+          for (const id of noteIds) {
+            if (!visited.has(id)) queue.push(id);
+          }
+          if (vfsHrefPaths.length === 0) return;
+          const baseRow = catalogById.get(n.id);
+          if (!baseRow) {
+            for (const p of vfsHrefPaths) {
+              unresolvedVfsLinks.push({
+                vfsPath: p,
+                baseNoteId: n.id,
+                reason: "base note missing from catalog",
+              });
+            }
+            return;
+          }
+          for (const p of vfsHrefPaths) {
+            const res = await resolveVfsHrefToNoteId(p, baseRow, {
+              catalogByCanonical,
+              getProjectTree,
+            });
+            if (res.ok) {
+              if (!visited.has(res.noteId)) queue.push(res.noteId);
+            } else {
+              unresolvedVfsLinks.push({
+                vfsPath: p,
+                baseNoteId: n.id,
+                reason: res.reason,
+              });
+            }
+          }
+        };
+
+        await enqueueLinksFrom(seed);
+
+        while (queue.length > 0) {
+          if (visited.size >= cap) {
+            truncated = true;
+            break;
+          }
+          const id = queue.shift()!;
+          if (visited.has(id)) continue;
+          visited.add(id);
+          try {
+            const detail = await client.getNote(id);
+            linkedNotes[id] = detail;
+            await enqueueLinksFrom(detail);
+          } catch (e) {
+            unresolved.push({
+              id,
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
+
+        const backlinks = includeBacklinks
+          ? await client.getBacklinks(args.noteId).catch(() => [])
+          : [];
+
+        return jsonResult({
+          note: seed,
+          linkedNotes,
+          backlinks,
+          unresolved,
+          unresolvedVfsLinks,
+          stats: {
+            fetched: 1 + Object.keys(linkedNotes).length,
+            unresolvedCount: unresolved.length,
+            unresolvedVfsCount: unresolvedVfsLinks.length,
+            truncated,
+            cap,
+          },
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_get_note_title",
+    {
+      description:
+        "Return the current title for a note id without fetching full content. Use with archon_note_rename to prepend e.g. DONE or fix typos.",
+      inputSchema: getNoteTitleInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const note = await client.getNote(args.noteId);
+        return jsonResult({ noteId: note.id, title: note.title });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_note_rename",
+    {
+      description:
+        "Rename a note by id (PATCH title only). Fails with a clear error if another sibling under the same parent already uses that title.",
+      inputSchema: noteRenameInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const note = await client.patchNote(args.noteId, { title: args.title });
+        return jsonResult({ ok: true as const, note });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_execute_note",
+    {
+      description:
+        "Resolve a task note by title or UUID (optional workspaceQuery / projectQuery), then fetch it when the match is unique. " +
+        "If multiple notes share the title, returns status ambiguous with each candidate's full path and noteId — have the user pick one, then call again with noteQuery set to that UUID (or narrow filters). " +
+        "On success, the agent should read note.content and follow those instructions in the session.",
+      inputSchema: executeNoteInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const rows = await client.getNotesWithContext();
+        const resolved = findNotesByQuery(
+          rows,
+          args.noteQuery,
+          args.workspaceQuery,
+          args.projectQuery,
+        );
+        if (resolved.status !== "unique") {
+          return jsonResult({
+            stage: "needs_resolution" as const,
+            ...resolved,
+            nextStep:
+              "If ambiguous, show the user each path and noteId from matches; after they choose, call archon_execute_note again with noteQuery equal to the chosen noteId (or narrow workspaceQuery/projectQuery).",
+          });
+        }
+        const note = await client.getNote(resolved.matches[0]!.noteId);
+        return jsonResult({
+          stage: "fetched" as const,
+          match: resolved.matches[0],
+          note,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_create_child_note",
+    {
+      description:
+        "Create a new note as direct child of a parent resolved by parentNoteId, OR workspaceName+projectName+parentPathTitles (root-to-parent title chain), OR parentWpnPath (\"Workspace / Project / Title / …\"). " +
+        "Returns project ambiguity like archon_find_projects or path ambiguity with candidate noteIds. Uses GET /wpn/projects/:id/notes for tree walk (same norm as archon_resolve_note).",
+      inputSchema: createChildNoteInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const idTrim = args.parentNoteId?.trim() ?? "";
+        if (idTrim.length > 0) {
+          const parent = await client.getNote(idTrim);
+          const noteType = (args.type ?? "markdown").trim() || "markdown";
+          const created = await client.createNote(parent.project_id, {
+            type: noteType,
+            relation: "child",
+            anchorId: parent.id,
+            title: args.title,
+            content: args.content,
+            metadata: args.metadata,
+          });
+          return jsonResult({
+            ok: true as const,
+            parentNoteId: parent.id,
+            projectId: parent.project_id,
+            createdNoteId: created.id,
+          });
+        }
+
+        let workspaceName: string;
+        let projectName: string;
+        let parentPathTitles: string[];
+
+        const wpnTrim = args.parentWpnPath?.trim() ?? "";
+        if (wpnTrim.length > 0) {
+          const parsed = parseParentWpnPath(wpnTrim);
+          if (!parsed.ok) {
+            return errorResult(parsed.error);
+          }
+          workspaceName = parsed.workspaceName;
+          projectName = parsed.projectName;
+          parentPathTitles = parsed.parentPathTitles;
+        } else {
+          workspaceName = args.workspaceName!.trim();
+          projectName = args.projectName!.trim();
+          parentPathTitles = args.parentPathTitles!;
+        }
+
+        const proj = await findProjectsByQuery(client, projectName, workspaceName);
+        if (proj.status !== "unique") {
+          return jsonResult({ ok: false as const, stage: "project_resolution" as const, ...proj });
+        }
+        const projectId = proj.matches[0]!.projectId;
+        const flat = await client.getNotesFlat(projectId);
+        const resolved = resolveParentInTree(flat, parentPathTitles);
+        if (!resolved.ok) {
+          return jsonResult({ stage: "parent_path" as const, ...resolved });
+        }
+        const noteType = (args.type ?? "markdown").trim() || "markdown";
+        const created = await client.createNote(resolved.projectId, {
+          type: noteType,
+          relation: "child",
+          anchorId: resolved.parentId,
+          title: args.title,
+          content: args.content,
+          metadata: args.metadata,
+        });
+        return jsonResult({
+          ok: true as const,
+          parentNoteId: resolved.parentId,
+          projectId: resolved.projectId,
+          createdNoteId: created.id,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_write_back_child",
+    {
+      description:
+        "After completing work scoped to a Archon task note, persist results as a new direct child of that note (GET task note for project, then POST create child). " +
+        "Prefer this over archon_write_note create_child when you only know taskNoteId.",
+      inputSchema: writeBackChildInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        const task = await client.getNote(args.taskNoteId);
+        const noteType = (args.type ?? "markdown").trim() || "markdown";
+        const created = await client.createNote(task.project_id, {
+          type: noteType,
+          relation: "child",
+          anchorId: args.taskNoteId,
+          title: args.title,
+          content: args.content,
+          metadata: args.metadata,
+        });
+        return jsonResult({
+          ok: true as const,
+          taskNoteId: args.taskNoteId,
+          projectId: task.project_id,
+          createdNoteId: created.id,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_write_note",
+    {
+      description:
+        "Create or patch a note. Modes: patch_existing (PATCH), create_root | create_child | create_sibling (POST with relation).",
+      inputSchema: writeNoteInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) {
+        return denied;
+      }
+      try {
+        if (args.mode === "patch_existing") {
+          const patch: {
+            title?: string;
+            content?: string;
+            type?: string;
+            metadata?: Record<string, unknown> | null;
+          } = {};
+          if (args.title !== undefined) {
+            patch.title = args.title;
+          }
+          if (args.content !== undefined) {
+            patch.content = args.content;
+          }
+          if (args.type !== undefined) {
+            patch.type = args.type;
+          }
+          if (args.metadata !== undefined) {
+            patch.metadata = args.metadata;
+          }
+          const note = await client.patchNote(args.noteId, patch);
+          return jsonResult({ ok: true as const, note });
+        }
+        const relation =
+          args.mode === "create_root"
+            ? ("root" as const)
+            : args.mode === "create_child"
+              ? ("child" as const)
+              : ("sibling" as const);
+        const anchorId = args.mode === "create_root" ? undefined : args.anchorId;
+        const body = {
+          type: args.type,
+          relation,
+          anchorId,
+          title: args.title,
+          content: args.content,
+          metadata: args.metadata,
+        };
+        const created = await client.createNote(args.projectId, body);
+        return jsonResult({ ok: true as const, created });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_login",
+    {
+      description:
+        "Cloud session only: sign in with email and password against ARCHON_SYNC_API_BASE. Tokens are stored in-memory and optionally on disk (see README). Passwords may appear in host logs.",
+      inputSchema: archonLoginInput,
+    },
+    async (args) => {
+      if (!runtime.cloudSession) {
+        return errorResult("archon_login is only available when ARCHON_MCP_CLOUD_SESSION=1.");
+      }
+      const r = await postJsonUnauthed(runtime.baseUrl, "/auth/login", {
+        email: args.email,
+        password: args.password,
+        client: "mcp",
+      });
+      if (!r.ok) {
+        const err = (r.json as { error?: string })?.error ?? `login failed (${r.status})`;
+        return errorResult(typeof err === "string" ? err : JSON.stringify(err));
+      }
+      const j = r.json as { token?: string; refreshToken?: string; userId?: string };
+      if (typeof j.token !== "string" || !j.token.trim()) {
+        return errorResult("Login response missing token.");
+      }
+      const rt =
+        typeof j.refreshToken === "string" && j.refreshToken.trim()
+          ? j.refreshToken.trim()
+          : null;
+      runtime.holder.setTokens(j.token.trim(), rt);
+      persistIfNeeded(runtime);
+      return jsonResult({
+        ok: true,
+        userId: typeof j.userId === "string" ? j.userId : undefined,
+        message: "Session established. WPN tools are available.",
+      });
+    },
+  );
+
+  mcp.registerTool(
+    "archon_login_browser_start",
+    {
+      description:
+        "Start browser-based MCP login. Returns verification_uri (open in browser), device_code (secret — pass only to archon_login_browser_poll), user_code, expires_in. Requires ARCHON_MCP_CLOUD_SESSION=1.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      if (!runtime.cloudSession) {
+        return errorResult(
+          "archon_login_browser_start requires ARCHON_MCP_CLOUD_SESSION=1 and ARCHON_SYNC_API_BASE.",
+        );
+      }
+      const r = await postJsonUnauthed(runtime.baseUrl, "/auth/mcp/device/start", {});
+      if (!r.ok) {
+        const err = (r.json as { error?: string })?.error ?? `start failed (${r.status})`;
+        return errorResult(typeof err === "string" ? err : JSON.stringify(err));
+      }
+      const j = r.json as {
+        device_code?: string;
+        verification_uri?: string;
+        user_code?: string;
+        expires_in?: number;
+        interval?: number;
+      };
+      if (typeof j.device_code !== "string" || typeof j.verification_uri !== "string") {
+        return errorResult("Invalid device/start response.");
+      }
+      return jsonResult({
+        nextStep:
+          "Open verification_uri in a browser, sign in, authorize MCP access, then call archon_login_browser_poll with device_code until status is authorized.",
+        device_code: j.device_code,
+        verification_uri: j.verification_uri,
+        user_code: j.user_code,
+        expires_in: j.expires_in,
+        interval: j.interval ?? 2,
+      });
+    },
+  );
+
+  mcp.registerTool(
+    "archon_login_browser_poll",
+    {
+      description:
+        "Poll after browser login. Pass device_code from archon_login_browser_start. On status authorized, session is stored (and persisted when configured).",
+      inputSchema: archonLoginBrowserPollInput,
+    },
+    async (args) => {
+      if (!runtime.cloudSession) {
+        return errorResult("archon_login_browser_poll requires ARCHON_MCP_CLOUD_SESSION=1.");
+      }
+      const r = await postJsonUnauthed(runtime.baseUrl, "/auth/mcp/device/token", {
+        device_code: args.device_code,
+      });
+      if (!r.ok) {
+        return errorResult(`token poll failed (${r.status})`);
+      }
+      const j = r.json as {
+        status?: string;
+        token?: string;
+        refreshToken?: string;
+        userId?: string;
+      };
+      if (j.status === "pending" || j.status === "invalid") {
+        return jsonResult({
+          status: j.status,
+          message:
+            j.status === "pending"
+              ? "Still waiting for browser authorization."
+              : "Invalid or expired device_code.",
+        });
+      }
+      if (j.status === "expired") {
+        return jsonResult({ status: "expired", message: "Login request expired; start again." });
+      }
+      if (j.status !== "authorized") {
+        return jsonResult({ status: j.status ?? "unknown", raw: j });
+      }
+      if (typeof j.token !== "string" || !j.token.trim()) {
+        return errorResult("Authorized response missing token.");
+      }
+      const rt =
+        typeof j.refreshToken === "string" && j.refreshToken.trim()
+          ? j.refreshToken.trim()
+          : null;
+      runtime.holder.setTokens(j.token.trim(), rt);
+      persistIfNeeded(runtime);
+      return jsonResult({
+        ok: true,
+        status: "authorized",
+        userId: typeof j.userId === "string" ? j.userId : undefined,
+        message: "Session established. WPN tools are available.",
+      });
+    },
+  );
+
+  mcp.registerTool(
+    "archon_logout",
+    {
+      description: "Clear MCP cloud session (memory and persisted file when applicable).",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      runtime.holder.clear();
+      client.invalidateNotesWithContextCache();
+      if (runtime.persistPath) {
+        clearPersistedMcpAuth(runtime.persistPath);
+      }
+      return jsonResult({ ok: true as const });
+    },
+  );
+
+  mcp.registerTool(
+    "archon_list_orgs",
+    {
+      description:
+        "List organizations the authenticated user belongs to. Returns { orgs, activeOrgId, defaultOrgId, activeSpaceId }. " +
+        "Use archon_set_active_org to switch, or pass orgId on archon_list_wpn for a one-shot read.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const r = await client.listMyOrgs();
+        return jsonResult({
+          orgs: r.orgs,
+          activeOrgId: runtime.holder.activeOrgId ?? r.activeOrgId ?? r.defaultOrgId ?? null,
+          defaultOrgId: r.defaultOrgId,
+          activeSpaceId: runtime.holder.activeSpaceId,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_set_active_org",
+    {
+      description:
+        "Switch the active organization for this MCP session. Re-issues the JWT (preserves refresh token), " +
+        "resets active space to the org's default (or last-used), invalidates the notes-with-context cache, " +
+        "and persists the new tokens when persistence is configured.",
+      inputSchema: setActiveOrgInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const result = await client.switchActiveOrg(args.orgId);
+        persistIfNeeded(runtime);
+        return jsonResult({
+          ok: true as const,
+          activeOrgId: result.activeOrgId,
+          activeSpaceId: result.activeSpaceId,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_auth_status",
+    {
+      description:
+        "Diagnostics: mode, authenticated, sync API host, persist file presence, JWT claims (unverified_sub / exp), and org list when authenticated — never includes raw tokens.",
+      inputSchema: z.object({}),
+    },
+    async () => {
+      const persistPath = runtime.persistPath;
+      const persist_file_present =
+        persistPath && fs.existsSync(persistPath) ? true : false;
+      let sync_base_host = "";
+      try {
+        sync_base_host = new URL(runtime.baseUrl).host;
+      } catch {
+        sync_base_host = "";
+      }
+      const access = runtime.holder.accessToken;
+      const jwtInfo = access ? parseJwtUnverified(access) : {};
+      let orgs: unknown = undefined;
+      let spaces: unknown = undefined;
+      let active_org_id: string | null = runtime.holder.activeOrgId;
+      let active_space_id: string | null = runtime.holder.activeSpaceId;
+      if (runtime.holder.hasAccess()) {
+        try {
+          const r = await client.listMyOrgs();
+          orgs = r.orgs;
+          if (!active_org_id) {
+            active_org_id = r.activeOrgId ?? r.defaultOrgId ?? null;
+            if (active_org_id) {
+              runtime.holder.setActiveOrg(active_org_id);
+            }
+          }
+        } catch {
+          /* org listing is best-effort; older servers may not have /orgs/me */
+        }
+        try {
+          const sr = await client.listMySpaces();
+          spaces = sr.spaces;
+          if (!active_space_id) {
+            const candidate =
+              sr.spaces.find((s) => s.orgId === active_org_id)?.spaceId ?? null;
+            if (candidate) {
+              active_space_id = candidate;
+              runtime.holder.setActiveSpace(candidate);
+            }
+          }
+        } catch {
+          /* space listing is best-effort; pre-Phase-2 servers don't have /spaces/me */
+        }
+      }
+      return jsonResult({
+        mode: runtime.mode,
+        cloud_session: runtime.cloudSession,
+        authenticated: runtime.holder.hasAccess(),
+        sync_base_host,
+        persist_file_path: persistPath ?? null,
+        persist_file_present,
+        active_org_id,
+        active_space_id,
+        ...(orgs ? { orgs } : {}),
+        ...(spaces ? { spaces } : {}),
+        ...jwtInfo,
+      });
+    },
+  );
+
+  return mcp;
+}
+
+export async function runMcpStdioServer(): Promise<void> {
+  const runtime = loadMcpAuthRuntime();
+  const client = new WpnHttpClient(runtime.baseUrl, runtime.holder, {
+    onTokensUpdated: () => persistIfNeeded(runtime),
+  });
+
+  const mcp = createArchonMcpServer(runtime, client);
+  const transport = new StdioServerTransport();
+  await mcp.connect(transport);
+}
+
+/**
+ * Create a runtime + client pair for use by HTTP transports.
+ * Each Streamable HTTP session needs its own McpServer, so callers
+ * use `createArchonMcpServer(runtime, client)` per session.
+ */
+export function loadMcpRuntimeAndClient(): {
+  runtime: McpAuthRuntime;
+  client: WpnHttpClient;
+} {
+  const runtime = loadMcpAuthRuntime();
+  const client = new WpnHttpClient(runtime.baseUrl, runtime.holder, {
+    onTokensUpdated: () => persistIfNeeded(runtime),
+  });
+  return { runtime, client };
+}

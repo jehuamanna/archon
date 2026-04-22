@@ -1,0 +1,289 @@
+/**
+ * Semantic design tokens (HSL components for hsl(var(--name))).
+ * Keep in sync with themeing-layout-architecture.md.
+ * Injected into plugin iframes via `tokens-raw.generated.ts` (see sync-iframe-tokens-raw.js).
+ */
+
+:root {
+  /* Typography */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, Cantarell, "Noto Sans",
+    "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji";
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  /* Type scale (used by .archon-typography) */
+  --font-size-h1: 1.875rem; /* 30px */
+  --font-size-h2: 1.5rem; /* 24px */
+  --font-size-h3: 1.25rem; /* 20px */
+  --font-size-h4: 1.125rem; /* 18px */
+  --font-size-h5: 1rem; /* 16px */
+  --font-size-h6: 0.875rem; /* 14px */
+  --font-size-body: 0.875rem; /* 14px */
+  --font-size-small: 0.75rem; /* 12px */
+  --font-size-code: 0.8125rem; /* 13px */
+
+  --line-height-h1: 1.2;
+  --line-height-h2: 1.25;
+  --line-height-h3: 1.3;
+  --line-height-h4: 1.35;
+  --line-height-h5: 1.4;
+  --line-height-h6: 1.45;
+  --line-height-body: 1.65;
+
+  --background: 210 20% 99%;
+  --foreground: 222.2 47% 11%;
+  --card: 0 0% 100%;
+  --card-foreground: 222.2 47% 11%;
+  --popover: 0 0% 100%;
+  --popover-foreground: 222.2 47% 11%;
+  --primary: 239 64% 48%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 210 35% 96%;
+  --secondary-foreground: 222.2 47.4% 11.2%;
+  --muted: 210 35% 96%;
+  --muted-foreground: 215.4 16.3% 46.9%;
+  --accent: 210 35% 96%;
+  --accent-foreground: 222.2 47.4% 11.2%;
+  --destructive: 0 84.2% 60.2%;
+  --destructive-foreground: 210 40% 98%;
+  --border: 214.3 28% 90%;
+  --input: 214.3 28% 90%;
+  --ring: 239 64% 48%;
+  --radius: 0.5rem;
+
+  --sidebar-background: 210 24% 98%;
+  --sidebar-foreground: 222.2 47% 11%;
+  --sidebar-primary: 239 64% 48%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 210 40% 96.1%;
+  --sidebar-accent-foreground: 222.2 47.4% 11.2%;
+  --sidebar-border: 214.3 31.8% 91.4%;
+  --sidebar-ring: 222.2 84% 4.9%;
+
+  --editor-background: 0 0% 100%;
+  --editor-foreground: 222.2 84% 4.9%;
+  --editor-muted-foreground: 215.4 16.3% 46.9%;
+  --editor-border: 214.3 31.8% 91.4%;
+  --editor-line-highlight: 210 40% 96.1%;
+  --editor-selection: 217.2 91.2% 59.8%;
+  --editor-selection-foreground: 210 40% 98%;
+  --code-background: 210 40% 96.1%;
+  --code-foreground: 222.2 47.4% 11.2%;
+
+  /* Splitter: neutral like VS Code (avoid saturated “accent” drag line) */
+  --resize-handle: 214.3 18% 88%;
+  --resize-handle-hover: 214.3 14% 72%;
+  --resize-handle-active: 214.3 14% 58%;
+
+  --titlebar-background: 0 0% 100%;
+  --titlebar-foreground: 222.2 84% 4.9%;
+
+  --scrollbar-thumb: 215.4 16.3% 65%;
+  --scrollbar-track: 210 40% 96.1%;
+
+  --transition-duration: 150ms;
+  --transition-timing: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Note-type badges (light) */
+  --badge-markdown-bg: 214.3 95% 93%;
+  --badge-markdown-fg: 224.3 76% 48%;
+  --badge-text-bg: 142 76% 92%;
+  --badge-text-fg: 142 72% 29%;
+  --badge-code-bg: 270 95% 93%;
+  --badge-code-fg: 271 81% 36%;
+  --badge-default-bg: 210 40% 96.1%;
+  --badge-default-fg: 222.2 47.4% 11.2%;
+}
+
+.dark {
+  /*
+   * VS Code Dark+ / Monaco-aligned neutrals (editor ~#1E1E1E, sidebar ~#252526).
+   * Replaces the old saturated blue-black (222.2 84% 4.9%) for a softer grey chrome.
+   */
+  --background: 0 0% 11.8%;
+  --foreground: 0 0% 93%;
+  --card: 0 0% 11.8%;
+  --card-foreground: 0 0% 93%;
+  --popover: 0 0% 16%;
+  --popover-foreground: 0 0% 93%;
+  --primary: 207 90% 54%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 0 0% 17%;
+  --secondary-foreground: 0 0% 93%;
+  --muted: 0 0% 16%;
+  --muted-foreground: 0 0% 55%;
+  --accent: 0 0% 18%;
+  --accent-foreground: 0 0% 93%;
+  --destructive: 0 62.8% 30.6%;
+  --destructive-foreground: 0 0% 98%;
+  --border: 0 0% 20%;
+  --input: 0 0% 20%;
+  --ring: 207 90% 54%;
+
+  --sidebar-background: 0 0% 15%;
+  --sidebar-foreground: 0 0% 89%;
+  --sidebar-primary: 207 90% 54%;
+  --sidebar-primary-foreground: 0 0% 100%;
+  --sidebar-accent: 0 0% 19%;
+  --sidebar-accent-foreground: 0 0% 93%;
+  --sidebar-border: 0 0% 18%;
+  --sidebar-ring: 207 90% 54%;
+
+  --editor-background: 0 0% 11.8%;
+  --editor-foreground: 0 0% 93%;
+  --editor-muted-foreground: 0 0% 55%;
+  --editor-border: 0 0% 20%;
+  --editor-line-highlight: 0 0% 15%;
+  --editor-selection: 207 60% 48%;
+  --editor-selection-foreground: 0 0% 100%;
+  --code-background: 0 0% 16%;
+  --code-foreground: 0 0% 93%;
+
+  --resize-handle: 0 0% 24%;
+  --resize-handle-hover: 0 0% 32%;
+  --resize-handle-active: 0 0% 40%;
+
+  --titlebar-background: 0 0% 14%;
+  --titlebar-foreground: 0 0% 89%;
+
+  --scrollbar-thumb: 0 0% 36%;
+  --scrollbar-track: 0 0% 13%;
+
+  --badge-markdown-bg: 224 45% 22%;
+  --badge-markdown-fg: 213 70% 88%;
+  --badge-text-bg: 142 35% 20%;
+  --badge-text-fg: 142 55% 78%;
+  --badge-code-bg: 271 40% 24%;
+  --badge-code-fg: 270 80% 88%;
+  --badge-default-bg: 0 0% 18%;
+  --badge-default-fg: 0 0% 93%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root,
+  .dark {
+    --transition-duration: 0ms;
+  }
+}
+
+/*
+ * Shared typography system.
+ * Used by shell + first-party plugins and can be injected into iframes via TOKENS_CSS_FOR_IFRAME.
+ */
+.archon-typography {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-body);
+  line-height: var(--line-height-body);
+  color: hsl(var(--foreground));
+}
+
+.archon-typography h1 {
+  font-size: var(--font-size-h1);
+  line-height: var(--line-height-h1);
+  font-weight: 700;
+  margin: 2rem 0 1rem;
+}
+.archon-typography h2 {
+  font-size: var(--font-size-h2);
+  line-height: var(--line-height-h2);
+  font-weight: 700;
+  margin: 1.5rem 0 0.75rem;
+}
+.archon-typography h3 {
+  font-size: var(--font-size-h3);
+  line-height: var(--line-height-h3);
+  font-weight: 700;
+  margin: 1.25rem 0 0.5rem;
+}
+.archon-typography h4 {
+  font-size: var(--font-size-h4);
+  line-height: var(--line-height-h4);
+  font-weight: 650;
+  margin: 1.125rem 0 0.5rem;
+}
+.archon-typography h5 {
+  font-size: var(--font-size-h5);
+  line-height: var(--line-height-h5);
+  font-weight: 650;
+  margin: 1rem 0 0.5rem;
+}
+.archon-typography h6 {
+  font-size: var(--font-size-h6);
+  line-height: var(--line-height-h6);
+  font-weight: 650;
+  margin: 0.875rem 0 0.5rem;
+}
+
+.archon-typography p {
+  margin: 0 0 1rem;
+}
+.archon-typography ul,
+.archon-typography ol {
+  margin: 0 0 1rem;
+  padding-left: 1.5rem;
+}
+.archon-typography ul {
+  list-style: disc;
+}
+.archon-typography ol {
+  list-style: decimal;
+}
+.archon-typography li {
+  margin: 0.25rem 0;
+}
+.archon-typography strong {
+  font-weight: 600;
+}
+.archon-typography a {
+  color: hsl(var(--primary));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.archon-typography code {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-code);
+}
+.archon-typography :not(pre) > code {
+  background: hsl(var(--muted) / 0.5);
+  border-radius: 0.25rem;
+  padding: 0.125rem 0.25rem;
+}
+.archon-typography pre {
+  margin: 1rem 0;
+  overflow-x: auto;
+  border-radius: 0.5rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.4);
+  padding: 1rem;
+}
+.archon-typography pre code {
+  background: transparent;
+  padding: 0;
+}
+.archon-typography blockquote {
+  margin: 1rem 0;
+  border-left: 4px solid hsl(var(--border));
+  padding-left: 1rem;
+  font-style: italic;
+  color: hsl(var(--muted-foreground));
+}
+.archon-typography table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.8125rem;
+}
+.archon-typography th {
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.6);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+  font-weight: 600;
+}
+.archon-typography td {
+  border: 1px solid hsl(var(--border));
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+}
+.archon-typography tr:nth-child(even) td {
+  background: hsl(var(--muted) / 0.2);
+}
