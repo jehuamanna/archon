@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  buildExportManifest,
   chooseImportName,
   clearImageMetadataKeys,
+  deriveAssetFilename,
+  ExportBytesCapExceededError,
   remapExportBundleIds,
+  type ExportWorkspaceInput,
   type WpnExportMetadata,
 } from "./export-import-helpers.js";
 
@@ -250,5 +254,207 @@ describe("chooseImportName", () => {
     });
     assert.equal((d as { action: string }).action, "create");
     assert.match((d as { name: string }).name, /^Testing \(imported \d{4}-\d{2}-\d{2}\)$/);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// deriveAssetFilename
+// ────────────────────────────────────────────────────────────────────────────
+
+describe("deriveAssetFilename", () => {
+  const noteId = "00000000-0000-0000-0000-00000000aaaa";
+
+  it("prefers the sanitized originalFilename when it already has an extension", () => {
+    const name = deriveAssetFilename({
+      noteId,
+      mimeType: "image/png",
+      originalFilename: "my photo.PNG",
+    });
+    assert.equal(name, "my_photo.PNG");
+  });
+
+  it("appends an extension derived from the mime type when original lacks one", () => {
+    const name = deriveAssetFilename({
+      noteId,
+      mimeType: "image/webp",
+      originalFilename: "capture",
+    });
+    assert.equal(name, "capture.webp");
+  });
+
+  it("synthesizes <noteId>.<ext> when originalFilename is absent", () => {
+    const name = deriveAssetFilename({
+      noteId,
+      mimeType: "image/jpeg",
+    });
+    assert.equal(name, `${noteId}.jpg`);
+  });
+
+  it("falls back to .bin for unknown mime types", () => {
+    const name = deriveAssetFilename({
+      noteId,
+      mimeType: "application/octet-stream",
+    });
+    assert.equal(name, `${noteId}.bin`);
+  });
+
+  it("strips path separators that would escape the asset directory", () => {
+    const name = deriveAssetFilename({
+      noteId,
+      mimeType: "image/png",
+      originalFilename: "../evil/../../etc/passwd.png",
+    });
+    // Separators become underscores; extension preserved.
+    assert.ok(!name.includes("/"));
+    assert.ok(!name.includes("\\"));
+    assert.ok(name.endsWith(".png"));
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// buildExportManifest
+// ────────────────────────────────────────────────────────────────────────────
+
+function workspacesWithImage(opts?: {
+  extraImages?: Array<{ id: string; sizeBytes: number }>;
+  missingR2?: boolean;
+}): ExportWorkspaceInput[] {
+  const base = [
+    {
+      id: "ws-A",
+      name: "Testing",
+      sort_index: 0,
+      color_token: null,
+      projects: [
+        {
+          id: "proj-A",
+          name: "Image",
+          sort_index: 0,
+          color_token: null,
+          notes: [
+            {
+              id: "note-root",
+              parent_id: null,
+              type: "markdown",
+              title: "Root",
+              sibling_index: 0,
+              metadata: null,
+            },
+            {
+              id: "note-jehu",
+              parent_id: "note-root",
+              type: "image",
+              title: "jehu",
+              sibling_index: 0,
+              metadata: opts?.missingR2
+                ? { metadataVersion: 1 }
+                : {
+                    metadataVersion: 1,
+                    r2Key: "org/space/ws-A/proj-A/note-jehu",
+                    mimeType: "image/png",
+                    sizeBytes: 35010,
+                    originalFilename: "jehu.png",
+                  },
+            },
+            ...(opts?.extraImages ?? []).map((x) => ({
+              id: x.id,
+              parent_id: "note-root",
+              type: "image",
+              title: x.id,
+              sibling_index: 1,
+              metadata: {
+                metadataVersion: 1,
+                r2Key: `org/space/ws-A/proj-A/${x.id}`,
+                mimeType: "image/png",
+                sizeBytes: x.sizeBytes,
+              },
+            })),
+          ],
+        },
+      ],
+    },
+  ];
+  return base as ExportWorkspaceInput[];
+}
+
+describe("buildExportManifest", () => {
+  it("emits version 2 and an asset plan for each image note with r2Key", () => {
+    const result = buildExportManifest({
+      workspaces: workspacesWithImage(),
+      exportedAtMs: 1_776_000_000_000,
+      maxAssetBytes: 1_000_000,
+    });
+    assert.equal(result.metadata.version, 2);
+    assert.equal(result.metadata.exported_at_ms, 1_776_000_000_000);
+    assert.equal(result.assets.length, 1);
+    const plan = result.assets[0]!;
+    assert.equal(plan.noteId, "note-jehu");
+    assert.equal(plan.mimeType, "image/png");
+    assert.equal(plan.sizeBytes, 35010);
+    assert.equal(plan.zipPath, "assets/note-jehu/jehu.png");
+    assert.equal(plan.r2Key, "org/space/ws-A/proj-A/note-jehu");
+    assert.equal(result.totalAssetBytes, 35010);
+  });
+
+  it("copies the assets[] entry onto the note's manifest entry", () => {
+    const result = buildExportManifest({
+      workspaces: workspacesWithImage(),
+      exportedAtMs: 0,
+      maxAssetBytes: 1_000_000,
+    });
+    const notes = result.metadata.workspaces[0]!.projects[0]!.notes;
+    const root = notes.find((n) => n.id === "note-root")!;
+    const jehu = notes.find((n) => n.id === "note-jehu")!;
+    assert.equal(root.assets, undefined, "non-image notes must not carry assets");
+    assert.ok(jehu.assets && jehu.assets.length === 1);
+    assert.equal(jehu.assets![0]!.zipPath, "assets/note-jehu/jehu.png");
+    assert.equal(jehu.assets![0]!.mimeType, "image/png");
+    assert.equal(jehu.assets![0]!.originalFilename, "jehu.png");
+  });
+
+  it("skips image notes without r2Key (v1-style broken notes pass through)", () => {
+    const result = buildExportManifest({
+      workspaces: workspacesWithImage({ missingR2: true }),
+      exportedAtMs: 0,
+      maxAssetBytes: 1_000_000,
+    });
+    assert.equal(result.assets.length, 0);
+    const jehu = result.metadata.workspaces[0]!.projects[0]!.notes.find(
+      (n) => n.id === "note-jehu",
+    )!;
+    assert.equal(jehu.assets, undefined);
+    assert.equal(result.totalAssetBytes, 0);
+  });
+
+  it("throws ExportBytesCapExceededError once the running total exceeds the cap", () => {
+    assert.throws(
+      () =>
+        buildExportManifest({
+          workspaces: workspacesWithImage({
+            extraImages: [
+              { id: "note-big1", sizeBytes: 600_000 },
+              { id: "note-big2", sizeBytes: 600_000 },
+            ],
+          }),
+          exportedAtMs: 0,
+          maxAssetBytes: 1_000_000,
+        }),
+      (err: unknown) => err instanceof ExportBytesCapExceededError,
+    );
+  });
+
+  it("counts bytes cumulatively across multiple image notes", () => {
+    const result = buildExportManifest({
+      workspaces: workspacesWithImage({
+        extraImages: [
+          { id: "note-extra1", sizeBytes: 1_000 },
+          { id: "note-extra2", sizeBytes: 2_000 },
+        ],
+      }),
+      exportedAtMs: 0,
+      maxAssetBytes: 1_000_000,
+    });
+    assert.equal(result.assets.length, 3);
+    assert.equal(result.totalAssetBytes, 35010 + 1_000 + 2_000);
   });
 });

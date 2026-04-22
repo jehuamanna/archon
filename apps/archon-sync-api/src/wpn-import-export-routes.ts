@@ -14,38 +14,16 @@ import type {
   WpnProjectDoc,
   WpnNoteDoc,
 } from "./db.js";
-// ── Shared export/import types (mirrored from src/shared/wpn-import-export-types.ts) ──
-
-type WpnExportNoteEntry = {
-  id: string;
-  parent_id: string | null;
-  type: string;
-  title: string;
-  sibling_index: number;
-  metadata: Record<string, unknown> | null;
-};
-
-type WpnExportProjectEntry = {
-  id: string;
-  name: string;
-  sort_index: number;
-  color_token: string | null;
-  notes: WpnExportNoteEntry[];
-};
-
-type WpnExportWorkspaceEntry = {
-  id: string;
-  name: string;
-  sort_index: number;
-  color_token: string | null;
-  projects: WpnExportProjectEntry[];
-};
-
-type WpnExportMetadata = {
-  version: 1;
-  exported_at_ms: number;
-  workspaces: WpnExportWorkspaceEntry[];
-};
+import {
+  buildExportManifest,
+  ExportBytesCapExceededError,
+  type AssetStreamPlan,
+  type ExportWorkspaceInput,
+  type WpnExportMetadata,
+  type WpnExportNoteEntry,
+} from "./export-import-helpers.js";
+import { exportMaxAssetBytes, isImageNotesFeatureEnabled } from "./server-env.js";
+import { getR2Client, type R2ClientLike } from "./r2-client.js";
 
 type WpnImportResult = {
   workspaces: number;
@@ -61,9 +39,15 @@ function nowMs(): number {
   return Date.now();
 }
 
+export type RegisterWpnImportExportRoutesOptions = {
+  jwtSecret: string;
+  /** Test injection point. Production uses {@link getR2Client}. */
+  r2Client?: R2ClientLike;
+};
+
 export async function registerWpnImportExportRoutes(
   app: FastifyInstance,
-  opts: { jwtSecret: string },
+  opts: RegisterWpnImportExportRoutesOptions,
 ): Promise<void> {
   const { jwtSecret } = opts;
 
@@ -112,48 +96,84 @@ export async function registerWpnImportExportRoutes(
       notesByProject.set(n.project_id, arr);
     }
 
-    const metadata: WpnExportMetadata = {
-      version: 1,
-      exported_at_ms: nowMs(),
-      workspaces: wsDocs.map((ws): WpnExportWorkspaceEntry => {
-        const wsProjects = projDocs.filter((p) => p.workspace_id === ws.id);
-        return {
-          id: ws.id,
-          name: ws.name,
-          sort_index: ws.sort_index,
-          color_token: ws.color_token,
-          projects: wsProjects.map((proj): WpnExportProjectEntry => {
-            const projNotes = notesByProject.get(proj.id) ?? [];
-            return {
-              id: proj.id,
-              name: proj.name,
-              sort_index: proj.sort_index,
-              color_token: proj.color_token,
-              notes: projNotes.map((n): WpnExportNoteEntry => ({
-                id: n.id,
-                parent_id: n.parent_id,
-                type: n.type,
-                title: n.title,
-                sibling_index: n.sibling_index,
-                metadata: n.metadata,
-              })),
-            };
-          }),
-        };
-      }),
-    };
+    const workspacesInput: ExportWorkspaceInput[] = wsDocs.map((ws) => {
+      const wsProjects = projDocs.filter((p) => p.workspace_id === ws.id);
+      return {
+        id: ws.id,
+        name: ws.name,
+        sort_index: ws.sort_index,
+        color_token: ws.color_token,
+        projects: wsProjects.map((proj) => ({
+          id: proj.id,
+          name: proj.name,
+          sort_index: proj.sort_index,
+          color_token: proj.color_token,
+          notes: (notesByProject.get(proj.id) ?? []).map((n) => ({
+            id: n.id,
+            parent_id: n.parent_id,
+            type: n.type,
+            title: n.title,
+            sibling_index: n.sibling_index,
+            metadata: n.metadata,
+          })),
+        })),
+      };
+    });
+
+    let manifest: { metadata: WpnExportMetadata; assets: AssetStreamPlan[] };
+    try {
+      manifest = buildExportManifest({
+        workspaces: workspacesInput,
+        exportedAtMs: nowMs(),
+        maxAssetBytes: exportMaxAssetBytes(),
+      });
+    } catch (e) {
+      if (e instanceof ExportBytesCapExceededError) {
+        return sendErr(reply, 413, e.message);
+      }
+      throw e;
+    }
+
+    // Streaming binaries requires the image-notes feature + R2 creds.
+    // When the flag is off, v2 is still emitted but every image note's
+    // metadata lacks `r2Key`, so `manifest.assets` is empty and no R2
+    // fetches are attempted.
+    let r2: R2ClientLike | null = null;
+    if (manifest.assets.length > 0) {
+      if (!isImageNotesFeatureEnabled()) {
+        return sendErr(
+          reply,
+          501,
+          "Bundle contains image assets but image-notes feature is disabled on this server.",
+        );
+      }
+      try {
+        r2 = opts.r2Client ?? getR2Client();
+      } catch (e) {
+        return sendErr(
+          reply,
+          500,
+          e instanceof Error ? e.message : "R2 client unavailable",
+        );
+      }
+    }
 
     const archive = archiver("zip", { zlib: { level: 6 } });
     const passthrough = new PassThrough();
     archive.pipe(passthrough);
 
-    archive.append(JSON.stringify(metadata, null, 2), { name: "metadata.json" });
+    archive.on("error", (err) => {
+      request.log.error({ err }, "Export archive error");
+      passthrough.destroy(err);
+    });
+
+    archive.append(JSON.stringify(manifest.metadata, null, 2), {
+      name: "metadata.json",
+    });
 
     for (const n of noteDocs) {
       archive.append(n.content ?? "", { name: `notes/${n.id}.md` });
     }
-
-    void archive.finalize();
 
     reply.raw.setHeader("Content-Type", "application/zip");
     reply.raw.setHeader(
@@ -161,7 +181,33 @@ export async function registerWpnImportExportRoutes(
       'attachment; filename="archon-export.zip"',
     );
 
-    return reply.send(passthrough);
+    // Kick off the reply before we start fetching R2 bytes so clients see
+    // data immediately. Asset streaming fails closed: on any R2 error we
+    // destroy both the archive and the passthrough so the client receives
+    // a truncated download instead of a silently-incomplete ZIP.
+    const response = reply.send(passthrough);
+
+    void (async () => {
+      try {
+        for (const asset of manifest.assets) {
+          if (!r2) {
+            throw new Error("R2 client not initialized for asset streaming");
+          }
+          const bytes = await r2.getObjectBytes({ key: asset.r2Key });
+          archive.append(bytes, { name: asset.zipPath });
+        }
+        await archive.finalize();
+      } catch (err) {
+        request.log.error(
+          { err, assetCount: manifest.assets.length },
+          "Export asset streaming failed; aborting archive",
+        );
+        archive.abort();
+        passthrough.destroy(err as Error);
+      }
+    })();
+
+    return response;
   });
 
   // ── IMPORT ────────────────────────────────────────────────────────────

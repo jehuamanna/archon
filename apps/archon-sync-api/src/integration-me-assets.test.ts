@@ -42,6 +42,11 @@ function makeFakeR2(): { client: R2ClientLike; uploads: FakeUpload[] } {
     async signGetUrl({ key, ttlSec }) {
       return `https://r2.test/${encodeURIComponent(key)}?ttl=${ttlSec}`;
     },
+    async getObjectBytes({ key }) {
+      const hit = uploads.find((u) => u.key === key);
+      if (!hit) throw new Error(`fake R2 has no object at ${key}`);
+      return Buffer.alloc(hit.bodyLen);
+    },
   };
   return { client, uploads };
 }

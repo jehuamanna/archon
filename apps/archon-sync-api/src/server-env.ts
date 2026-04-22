@@ -23,6 +23,19 @@ export function isImageNotesFeatureEnabled(): boolean {
 }
 
 /**
+ * Maximum total image-asset bytes allowed inside a single `/wpn/export` bundle.
+ * Caps disk-scratch + network + client-download cost. 500 MiB default; override
+ * via `ARCHON_EXPORT_MAX_BYTES` (accepts plain decimal bytes).
+ */
+export function exportMaxAssetBytes(): number {
+  const raw = envString("ARCHON_EXPORT_MAX_BYTES");
+  if (!raw) return 500 * 1024 * 1024;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 500 * 1024 * 1024;
+  return Math.floor(parsed);
+}
+
+/**
  * Fail-fast at server startup when the image-notes feature flag is on but R2
  * env vars are absent — matches the JWT_SECRET pattern above. Silent when the
  * flag is off so non-image-notes deploys don't need R2 creds.

@@ -229,3 +229,207 @@ function formatDatestamp(epochMs: number): string {
   const dd = String(d.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Slice 4b — v2 export manifest builder
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Minimum image metadata shape the manifest builder needs. Mirrored from
+ * `WpnImageNoteMetadataV1` so this helper stays dependency-free.
+ */
+export type ExportImageMetadataProbe = {
+  r2Key?: unknown;
+  mimeType?: unknown;
+  sizeBytes?: unknown;
+  originalFilename?: unknown;
+};
+
+/** Extension used when the export can't derive one from `originalFilename`. */
+const MIME_TO_EXT: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/heic": "heic",
+};
+
+function sanitizeForZip(name: string): string {
+  // Rewrite anything outside a safe filename subset to `_` (letters,
+  // digits, dot, underscore, dash). Collapses runs of unsafe chars and
+  // strips a leading dot so the file stays inside its `assets/<noteId>/`
+  // directory regardless of the stored originalFilename.
+  const cleaned = name
+    .replace(/[^A-Za-z0-9._-]+/g, "_")
+    .replace(/^\.+/, "_")
+    .trim();
+  return cleaned.length > 0 ? cleaned : "asset";
+}
+
+function extFromMime(mime: string): string {
+  return MIME_TO_EXT[mime] ?? "bin";
+}
+
+/**
+ * Decide the in-archive filename for an image note's bytes. Prefers the
+ * stored `originalFilename` (sanitized), otherwise synthesizes `<noteId>.<ext>`
+ * from the mime type. The zipPath is always `assets/<noteId>/<filename>`.
+ */
+export function deriveAssetFilename(args: {
+  noteId: string;
+  mimeType: string;
+  originalFilename?: string | null;
+}): string {
+  const original = (args.originalFilename ?? "").trim();
+  if (original) {
+    const safe = sanitizeForZip(original);
+    if (safe.includes(".")) return safe;
+    return `${safe}.${extFromMime(args.mimeType)}`;
+  }
+  return `${args.noteId}.${extFromMime(args.mimeType)}`;
+}
+
+export type ExportNoteInput = {
+  id: string;
+  parent_id: string | null;
+  type: string;
+  title: string;
+  sibling_index: number;
+  metadata: Record<string, unknown> | null;
+};
+
+export type ExportProjectInput = {
+  id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  notes: ExportNoteInput[];
+};
+
+export type ExportWorkspaceInput = {
+  id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  projects: ExportProjectInput[];
+};
+
+/** Per-asset descriptor returned alongside the manifest for the route to stream. */
+export type AssetStreamPlan = {
+  noteId: string;
+  r2Key: string;
+  mimeType: string;
+  sizeBytes: number;
+  zipPath: string;
+  filename: string;
+};
+
+export type BuildExportManifestResult = {
+  metadata: WpnExportMetadata;
+  /** Ordered list of R2 assets to stream into the ZIP at `asset.zipPath`. */
+  assets: AssetStreamPlan[];
+  /** Sum of `sizeBytes` across `assets` — caller checks against its cap. */
+  totalAssetBytes: number;
+};
+
+export class ExportBytesCapExceededError extends Error {
+  readonly capBytes: number;
+  readonly observedBytes: number;
+  constructor(capBytes: number, observedBytes: number) {
+    super(
+      `Export bundle exceeds byte cap (${observedBytes} > ${capBytes}). ` +
+        `Reduce the selection or raise ARCHON_EXPORT_MAX_BYTES.`,
+    );
+    this.name = "ExportBytesCapExceededError";
+    this.capBytes = capBytes;
+    this.observedBytes = observedBytes;
+  }
+}
+
+/**
+ * Build a v2 export manifest + the list of image-asset streams the caller
+ * needs to write into the ZIP. Pure: no I/O, no Mongo, no R2.
+ *
+ * Each image note with a usable `r2Key` + `mimeType` + `sizeBytes` trio
+ * contributes one `assets[]` entry in the manifest and one `AssetStreamPlan`
+ * in the result. Image notes without R2 refs pass through (broken-on-import
+ * by design — matches v1 behavior for partially-uploaded notes).
+ */
+export function buildExportManifest(args: {
+  workspaces: ExportWorkspaceInput[];
+  exportedAtMs: number;
+  /** Max total asset bytes. Throws {@link ExportBytesCapExceededError} when exceeded. */
+  maxAssetBytes: number;
+}): BuildExportManifestResult {
+  const assets: AssetStreamPlan[] = [];
+  let totalBytes = 0;
+
+  const workspaces: WpnExportWorkspaceEntry[] = args.workspaces.map((ws) => ({
+    id: ws.id,
+    name: ws.name,
+    sort_index: ws.sort_index,
+    color_token: ws.color_token,
+    projects: ws.projects.map((proj) => ({
+      id: proj.id,
+      name: proj.name,
+      sort_index: proj.sort_index,
+      color_token: proj.color_token,
+      notes: proj.notes.map((note): WpnExportNoteEntry => {
+        const base: WpnExportNoteEntry = {
+          id: note.id,
+          parent_id: note.parent_id,
+          type: note.type,
+          title: note.title,
+          sibling_index: note.sibling_index,
+          metadata: note.metadata,
+        };
+        if (note.type !== "image") return base;
+        const probe = (note.metadata ?? {}) as ExportImageMetadataProbe;
+        const r2Key = typeof probe.r2Key === "string" ? probe.r2Key : null;
+        const mimeType = typeof probe.mimeType === "string" ? probe.mimeType : null;
+        const sizeBytes = typeof probe.sizeBytes === "number" ? probe.sizeBytes : null;
+        if (!r2Key || !mimeType || sizeBytes === null || sizeBytes < 0) {
+          return base;
+        }
+        const originalFilename =
+          typeof probe.originalFilename === "string" ? probe.originalFilename : undefined;
+        const filename = deriveAssetFilename({
+          noteId: note.id,
+          mimeType,
+          originalFilename,
+        });
+        const zipPath = `assets/${note.id}/${filename}`;
+        const assetEntry: WpnExportAssetEntry = {
+          zipPath,
+          mimeType,
+          sizeBytes,
+          ...(originalFilename ? { originalFilename } : {}),
+        };
+        totalBytes += sizeBytes;
+        if (totalBytes > args.maxAssetBytes) {
+          throw new ExportBytesCapExceededError(args.maxAssetBytes, totalBytes);
+        }
+        assets.push({
+          noteId: note.id,
+          r2Key,
+          mimeType,
+          sizeBytes,
+          zipPath,
+          filename,
+        });
+        return { ...base, assets: [assetEntry] };
+      }),
+    })),
+  }));
+
+  return {
+    metadata: {
+      version: 2,
+      exported_at_ms: args.exportedAtMs,
+      workspaces,
+    },
+    assets,
+    totalAssetBytes: totalBytes,
+  };
+}

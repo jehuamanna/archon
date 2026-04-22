@@ -59,6 +59,12 @@ export type R2ClientLike = {
     contentLength: number;
   }): Promise<void>;
   signGetUrl(args: { key: string; ttlSec: number }): Promise<string>;
+  /**
+   * Fetch the raw object bytes for an R2 key. Used by the v2 export path
+   * (PLAN-06 slice 4b) to stream image bytes into the export archive.
+   * Throws on 404 / network errors — export fails closed.
+   */
+  getObjectBytes(args: { key: string }): Promise<Buffer>;
   bucket: string;
 };
 
@@ -95,6 +101,20 @@ export function getR2Client(): R2ClientLike {
         new GetObjectCommand({ Bucket: env.bucket, Key: key }),
         { expiresIn: ttlSec },
       );
+    },
+    async getObjectBytes({ key }) {
+      const resp = await s3.send(
+        new GetObjectCommand({ Bucket: env.bucket, Key: key }),
+      );
+      const body = resp.Body as unknown as NodeJS.ReadableStream | undefined;
+      if (!body) {
+        throw new Error(`R2 object has no body: ${key}`);
+      }
+      const chunks: Buffer[] = [];
+      for await (const chunk of body as AsyncIterable<Uint8Array>) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
     },
   };
   return cachedClient;
