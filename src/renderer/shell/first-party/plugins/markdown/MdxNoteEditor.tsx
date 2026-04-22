@@ -45,8 +45,11 @@ function lineColAt(text: string, offset: number): { line: number; col: number } 
   return { line, col };
 }
 
+const MDX_AUTOSAVE_DEBOUNCE_MS = 500;
+
 /**
  * MDX note editor: CodeMirror + debounced live MDX preview (same React tree as the shell).
+ * Persists via debounced writes: one save after typing idles for {@link MDX_AUTOSAVE_DEBOUNCE_MS}, plus immediate flush on blur and when leaving the note.
  */
 export function MdxNoteEditor({
   note,
@@ -64,7 +67,7 @@ export function MdxNoteEditor({
   const [previewContent, setPreviewContent] = useState(note.content ?? "");
   const [caretHead, setCaretHead] = useState(0);
   const latestRef = useRef(note.content ?? "");
-  const rafRef = useRef(0);
+  const flushTimerRef = useRef<number | null>(null);
   const persistRef = useRef(persist);
   const noteIdRef = useRef(note.id);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
@@ -437,9 +440,9 @@ export function MdxNoteEditor({
   }, [wikiRows, note.id]);
 
   const flushNow = useCallback(() => {
-    if (rafRef.current !== 0) {
-      cancelAnimationFrame(rafRef.current);
-      rafRef.current = 0;
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
     }
     if (!persistRef.current) return;
     void dispatch(
@@ -449,22 +452,25 @@ export function MdxNoteEditor({
 
   const scheduleBatchedFlush = useCallback(() => {
     if (!persistRef.current) return;
-    if (rafRef.current !== 0) return;
-    rafRef.current = requestAnimationFrame(() => {
-      rafRef.current = 0;
+    // Debounce: reset the idle timer on every keystroke so only the trailing save fires.
+    if (flushTimerRef.current !== null) {
+      window.clearTimeout(flushTimerRef.current);
+    }
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
       if (!persistRef.current) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
-    });
+    }, MDX_AUTOSAVE_DEBOUNCE_MS);
   }, [dispatch]);
 
   useEffect(() => {
     const idWhenAttached = note.id;
     return () => {
-      if (rafRef.current !== 0) {
-        cancelAnimationFrame(rafRef.current);
-        rafRef.current = 0;
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
       }
       if (persistRef.current) {
         void dispatch(

@@ -8,6 +8,7 @@ import { uploadImageAsset } from "./upload-image-asset";
 import { ImageViewerSurface } from "./ImageViewerSurface";
 import { getArchon } from "../../../../../shared/archon-host-access";
 import type { WpnBacklinkSourceItem } from "../../../../../shared/wpn-v2-types";
+import { dispatchWpnTreeChanged } from "../notes-explorer/wpnExplorerEvents";
 
 type ImageMetadata = {
   metadataVersion: 1;
@@ -274,6 +275,10 @@ function ImageMetadataStrip({
           }),
         ).unwrap();
         setError(null);
+        // Explorer's flat note list carries server-built `search_hints` (alt/caption) used
+        // by the sidebar filter. Without a refresh it keeps the pre-edit snapshot and the
+        // search misses this note — nudge it to refetch.
+        dispatchWpnTreeChanged();
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
