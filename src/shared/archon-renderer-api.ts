@@ -16,7 +16,10 @@ import type {
   WpnWorkspacePatch,
   WpnWorkspaceRow,
 } from "./wpn-v2-types";
-import type { WpnImportResult } from "./wpn-import-export-types";
+import type {
+  WpnImportConflictPolicy,
+  WpnImportResult,
+} from "./wpn-import-export-types";
 import type { WorkspaceRxdbMirrorPayloadV1 } from "./workspace-rxdb-mirror-payload";
 
 export interface Note {
@@ -694,8 +697,16 @@ export type ArchonRendererApi = {
   ) => Promise<{ newRootId: string }>;
   /** Export workspaces (and their projects/notes) as a ZIP. Electron: save dialog; Web: blob download. */
   wpnExportWorkspaces: (workspaceIds?: string[]) => Promise<void>;
-  /** Import workspaces from a archon-export ZIP. Electron: open dialog; Web: file picker or passed File. */
-  wpnImportWorkspaces: (file?: File) => Promise<WpnImportResult>;
+  /**
+   * Import workspaces from an archon-export ZIP. Electron: open dialog;
+   * Web: file picker or passed File. `options.conflict` (PLAN-06 slice 4d)
+   * defaults to `"rename"` server-side when omitted; the renderer passes
+   * it through so the UI can surface a policy picker.
+   */
+  wpnImportWorkspaces: (
+    file?: File,
+    options?: { conflict?: WpnImportConflictPolicy },
+  ) => Promise<WpnImportResult>;
   /** ADR-016: read current `archon-workspace.json` bodies from disk (Electron file vault). */
   pullWorkspaceRxdbMirrorPayload: () => Promise<
     { ok: true; payload: WorkspaceRxdbMirrorPayloadV1 } | { ok: false; error: string }

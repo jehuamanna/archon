@@ -9,6 +9,7 @@ import type {
 import { wpnComputeChildMapAfterMove } from "../../../../../core/wpn/wpn-note-move";
 import type { WpnNoteRow } from "../../../../../core/wpn/wpn-types";
 import type { WpnNoteListItem, WpnProjectRow, WpnWorkspaceRow } from "../../../../../shared/wpn-v2-types";
+import type { WpnImportConflictPolicy } from "../../../../../shared/wpn-import-export-types";
 import type { AppDispatch, RootState } from "../../../../store";
 import { useAuth } from "../../../../auth/AuthContext";
 import { clearNoteTitleDraft, fetchNote, setNoteTitleDraft } from "../../../../store/notesSlice";
@@ -549,6 +550,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     placement: NoteMovePlacement;
   } | null>(null);
   const [wpnOwnerLabel, setWpnOwnerLabel] = useState<string | null>(null);
+  // PLAN-06 slice 4d: conflict policy chosen by the user in the Import bar.
+  // `rename` never destroys existing data, hence the default.
+  const [importConflictPolicy, setImportConflictPolicy] =
+    useState<WpnImportConflictPolicy>("rename");
 
   const [menu, setMenu] = useState<MenuState>(null);
   const [typePicker, setTypePicker] = useState<TypePickerState>(null);
@@ -3604,7 +3609,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
           onClick={() => {
             void (async () => {
               try {
-                const result = await getArchon().wpnImportWorkspaces();
+                const result = await getArchon().wpnImportWorkspaces(
+                  undefined,
+                  { conflict: importConflictPolicy },
+                );
                 showToast({
                   severity: "info",
                   message: `Imported ${result.workspaces} workspace(s), ${result.projects} project(s), ${result.notes} note(s)`,
@@ -3622,6 +3630,26 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         >
           Import
         </button>
+        <label
+          className="flex items-center gap-1 text-[10px] text-muted-foreground"
+          title="How to handle workspaces whose names already exist in the target."
+        >
+          <span>on conflict:</span>
+          <select
+            value={importConflictPolicy}
+            onChange={(e) =>
+              setImportConflictPolicy(
+                e.currentTarget.value as WpnImportConflictPolicy,
+              )
+            }
+            className="rounded border border-border/60 bg-background px-1 py-0.5 text-[10px] text-foreground"
+            data-testid="wpn-import-conflict-select"
+          >
+            <option value="rename">rename</option>
+            <option value="skip">skip</option>
+            <option value="overwrite">overwrite</option>
+          </select>
+        </label>
         <button
           type="button"
           className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"

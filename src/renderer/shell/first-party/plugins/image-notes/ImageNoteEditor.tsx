@@ -6,6 +6,7 @@ import { patchNoteMetadata } from "../../../../store/notesSlice";
 import { useSignedAssetUrl } from "./useSignedAssetUrl";
 import { uploadImageAsset } from "./upload-image-asset";
 import { ImageViewerSurface } from "./ImageViewerSurface";
+import { generateImageThumbnail, THUMBNAIL_CONSTANTS } from "./generate-thumbnail";
 import { getArchon } from "../../../../../shared/archon-host-access";
 import type { WpnBacklinkSourceItem } from "../../../../../shared/wpn-v2-types";
 import { dispatchWpnTreeChanged } from "../notes-explorer/wpnExplorerEvents";
@@ -18,6 +19,9 @@ type ImageMetadata = {
   width?: number;
   height?: number;
   originalFilename?: string;
+  thumbKey?: string;
+  thumbMime?: string;
+  thumbSizeBytes?: number;
   altText?: string;
   caption?: string;
 };
@@ -37,6 +41,9 @@ function readImageMetadata(note: Note): ImageMetadata | null {
     width: typeof m.width === "number" ? m.width : undefined,
     height: typeof m.height === "number" ? m.height : undefined,
     originalFilename: typeof m.originalFilename === "string" ? m.originalFilename : undefined,
+    thumbKey: typeof m.thumbKey === "string" ? m.thumbKey : undefined,
+    thumbMime: typeof m.thumbMime === "string" ? m.thumbMime : undefined,
+    thumbSizeBytes: typeof m.thumbSizeBytes === "number" ? m.thumbSizeBytes : undefined,
     altText: typeof m.altText === "string" ? m.altText : undefined,
     caption: typeof m.caption === "string" ? m.caption : undefined,
   };
@@ -69,6 +76,81 @@ async function filesFromDrop(dt: DataTransfer): Promise<File[]> {
   return out;
 }
 
+/**
+ * PLAN-06 slice 4d: regenerate a missing thumbnail client-side.
+ *
+ * Fires once per (noteId, r2Key) pair when `r2Key` is set but `thumbKey`
+ * is missing — covers pre-PLAN-04 image notes and fresh post-import
+ * notes whose thumbKey was dropped during the v2 import re-upload.
+ * No-ops when the note is read-only, when the signed URL hasn't arrived
+ * yet, or when the same pair has already been processed this session.
+ */
+function useThumbnailRegen(args: {
+  noteId: string;
+  r2Key: string | null;
+  thumbKey: string | null;
+  signedUrl: string | null;
+  persist: boolean;
+}): void {
+  const { noteId, r2Key, thumbKey, signedUrl, persist } = args;
+  const dispatch = useDispatch<AppDispatch>();
+  const pendingRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!persist) return;
+    if (!r2Key || thumbKey) return;
+    if (!signedUrl) return;
+    const pairKey = `${noteId}::${r2Key}`;
+    if (pendingRef.current === pairKey) return;
+    pendingRef.current = pairKey;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const resp = await fetch(signedUrl, { credentials: "omit" });
+        if (!resp.ok) {
+          throw new Error(`Fetch failed: ${resp.status}`);
+        }
+        const blob = await resp.blob();
+        const file = new File([blob], "source", { type: blob.type });
+        const thumb = await generateImageThumbnail(file);
+        if (cancelled) return;
+        const thumbFile = new File(
+          [thumb.blob],
+          `regen.thumb.${THUMBNAIL_CONSTANTS.MIME.split("/")[1] ?? "webp"}`,
+          { type: thumb.mime },
+        );
+        const up = await uploadImageAsset({
+          noteId,
+          file: thumbFile,
+          variant: "thumb",
+        });
+        if (cancelled) return;
+        await dispatch(
+          patchNoteMetadata({
+            noteId,
+            patch: {
+              thumbKey: up.r2Key,
+              thumbMime: up.mimeType,
+              thumbSizeBytes: up.sizeBytes,
+              width: thumb.sourceWidth,
+              height: thumb.sourceHeight,
+            },
+          }),
+        ).unwrap();
+      } catch (err) {
+        if (pendingRef.current === pairKey) pendingRef.current = null;
+        console.warn(
+          "[image-notes] on-open thumbnail regen failed; continuing",
+          err,
+        );
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [noteId, r2Key, thumbKey, signedUrl, persist, dispatch]);
+}
+
 export function ImageNoteEditor({
   note,
   persist,
@@ -84,6 +166,14 @@ export function ImageNoteEditor({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const signed = useSignedAssetUrl(existing?.r2Key ?? null);
+
+  useThumbnailRegen({
+    noteId: note.id,
+    r2Key: existing?.r2Key ?? null,
+    thumbKey: existing?.thumbKey ?? null,
+    signedUrl: signed.status === "ready" ? signed.url : null,
+    persist,
+  });
 
   const uploadOne = useCallback(
     async (file: File) => {

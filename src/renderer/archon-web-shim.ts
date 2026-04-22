@@ -992,7 +992,7 @@ export function createWebArchonApi(baseUrl: string): ArchonRendererApi {
       a.click();
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
     },
-    wpnImportWorkspaces: async (file) => {
+    wpnImportWorkspaces: async (file, options) => {
       let zipFile = file;
       if (!zipFile) {
         zipFile = await new Promise<File>((resolve, reject) => {
@@ -1012,7 +1012,10 @@ export function createWebArchonApi(baseUrl: string): ArchonRendererApi {
       fd.append("file", zipFile);
       const headers: Record<string, string> = {};
       if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`${syncBase}/wpn/import`, {
+      const query = options?.conflict
+        ? `?conflict=${encodeURIComponent(options.conflict)}`
+        : "";
+      const res = await fetch(`${syncBase}/wpn/import${query}`, {
         method: "POST",
         headers,
         credentials: "omit",
