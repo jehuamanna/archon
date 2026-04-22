@@ -23,6 +23,13 @@ let _mod: {
     oldTitleSeg: string,
     newTitleSeg: string,
   ) => string;
+  rewriteVfsCanonicalLinksInMarkdown: (
+    content: string,
+    oldCanonical: string,
+    newCanonical: string,
+    oldTitle?: string,
+    newTitle?: string,
+  ) => string;
   normalizeVfsSegment: (raw: string, fallback: string) => string;
 } | null = null;
 
@@ -33,9 +40,26 @@ async function load() {
   _mod = {
     vfsCanonicalPathsForTitleChange: linkRewrite.vfsCanonicalPathsForTitleChange,
     rewriteMarkdownForWpnNoteTitleChange: linkRewrite.rewriteMarkdownForWpnNoteTitleChange,
+    rewriteVfsCanonicalLinksInMarkdown: linkRewrite.rewriteVfsCanonicalLinksInMarkdown,
     normalizeVfsSegment: vfsPath.normalizeVfsSegment,
   };
   return _mod;
+}
+
+/**
+ * Rewrite `#/w/<ws>/<proj>/<title>` refs inside markdown so they point at a
+ * new canonical path. Used on import (PLAN-06 slice 4c) when a workspace is
+ * renamed by the conflict policy — all refs from the bundle that named the
+ * old workspace need to slide to the new name so in-bundle backlinks keep
+ * resolving post-import.
+ */
+export async function rewriteVfsCanonicalLinksInMarkdown(
+  content: string,
+  oldCanonical: string,
+  newCanonical: string,
+): Promise<string> {
+  const m = await load();
+  return m.rewriteVfsCanonicalLinksInMarkdown(content, oldCanonical, newCanonical);
 }
 
 export async function vfsCanonicalPathsForTitleChange(

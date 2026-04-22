@@ -347,6 +347,110 @@ export class ExportBytesCapExceededError extends Error {
   }
 }
 
+// ────────────────────────────────────────────────────────────────────────────
+// Slice 4c — import planning (conflict-policy + name-rewrite pairs)
+// ────────────────────────────────────────────────────────────────────────────
+
+export type ImportWorkspaceAction =
+  | { kind: "skip"; sourceWorkspaceId: string }
+  | {
+      kind: "create";
+      sourceWorkspaceId: string;
+      chosenName: string;
+      /** True when the chosen name differs from the bundled workspace name. */
+      renamed: boolean;
+    }
+  | {
+      kind: "reuse";
+      sourceWorkspaceId: string;
+      existingWorkspaceId: string;
+      chosenName: string;
+    };
+
+export type ImportPlan = {
+  workspaces: ImportWorkspaceAction[];
+  /** Old→new canonical path pairs for vFS link rewrites on rename. */
+  canonicalPathRewrites: { oldCanonical: string; newCanonical: string }[];
+};
+
+/**
+ * Decide, for each workspace in the bundle, whether to skip, reuse, or create
+ * (and under what name). Also compute the canonical vFS path rewrites that
+ * should be applied to markdown content so in-bundle `#/w/<ws>/<proj>/<title>`
+ * links keep resolving post-import when the workspace was renamed.
+ *
+ * Pure: no Mongo, no R2.
+ */
+export function planImportWorkspaces(args: {
+  bundle: WpnExportMetadata;
+  existingWorkspaces: ReadonlyArray<{ id: string; name: string }>;
+  policy: WpnImportConflictPolicy;
+  nowMs?: number;
+}): ImportPlan {
+  const existingByName = new Map<string, string>();
+  const existingNames = new Set<string>();
+  for (const w of args.existingWorkspaces) {
+    existingByName.set(w.name, w.id);
+    existingNames.add(w.name);
+  }
+  const claimedNames = new Set(existingNames);
+  const workspaces: ImportWorkspaceAction[] = [];
+  const canonicalPathRewrites: ImportPlan["canonicalPathRewrites"] = [];
+
+  for (const ws of args.bundle.workspaces) {
+    const decision = chooseImportName({
+      name: ws.name,
+      existing: claimedNames,
+      policy: args.policy,
+      nowMs: args.nowMs,
+    });
+    if (decision.action === "skip") {
+      workspaces.push({ kind: "skip", sourceWorkspaceId: ws.id });
+      continue;
+    }
+    if (decision.action === "reuse") {
+      const existingId = existingByName.get(decision.name);
+      if (!existingId) {
+        workspaces.push({
+          kind: "create",
+          sourceWorkspaceId: ws.id,
+          chosenName: decision.name,
+          renamed: decision.name !== ws.name,
+        });
+        claimedNames.add(decision.name);
+        continue;
+      }
+      workspaces.push({
+        kind: "reuse",
+        sourceWorkspaceId: ws.id,
+        existingWorkspaceId: existingId,
+        chosenName: decision.name,
+      });
+      continue;
+    }
+    const renamed = decision.name !== ws.name;
+    workspaces.push({
+      kind: "create",
+      sourceWorkspaceId: ws.id,
+      chosenName: decision.name,
+      renamed,
+    });
+    claimedNames.add(decision.name);
+    if (renamed) {
+      for (const proj of ws.projects) {
+        for (const note of proj.notes) {
+          canonicalPathRewrites.push({
+            oldCanonical: `${ws.name}/${proj.name}/${note.title}`,
+            newCanonical: `${decision.name}/${proj.name}/${note.title}`,
+          });
+        }
+      }
+    }
+  }
+
+  return { workspaces, canonicalPathRewrites };
+}
+
 /**
  * Build a v2 export manifest + the list of image-asset streams the caller
  * needs to write into the ZIP. Pure: no I/O, no Mongo, no R2.

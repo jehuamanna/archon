@@ -6,6 +6,7 @@ import {
   clearImageMetadataKeys,
   deriveAssetFilename,
   ExportBytesCapExceededError,
+  planImportWorkspaces,
   remapExportBundleIds,
   type ExportWorkspaceInput,
   type WpnExportMetadata,
@@ -456,5 +457,126 @@ describe("buildExportManifest", () => {
     });
     assert.equal(result.assets.length, 3);
     assert.equal(result.totalAssetBytes, 35010 + 1_000 + 2_000);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────
+// planImportWorkspaces
+// ────────────────────────────────────────────────────────────────────────────
+
+function bundleWithWorkspaces(names: string[]): WpnExportMetadata {
+  return {
+    version: 2,
+    exported_at_ms: 0,
+    workspaces: names.map((name, i) => ({
+      id: `ws-${i}`,
+      name,
+      sort_index: i,
+      color_token: null,
+      projects: [
+        {
+          id: `proj-${i}`,
+          name: "P",
+          sort_index: 0,
+          color_token: null,
+          notes: [
+            {
+              id: `note-${i}-a`,
+              parent_id: null,
+              type: "markdown",
+              title: "Alpha",
+              sibling_index: 0,
+              metadata: null,
+            },
+          ],
+        },
+      ],
+    })),
+  };
+}
+
+describe("planImportWorkspaces", () => {
+  const now = Date.UTC(2026, 3, 22);
+
+  it("creates workspaces unchanged when there's no collision", () => {
+    const plan = planImportWorkspaces({
+      bundle: bundleWithWorkspaces(["Fresh"]),
+      existingWorkspaces: [],
+      policy: "rename",
+      nowMs: now,
+    });
+    assert.equal(plan.workspaces.length, 1);
+    const action = plan.workspaces[0]!;
+    assert.equal(action.kind, "create");
+    assert.equal((action as { chosenName: string }).chosenName, "Fresh");
+    assert.equal((action as { renamed: boolean }).renamed, false);
+    assert.equal(plan.canonicalPathRewrites.length, 0);
+  });
+
+  it("emits a rewrite pair for each bundled note when the workspace is renamed", () => {
+    const plan = planImportWorkspaces({
+      bundle: bundleWithWorkspaces(["Testing"]),
+      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+      policy: "rename",
+      nowMs: now,
+    });
+    const action = plan.workspaces[0]!;
+    assert.equal(action.kind, "create");
+    assert.equal(
+      (action as { chosenName: string }).chosenName,
+      "Testing (imported 2026-04-22)",
+    );
+    assert.equal((action as { renamed: boolean }).renamed, true);
+    assert.deepEqual(plan.canonicalPathRewrites, [
+      {
+        oldCanonical: "Testing/P/Alpha",
+        newCanonical: "Testing (imported 2026-04-22)/P/Alpha",
+      },
+    ]);
+  });
+
+  it("skips the workspace when policy is 'skip' and a collision exists", () => {
+    const plan = planImportWorkspaces({
+      bundle: bundleWithWorkspaces(["Testing", "Fresh"]),
+      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+      policy: "skip",
+      nowMs: now,
+    });
+    assert.equal(plan.workspaces[0]!.kind, "skip");
+    assert.equal(plan.workspaces[1]!.kind, "create");
+    // Skipped workspaces don't emit rewrites.
+    assert.equal(plan.canonicalPathRewrites.length, 0);
+  });
+
+  it("reuses the existing workspace id when policy is 'overwrite'", () => {
+    const plan = planImportWorkspaces({
+      bundle: bundleWithWorkspaces(["Testing"]),
+      existingWorkspaces: [{ id: "existing-123", name: "Testing" }],
+      policy: "overwrite",
+      nowMs: now,
+    });
+    const action = plan.workspaces[0]!;
+    assert.equal(action.kind, "reuse");
+    assert.equal(
+      (action as { existingWorkspaceId: string }).existingWorkspaceId,
+      "existing-123",
+    );
+    assert.equal(plan.canonicalPathRewrites.length, 0);
+  });
+
+  it("disambiguates two bundled workspaces that collide with each other on rename", () => {
+    const plan = planImportWorkspaces({
+      bundle: bundleWithWorkspaces(["Testing", "Testing"]),
+      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+      policy: "rename",
+      nowMs: now,
+    });
+    const names = plan.workspaces.map((a) =>
+      a.kind === "create" ? a.chosenName : a.kind,
+    );
+    assert.deepEqual(names, [
+      "Testing (imported 2026-04-22)",
+      "Testing (imported 2026-04-22) 2",
+    ]);
   });
 });
