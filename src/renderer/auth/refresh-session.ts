@@ -39,7 +39,19 @@ export function setRefreshSessionDeps(next: Deps): void {
 
 const LOG_TAG = "[archon-auth]";
 
+let inFlight: Promise<RefreshResult> | null = null;
+
 export async function refreshSessionOnce(): Promise<RefreshResult> {
+  // Single-flight across concurrent callers within this tab. Sibling tabs are
+  // handled via BroadcastChannel (see scheduler + withAuthRetry).
+  if (inFlight) return inFlight;
+  inFlight = doRefresh().finally(() => {
+    inFlight = null;
+  });
+  return inFlight;
+}
+
+async function doRefresh(): Promise<RefreshResult> {
   const refreshToken = readCloudSyncRefreshToken();
   if (!refreshToken) {
     console.info(`${LOG_TAG} refresh: no_refresh_token`);

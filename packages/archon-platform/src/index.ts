@@ -35,3 +35,15 @@ export {
   ARCHON_SYNC_ACCESS_TOKEN_KEY,
   ARCHON_SYNC_REFRESH_TOKEN_KEY,
 } from "./sync-auth-storage-keys";
+export {
+  RetriableAfterLoginError,
+  SessionExpiredError,
+  type SessionExpiredReason,
+} from "./errors";
+export {
+  withAuthRetry,
+  type AuthRequestDescriptor,
+  type RefreshOnceFn,
+  type WithAuthRetryDeps,
+  type WithAuthRetryOptions,
+} from "./with-auth-retry";
