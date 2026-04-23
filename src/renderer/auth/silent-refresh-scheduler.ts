@@ -1,6 +1,10 @@
 import { readCloudSyncToken, subscribeTokenChanges } from "../cloud-sync/cloud-sync-storage";
 import { decodeAccessTokenExpiry } from "./jwt-exp";
-import { refreshSessionOnce, type RefreshResult } from "./refresh-session";
+import {
+  refreshSessionOnce,
+  type RefreshReason,
+  type RefreshResult,
+} from "./refresh-session";
 
 /**
  * Default safety margin: refresh this many ms before `exp`. 60 s is wider than
@@ -23,7 +27,7 @@ export type SilentRefreshStatus = {
 export type RefreshEvent =
   | { kind: "started" }
   | { kind: "succeeded" }
-  | { kind: "failed"; reason: RefreshResult & { ok: false }["reason"] };
+  | { kind: "failed"; reason: RefreshReason };
 
 type RefreshListener = (event: RefreshEvent) => void;
 

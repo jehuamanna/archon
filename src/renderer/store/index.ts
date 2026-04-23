@@ -9,7 +9,14 @@ import {
   notifySyncSessionInvalidated,
   setSyncSessionInvalidatedHandler,
 } from "../sync-session-invalidation";
-import cloudAuthReducer, { cloudLogoutThunk } from "./cloudAuthSlice";
+import { setRefreshSessionDeps } from "../auth/refresh-session";
+import { setSilentRefreshSchedulerDeps } from "../auth/silent-refresh-scheduler";
+import cloudAuthReducer, {
+  cloudLogoutThunk,
+  sessionRefreshEnded,
+  sessionRefreshStarted,
+  sessionTokensRotated,
+} from "./cloudAuthSlice";
 import cloudNotesReducer from "./cloudNotesSlice";
 import { cloudNotesRxListener } from "./cloudNotesRxListener";
 import notesReducer from "./notesSlice";
@@ -58,6 +65,23 @@ setSyncSessionInvalidatedHandler(() => {
   if (typeof window !== "undefined") {
     window.location.replace("/");
   }
+});
+
+setRefreshSessionDeps({
+  remoteApi: platformDeps.remoteApi,
+  onTokensRotated: ({ accessToken }) => {
+    // Let listener middleware (and any UI observers) know claims may have
+    // changed; org/space bookkeeping was already updated by refreshSessionOnce.
+    void accessToken;
+    store.dispatch(sessionTokensRotated({}));
+  },
+});
+
+setSilentRefreshSchedulerDeps({
+  onRefreshEvent: (event) => {
+    if (event.kind === "started") store.dispatch(sessionRefreshStarted());
+    else store.dispatch(sessionRefreshEnded());
+  },
 });
 
 export type RootState = ReturnType<typeof store.getState>;

@@ -12,6 +12,12 @@ import {
 import { clearAllElectronAppPinSettings } from "../auth/electron-app-pin-storage";
 import { setAccessToken, setActiveOrgId, setActiveSpaceId } from "../auth/auth-session";
 import { decodeJwtPayload } from "../auth/jwt-exp";
+import {
+  refreshNowIfExpired,
+  restartSilentRefreshScheduler,
+  startSilentRefreshScheduler,
+  stopSilentRefreshScheduler,
+} from "../auth/silent-refresh-scheduler";
 import { clearPersistedWebSyncWpnPreference } from "../archon-web-shim";
 import {
   hydrateCloudNotesFromRxDbThunk,
@@ -56,6 +62,8 @@ export type CloudAuthState = {
   mustSetPassword: boolean;
   /** Platform-wide master admin flag. Populated from /auth/me on session restore. */
   isMasterAdmin: boolean;
+  /** True while a silent/reactive refresh is in flight. */
+  refreshing: boolean;
 };
 
 const initialState: CloudAuthState = {
@@ -66,6 +74,7 @@ const initialState: CloudAuthState = {
   busy: false,
   mustSetPassword: false,
   isMasterAdmin: false,
+  refreshing: false,
 };
 
 const cloudAuthSlice = createSlice({
@@ -75,6 +84,23 @@ const cloudAuthSlice = createSlice({
     /** Local flip after /auth/change-password succeeds so the gate unmounts without a reload. */
     clearMustSetPassword(state) {
       state.mustSetPassword = false;
+    },
+    sessionRefreshStarted(state) {
+      state.refreshing = true;
+    },
+    sessionRefreshEnded(state) {
+      state.refreshing = false;
+    },
+    /** After a successful refresh, re-seed claims-derived fields if they changed. */
+    sessionTokensRotated(
+      state,
+      action: { payload: { activeOrgId?: string; activeSpaceId?: string } },
+    ) {
+      // No state here today — the fields live in org/space slices. Kept as a
+      // named hook so downstream listeners (e.g. listener middleware) can match
+      // on action.type without peeking at refresh internals.
+      void state;
+      void action;
     },
   },
   extraReducers: (builder) => {
@@ -142,7 +168,16 @@ const cloudAuthSlice = createSlice({
   },
 });
 
-export const { clearMustSetPassword } = cloudAuthSlice.actions;
+export const {
+  clearMustSetPassword,
+  sessionRefreshStarted,
+  sessionRefreshEnded,
+  sessionTokensRotated,
+} = cloudAuthSlice.actions;
+
+export function selectIsSessionRefreshing(state: { cloudAuth: CloudAuthState }): boolean {
+  return state.cloudAuth.refreshing;
+}
 
 export const cloudRestoreSessionThunk = createAsyncThunk<
   { userId: string; email: string; mustSetPassword: boolean; isMasterAdmin: boolean } | null,
@@ -152,7 +187,7 @@ export const cloudRestoreSessionThunk = createAsyncThunk<
   if (!extra.remoteApi.getBaseUrl()) {
     return null;
   }
-  const token = readCloudSyncToken();
+  let token = readCloudSyncToken();
   if (!token) {
     extra.remoteApi.setAuthToken(null);
     extra.remoteApi.setRefreshToken(null);
@@ -161,6 +196,21 @@ export const cloudRestoreSessionThunk = createAsyncThunk<
   extra.remoteApi.setAuthToken(token);
   extra.remoteApi.setRefreshToken(readCloudSyncRefreshToken());
   setAccessToken(token);
+  // If the stored access token has already expired, refresh BEFORE any
+  // authenticated call so the UI never renders with a known-bad token.
+  const boot = await refreshNowIfExpired();
+  if (boot && !boot.ok) {
+    writeCloudSyncToken(null);
+    writeCloudSyncRefreshToken(null);
+    writeCloudSyncEmail(null);
+    extra.remoteApi.setAuthToken(null);
+    extra.remoteApi.setRefreshToken(null);
+    setAccessToken(null);
+    return null;
+  }
+  if (boot && boot.ok) {
+    token = boot.accessToken;
+  }
   const claims = decodeAccessTokenClaims(token);
   if (claims?.activeOrgId) {
     dispatch(setLocalActiveOrg({ orgId: claims.activeOrgId }));
@@ -181,6 +231,9 @@ export const cloudRestoreSessionThunk = createAsyncThunk<
       mustSetPassword: me.mustSetPassword === true,
       isMasterAdmin: me.isMasterAdmin === true,
     };
+
+    startSilentRefreshScheduler();
+    restartSilentRefreshScheduler();
 
     // Defer heavy operations to macrotask queue to allow UI to render first
     setTimeout(() => {
@@ -272,6 +325,8 @@ export const cloudLoginThunk = createAsyncThunk<
     /* non-fatal */
   }
   void dispatch(fetchNotificationsThunk());
+  startSilentRefreshScheduler();
+  restartSilentRefreshScheduler();
   return {
     userId,
     email: email.toLowerCase(),
@@ -303,12 +358,15 @@ export const cloudRegisterThunk = createAsyncThunk<
     dispatch(setLocalActiveSpace({ spaceId: claims.activeSpaceId }));
   }
   void dispatch(fetchNotificationsThunk());
+  startSilentRefreshScheduler();
+  restartSilentRefreshScheduler();
   return { userId, email: email.toLowerCase() };
 });
 
 export const cloudLogoutThunk = createAsyncThunk<void, void, CloudAuthThunkExtra>(
   "cloudAuth/logout",
   async (_, { extra, dispatch }) => {
+    stopSilentRefreshScheduler();
     await closeCloudNotesDb();
     writeCloudSyncToken(null);
     writeCloudSyncRefreshToken(null);
