@@ -133,6 +133,32 @@ function isUnboundKey(key: string): boolean {
   return key === "" || key.startsWith("__");
 }
 
+/**
+ * Per-(projectId, key) state hook.
+ *
+ * Design notes — why this is more than a naive fetch/poll:
+ *
+ * 1. While the user is typing, local state is authoritative. GET polls
+ *    never clobber a "dirty" (locally-modified) value; they only update
+ *    `versionRef` in the background so the next PUT has a fresh
+ *    `If-Match`. Without this the 2-second poll would erase typing that
+ *    hadn't been PUT-acknowledged yet.
+ *
+ * 2. Writes are strictly serialized via `inFlightRef`. A second keystroke
+ *    while a PUT is in flight sets `queuedRef` rather than firing a second
+ *    overlapping PUT with a stale `If-Match`. This prevents the 409 storm
+ *    we observed: two concurrent PUTs both sending `If-Match: 0`, the
+ *    second 409'ing, its handler re-fetching and wiping the user's
+ *    in-progress text.
+ *
+ * 3. On 409, we refetch to sync `versionRef` but we DO NOT overwrite the
+ *    local value. `dirtyRef` stays true, and the drain loop fires another
+ *    PUT with the updated version + the user's current local value.
+ *
+ * 4. While a write is pending or in flight, GET polls are suppressed —
+ *    there's nothing for the server to tell us that our local value
+ *    doesn't already know.
+ */
 function useProjectState<T>(
   key: string,
   initial?: T,
@@ -141,22 +167,38 @@ function useProjectState<T>(
   const [value, setValue] = React.useState<T | undefined>(initial);
   const [loading, setLoading] = React.useState<boolean>(!isUnboundKey(key));
   const [error, setError] = React.useState<string | undefined>(undefined);
+
   const versionRef = React.useRef<number>(0);
-  const pendingRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtyRef = React.useRef<boolean>(false);
+  const latestRef = React.useRef<T | undefined>(initial);
+  const inFlightRef = React.useRef<Promise<void> | null>(null);
+  const queuedRef = React.useRef<boolean>(false);
+  const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const unbound = isUnboundKey(key);
 
+  const putUrl = React.useMemo(
+    () =>
+      projectId && !unbound
+        ? `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`
+        : null,
+    [projectId, key, unbound],
+  );
+
   const read = React.useCallback(async (): Promise<void> => {
-    if (!projectId || unbound) return;
+    if (!putUrl || unbound) return;
+    // Never overwrite local state if the user has pending edits.
+    const skipLocalUpdate = dirtyRef.current || inFlightRef.current !== null;
     try {
-      const res = await fetch(
-        `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`,
-        { headers: { ...authHeaders() }, credentials: "omit" },
-      );
-      // Back-compat: older sync-apis may still 404 for absent keys. Treat
-      // 404 identically to the new 200-absent response.
+      const res = await fetch(putUrl, {
+        headers: { ...authHeaders() },
+        credentials: "omit",
+      });
       if (res.status === 404) {
-        versionRef.current = 0;
-        if (initial !== undefined) setValue(initial);
+        if (!skipLocalUpdate) {
+          versionRef.current = 0;
+          if (initial !== undefined) setValue(initial);
+        }
         setLoading(false);
         return;
       }
@@ -172,18 +214,18 @@ function useProjectState<T>(
         version: number;
         mode?: "inline" | "chunked" | "absent";
       };
-      if (body.mode === "absent" || (body.value === null && body.version === 0)) {
-        versionRef.current = 0;
-        if (initial !== undefined) setValue(initial);
-        setError(undefined);
-        setLoading(false);
-        return;
-      }
-      // Only overwrite if the server version is strictly newer — avoids
-      // stomping an in-flight local write that already bumped the version.
-      if (body.version >= versionRef.current) {
+      const absent =
+        body.mode === "absent" || (body.value === null && body.version === 0);
+      if (absent) {
+        if (!skipLocalUpdate) {
+          versionRef.current = 0;
+          if (initial !== undefined) setValue(initial);
+        }
+      } else if (body.version >= versionRef.current) {
         versionRef.current = body.version;
-        setValue(body.value as T);
+        if (!skipLocalUpdate) {
+          setValue(body.value as T);
+        }
       }
       setError(undefined);
       setLoading(false);
@@ -193,7 +235,87 @@ function useProjectState<T>(
       // eslint-disable-next-line no-console
       console.warn(`[mdx-sdk] GET ${key} threw:`, e);
     }
-  }, [projectId, key, initial, unbound]);
+  }, [putUrl, key, initial, unbound]);
+
+  const drainWrites = React.useCallback(async (): Promise<void> => {
+    if (!putUrl) return;
+    while (dirtyRef.current) {
+      dirtyRef.current = false;
+      const snapshot = latestRef.current;
+      const expectedVersion = versionRef.current;
+      try {
+        const res = await fetch(putUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "If-Match": String(expectedVersion),
+            ...authHeaders(),
+          },
+          credentials: "omit",
+          body: JSON.stringify({ value: snapshot }),
+        });
+        if (res.status === 200) {
+          const body = (await res.json()) as { version: number };
+          versionRef.current = body.version;
+          setError(undefined);
+          continue;
+        }
+        if (res.status === 409) {
+          // Sync versionRef from server; keep local value; re-dirty so the
+          // loop retries with the new version.
+          try {
+            const body = (await res.json()) as { currentVersion?: number };
+            if (typeof body.currentVersion === "number") {
+              versionRef.current = body.currentVersion;
+            } else {
+              await read();
+            }
+          } catch {
+            await read();
+          }
+          dirtyRef.current = true;
+          continue;
+        }
+        if (res.status === 429) {
+          setError("rate limit — slow down");
+          // Brief backoff before giving up this drain cycle; next edit retries.
+          await new Promise((r) => setTimeout(r, 250));
+          return;
+        }
+        if (res.status === 413) {
+          setError("value too large");
+          return;
+        }
+        setError(`PUT ${res.status}`);
+        // eslint-disable-next-line no-console
+        console.warn(`[mdx-sdk] PUT ${key} → ${res.status}`);
+        return;
+      } catch (e) {
+        setError((e as Error).message);
+        // eslint-disable-next-line no-console
+        console.warn(`[mdx-sdk] PUT ${key} threw:`, e);
+        return;
+      }
+    }
+  }, [putUrl, key, read]);
+
+  const kickDrain = React.useCallback((): void => {
+    if (!putUrl) return;
+    if (inFlightRef.current) {
+      queuedRef.current = true;
+      return;
+    }
+    const promise = (async () => {
+      do {
+        queuedRef.current = false;
+        await drainWrites();
+      } while (queuedRef.current && dirtyRef.current);
+    })();
+    inFlightRef.current = promise;
+    void promise.finally(() => {
+      inFlightRef.current = null;
+    });
+  }, [putUrl, drainWrites]);
 
   React.useEffect(() => {
     if (unbound) {
@@ -203,6 +325,7 @@ function useProjectState<T>(
     if (!projectId) return;
     void read();
     const id = setInterval(() => {
+      // Suppressed by `read` internally when dirtyRef / inFlightRef is set.
       void read();
     }, POLL_MS);
     return () => clearInterval(id);
@@ -213,51 +336,17 @@ function useProjectState<T>(
       setValue((prev) => {
         const resolved =
           typeof next === "function" ? (next as (p: T | undefined) => T)(prev) : next;
-        if (unbound || !projectId) return resolved;
-        if (pendingRef.current) clearTimeout(pendingRef.current);
-        pendingRef.current = setTimeout(() => {
-          void (async () => {
-            try {
-              const res = await fetch(
-                `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`,
-                {
-                  method: "PUT",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "If-Match": String(versionRef.current),
-                    ...authHeaders(),
-                  },
-                  credentials: "omit",
-                  body: JSON.stringify({ value: resolved }),
-                },
-              );
-              if (res.status === 200) {
-                const body = (await res.json()) as { version: number };
-                versionRef.current = body.version;
-                setError(undefined);
-              } else if (res.status === 409) {
-                // Server has a newer version — refetch.
-                await read();
-              } else if (res.status === 429) {
-                setError("rate limit — slow down");
-              } else if (res.status === 413) {
-                setError("value too large");
-              } else {
-                setError(`PUT ${res.status}`);
-                // eslint-disable-next-line no-console
-                console.warn(`[mdx-sdk] PUT ${key} → ${res.status}`);
-              }
-            } catch (e) {
-              setError((e as Error).message);
-              // eslint-disable-next-line no-console
-              console.warn(`[mdx-sdk] PUT ${key} threw:`, e);
-            }
-          })();
+        latestRef.current = resolved;
+        if (unbound || !putUrl) return resolved;
+        dirtyRef.current = true;
+        if (debounceRef.current) clearTimeout(debounceRef.current);
+        debounceRef.current = setTimeout(() => {
+          kickDrain();
         }, WRITE_DEBOUNCE_MS);
         return resolved;
       });
     },
-    [projectId, key, unbound, read],
+    [unbound, putUrl, kickDrain],
   );
 
   return [value, write, { loading, error }];
