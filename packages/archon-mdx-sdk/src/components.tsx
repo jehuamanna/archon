@@ -205,6 +205,59 @@ export function NoteEmbed(props: NoteEmbedProps): React.ReactElement {
   return React.createElement(Markdown, { source });
 }
 
+export interface ValueProps {
+  stateKey: string;
+  fallback?: string;
+}
+
+/** Render the current value of a project-state key. */
+export function Value(props: ValueProps): React.ReactElement {
+  const [v] = useProjectState<unknown>(props.stateKey);
+  if (v === undefined || v === null) {
+    return React.createElement(React.Fragment, null, props.fallback ?? "");
+  }
+  const text = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return React.createElement(React.Fragment, null, text);
+}
+
+export interface PushButtonProps {
+  label: string;
+  /** State key whose current value is appended (defaults to a literal if given). */
+  fromKey?: string;
+  value?: string;
+  /** Array state key to append to. Created as [] if missing. */
+  toKey: string;
+  /** When true, the fromKey is cleared after the push. */
+  clearFrom?: boolean;
+}
+
+/**
+ * Append-to-array button. Reads `fromKey` (or the static `value`) and pushes
+ * it onto the array at `toKey`. Handy for "add task" / "add attendee" flows
+ * that `<Button onClick>` (which only increments a counter) can't express.
+ */
+export function PushButton(props: PushButtonProps): React.ReactElement {
+  const [source, setSource] = useProjectState<string>(
+    props.fromKey ?? "__pushbutton_unbound",
+    "",
+  );
+  const [list, setList] = useProjectState<unknown[]>(props.toKey, []);
+  const onClick = (): void => {
+    const payload =
+      props.fromKey && typeof source === "string" && source.length > 0
+        ? source
+        : props.value ?? "";
+    if (payload === "" && !props.fromKey && !props.value) return;
+    setList((prev) => [...(prev ?? []), payload]);
+    if (props.clearFrom && props.fromKey) setSource("");
+  };
+  return React.createElement(
+    "button",
+    { type: "button", onClick },
+    props.label,
+  );
+}
+
 export interface MarkdownProps {
   source: string;
 }

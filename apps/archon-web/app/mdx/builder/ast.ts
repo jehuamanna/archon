@@ -66,6 +66,8 @@ export const EDITABLE_TAGS = new Set<string>([
   "Chart",
   "NoteEmbed",
   "Markdown",
+  "Value",
+  "PushButton",
 ]);
 
 let counter = 0;

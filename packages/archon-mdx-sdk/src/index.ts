@@ -19,6 +19,8 @@ export {
   Chart,
   NoteEmbed,
   Markdown,
+  Value,
+  PushButton,
 } from "./components.js";
 export { PROP_SPECS, type PropSpec, type ComponentPropSpec } from "./prop-specs.js";
 

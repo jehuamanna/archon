@@ -8,8 +8,8 @@ export interface PaletteProps {
 }
 
 const GROUPS: Array<{ label: string; items: string[] }> = [
-  { label: "Form", items: ["Input", "Select", "Checkbox", "Button", "Form"] },
-  { label: "Display", items: ["List", "Table", "Chart", "NoteEmbed", "Markdown"] },
+  { label: "Form", items: ["Input", "Select", "Checkbox", "Button", "PushButton", "Form"] },
+  { label: "Display", items: ["Value", "List", "Table", "Chart", "NoteEmbed", "Markdown"] },
 ];
 
 export function Palette({ onPick }: PaletteProps): React.ReactElement {

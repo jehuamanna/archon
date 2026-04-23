@@ -89,4 +89,37 @@ export const PROP_SPECS: Record<string, ComponentPropSpec> = {
       semantic: "Markdown source; rendered with sanitization.",
     },
   },
+  Value: {
+    stateKey: {
+      type: "stateKey",
+      required: true,
+      semantic: "State key whose current value is rendered inline.",
+    },
+    fallback: {
+      type: "string",
+      default: "",
+      semantic: "Text shown when the state key is undefined.",
+    },
+  },
+  PushButton: {
+    label: { type: "string", required: true, semantic: "Button label." },
+    fromKey: {
+      type: "stateKey",
+      semantic: "State key whose value is appended (alternative to `value`).",
+    },
+    value: {
+      type: "string",
+      semantic: "Static value appended when `fromKey` is absent or empty.",
+    },
+    toKey: {
+      type: "stateKey",
+      required: true,
+      semantic: "Array state key to append to.",
+    },
+    clearFrom: {
+      type: "boolean",
+      default: false,
+      semantic: "Reset `fromKey` to empty after the push.",
+    },
+  },
 };
