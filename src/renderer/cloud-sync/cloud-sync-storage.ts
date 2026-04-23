@@ -99,3 +99,82 @@ export function writeCloudSyncSince(ts: number): void {
     /* ignore */
   }
 }
+
+type TokenChangeSource = "local" | "other-tab";
+type TokenChangeListener = (source: TokenChangeSource) => void;
+
+const listeners = new Set<TokenChangeListener>();
+let broadcastChannel: BroadcastChannel | null = null;
+let storageListenerAttached = false;
+
+function ensureBroadcastWiredUp(): void {
+  if (typeof window === "undefined") return;
+  if (!broadcastChannel && typeof BroadcastChannel !== "undefined") {
+    try {
+      broadcastChannel = new BroadcastChannel("archon-auth");
+      broadcastChannel.addEventListener("message", (event) => {
+        const msg = event.data as { type?: unknown } | null;
+        if (msg && msg.type === "tokens-rotated") {
+          for (const l of listeners) {
+            try {
+              l("other-tab");
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      });
+    } catch {
+      broadcastChannel = null;
+    }
+  }
+  if (!storageListenerAttached) {
+    try {
+      window.addEventListener("storage", (event) => {
+        if (
+          event.key === ARCHON_SYNC_ACCESS_TOKEN_KEY ||
+          event.key === ARCHON_SYNC_REFRESH_TOKEN_KEY
+        ) {
+          for (const l of listeners) {
+            try {
+              l("other-tab");
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+      });
+      storageListenerAttached = true;
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+export function subscribeTokenChanges(listener: TokenChangeListener): () => void {
+  ensureBroadcastWiredUp();
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+/**
+ * Notify other tabs that the current tab has rotated its tokens. Also invokes
+ * local listeners so a tab may observe its own writes for scheduler restart.
+ */
+export function publishTokensRotated(): void {
+  ensureBroadcastWiredUp();
+  try {
+    broadcastChannel?.postMessage({ type: "tokens-rotated", at: Date.now() });
+  } catch {
+    /* ignore */
+  }
+  for (const l of listeners) {
+    try {
+      l("local");
+    } catch {
+      /* ignore */
+    }
+  }
+}

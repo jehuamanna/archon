@@ -1,6 +1,7 @@
 import type { ArchonPlatformDeps } from "@archon/platform";
 import { createSyncBaseUrlResolver } from "@archon/platform";
 import {
+  publishTokensRotated,
   readCloudSyncRefreshToken,
   writeCloudSyncRefreshToken,
   writeCloudSyncToken,
@@ -106,6 +107,7 @@ export async function refreshSessionOnce(): Promise<RefreshResult> {
       console.warn(`${LOG_TAG} refresh: onTokensRotated handler failed`, err);
     }
   }
+  publishTokensRotated();
   console.info(`${LOG_TAG} refresh: success`);
   return { ok: true, accessToken: newAccess, refreshToken: newRefresh };
 }
