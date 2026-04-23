@@ -352,6 +352,20 @@ export function Checkbox({
   );
 }
 
+/**
+ * Robust children presence check. MDX v3 sometimes compiles self-closing
+ * JSX (`<Button label="…" />`) with `children: []` rather than undefined —
+ * which, with a plain `??` fallback, renders as nothing because `[]` is
+ * not nullish but React renders an empty array as the empty string. Fall
+ * back to `label` whenever children don't actually carry visible content.
+ */
+function hasVisibleChildren(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  if (typeof v === "string") return v.length > 0;
+  if (Array.isArray(v)) return v.length > 0;
+  return true;
+}
+
 export function Button({
   label,
   onClick,
@@ -369,24 +383,54 @@ export function Button({
   const handle = (): void => {
     if (onClick) setCount((prev) => (typeof prev === "number" ? prev + 1 : 1));
   };
-  // Prefer children (JSX body form), fall back to label prop, then to a
-  // visible placeholder so the button never renders empty.
-  const text =
-    (children !== undefined && children !== null && children !== "" ? children : undefined) ??
-    (typeof label === "string" && label.length > 0 ? label : undefined) ??
-    "Button";
-  const base =
-    "inline-flex items-center justify-center rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors";
-  const style =
+  const labelText =
+    typeof label === "string" && label.length > 0 ? label : undefined;
+  const visibleChildren = hasVisibleChildren(children) ? children : undefined;
+  const text: React.ReactNode = visibleChildren ?? labelText ?? "Button";
+
+  // Inline styles + Tailwind classes. The inline fallbacks guarantee the
+  // button is visible even in environments where design-system tokens
+  // (`--primary`, `--primary-foreground`, `--border`) aren't resolved.
+  const baseStyle: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: "6px 12px",
+    borderRadius: 6,
+    fontSize: 13,
+    fontWeight: 500,
+    cursor: "pointer",
+    lineHeight: 1.2,
+    minHeight: 28,
+  };
+  const variantStyle: React.CSSProperties =
     variant === "outline"
-      ? "border border-border bg-background text-foreground hover:bg-muted/50"
-      : "bg-primary text-primary-foreground hover:bg-primary/90";
+      ? {
+          background: "transparent",
+          color: "inherit",
+          border: "1px solid currentColor",
+          opacity: 0.85,
+        }
+      : {
+          background: "var(--primary, #2563eb)",
+          color: "var(--primary-foreground, #ffffff)",
+          border: "1px solid transparent",
+        };
+  const cls =
+    variant === "outline"
+      ? "inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors hover:bg-muted/50"
+      : "inline-flex items-center justify-center rounded-md bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-colors hover:bg-primary/90";
+
   return (
     <button
       type="button"
       onClick={handle}
-      className={`${base} ${style}`}
+      className={cls}
+      style={{ ...baseStyle, ...variantStyle }}
+      data-archon-sdk-button=""
+      data-archon-sdk-button-label={labelText ?? ""}
       data-count={count ?? 0}
+      aria-label={typeof text === "string" ? text : labelText}
     >
       {text}
     </button>
