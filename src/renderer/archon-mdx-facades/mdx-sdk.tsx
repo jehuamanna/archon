@@ -26,6 +26,46 @@ import { readCloudSyncToken } from "../cloud-sync/cloud-sync-storage";
 const POLL_MS = 2000;
 const WRITE_DEBOUNCE_MS = 50;
 
+/**
+ * Module-scoped in-flight map for mdx-state GETs keyed by URL. Multiple
+ * `useProjectState` hook instances watching the same (projectId, key) share
+ * one HTTP request; each instance still applies the result to its own
+ * React state. Without this, two components using the same key (or
+ * StrictMode double-mount) each fire their own concurrent fetch.
+ */
+type MdxStateBody = {
+  value: unknown | null;
+  version: number;
+  mode?: "inline" | "chunked" | "absent";
+};
+type MdxStateReadResult =
+  | { kind: "ok"; body: MdxStateBody }
+  | { kind: "absent" }
+  | { kind: "error"; status: number };
+
+const mdxStateReadInFlight = new Map<string, Promise<MdxStateReadResult>>();
+
+async function sharedMdxStateRead(url: string): Promise<MdxStateReadResult> {
+  const existing = mdxStateReadInFlight.get(url);
+  if (existing) return existing;
+  const task = (async (): Promise<MdxStateReadResult> => {
+    try {
+      const res = await fetch(url, {
+        headers: { ...authHeaders() },
+        credentials: "omit",
+      });
+      if (res.status === 404) return { kind: "absent" };
+      if (!res.ok) return { kind: "error", status: res.status };
+      const body = (await res.json()) as MdxStateBody;
+      return { kind: "ok", body };
+    } finally {
+      mdxStateReadInFlight.delete(url);
+    }
+  })();
+  mdxStateReadInFlight.set(url, task);
+  return task;
+}
+
 // Canonical renderer-side pattern — see upload-image-asset.ts:13 for prior art.
 // `getAccessToken()` in auth-session.ts is a *different* token surface and is
 // not populated in web mode; using it here was the reason every HTTP call
@@ -193,20 +233,16 @@ function useProjectState<T>(
   const read = React.useCallback(async (): Promise<void> => {
     if (!putUrl || unbound) return;
     // Suppress reads when a write is in-flight (the write already reflects the
-    // latest truth) or when a previous read has not resolved — otherwise parent
-    // re-renders stack cancelled fetches on top of pending ones.
+    // latest truth) or when this hook's own previous read is still running.
     if (inFlightRef.current) return;
     if (readInFlightRef.current) return readInFlightRef.current;
     // Never overwrite local state if the user has pending edits.
     const skipLocalUpdate = dirtyRef.current;
     const currentInitial = initialRef.current;
-    const task = (async (): Promise<void> => {
+    const applyResult = async (): Promise<void> => {
       try {
-        const res = await fetch(putUrl, {
-          headers: { ...authHeaders() },
-          credentials: "omit",
-        });
-        if (res.status === 404) {
+        const result = await sharedMdxStateRead(putUrl);
+        if (result.kind === "absent") {
           if (!skipLocalUpdate) {
             versionRef.current = 0;
             if (currentInitial !== undefined) setValue(currentInitial);
@@ -214,18 +250,14 @@ function useProjectState<T>(
           setLoading(false);
           return;
         }
-        if (!res.ok) {
-          setError(`GET ${res.status}`);
+        if (result.kind === "error") {
+          setError(`GET ${result.status}`);
           setLoading(false);
           // eslint-disable-next-line no-console
-          console.warn(`[mdx-sdk] GET ${key} → ${res.status}`);
+          console.warn(`[mdx-sdk] GET ${key} → ${result.status}`);
           return;
         }
-        const body = (await res.json()) as {
-          value: T | null;
-          version: number;
-          mode?: "inline" | "chunked" | "absent";
-        };
+        const body = result.body;
         const absent =
           body.mode === "absent" || (body.value === null && body.version === 0);
         if (absent) {
@@ -247,7 +279,8 @@ function useProjectState<T>(
         // eslint-disable-next-line no-console
         console.warn(`[mdx-sdk] GET ${key} threw:`, e);
       }
-    })();
+    };
+    const task = applyResult();
     readInFlightRef.current = task;
     try {
       await task;
