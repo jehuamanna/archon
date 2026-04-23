@@ -105,11 +105,21 @@ export class MdxStateService {
 
   async get<T = unknown>(projectId: string, key: string): Promise<GetResult<T>> {
     const head = getMdxStateHead(this.db);
+    const t0 = Date.now();
     const doc = await head.findOne({ projectId, key });
+    const t1 = Date.now();
     if (!doc) {
+      // eslint-disable-next-line no-console
+      console.info(
+        `[mdx-state] svc.get key=${key} headLookup=${t1 - t0}ms result=absent`,
+      );
       return { value: undefined, version: 0, mode: "absent" };
     }
     if (doc.mode === "inline") {
+      // eslint-disable-next-line no-console
+      console.info(
+        `[mdx-state] svc.get key=${key} headLookup=${t1 - t0}ms mode=inline version=${doc.version}`,
+      );
       return { value: doc.value as T, version: doc.version, mode: "inline" };
     }
     const chunks = getMdxStateChunks(this.db);
@@ -117,8 +127,54 @@ export class MdxStateService {
       .find({ projectId, key, headVersion: doc.version })
       .sort({ chunkIndex: 1 })
       .toArray();
-    const buf = Buffer.concat(list.map((c) => c.data));
-    const parsed = JSON.parse(buf.toString("utf8")) as { v: T };
+    const t2 = Date.now();
+    // Defensive: an orphaned chunked head (chunks deleted but head not flipped)
+    // used to throw `JSON.parse("")` SyntaxError, which Fastify's error
+    // serializer can mishandle behind app.inject and leave the reply stalled.
+    // Treat as absent and log — readers already filter chunks on headVersion
+    // per the "torn state invisible" contract (plan 4), so this is safe.
+    if (list.length === 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mdx-state] svc.get key=${key} headLookup=${t1 - t0}ms chunksLookup=${t2 - t1}ms mode=chunked version=${doc.version} — NO CHUNKS FOUND, returning absent`,
+      );
+      return { value: undefined, version: 0, mode: "absent" };
+    }
+    // Mongo returns `data` as a `Binary` wrapper in the v6 driver. Accept both
+    // Buffer and Binary by coercing through `.buffer`/`Uint8Array` as needed.
+    const bufs = list.map((c) => {
+      const d = c.data as unknown;
+      if (Buffer.isBuffer(d)) return d;
+      if (d && typeof d === "object" && "buffer" in d) {
+        return Buffer.from((d as { buffer: Buffer | Uint8Array }).buffer);
+      }
+      if (d instanceof Uint8Array) return Buffer.from(d);
+      return Buffer.alloc(0);
+    });
+    const buf = Buffer.concat(bufs);
+    const text = buf.toString("utf8");
+    const t3 = Date.now();
+    if (text.length === 0) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mdx-state] svc.get key=${key} mode=chunked version=${doc.version} — EMPTY chunk payload, returning absent`,
+      );
+      return { value: undefined, version: 0, mode: "absent" };
+    }
+    let parsed: { v: T };
+    try {
+      parsed = JSON.parse(text) as { v: T };
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[mdx-state] svc.get key=${key} mode=chunked version=${doc.version} — JSON.parse failed (${(err as Error).message}), returning absent`,
+      );
+      return { value: undefined, version: 0, mode: "absent" };
+    }
+    // eslint-disable-next-line no-console
+    console.info(
+      `[mdx-state] svc.get key=${key} headLookup=${t1 - t0}ms chunksLookup=${t2 - t1}ms parse=${t3 - t2}ms mode=chunked version=${doc.version} bytes=${buf.length}`,
+    );
     return { value: parsed.v, version: doc.version, mode: "chunked" };
   }
 
