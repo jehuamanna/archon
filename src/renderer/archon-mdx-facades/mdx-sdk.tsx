@@ -45,20 +45,32 @@ type MdxStateReadResult =
 
 const mdxStateReadInFlight = new Map<string, Promise<MdxStateReadResult>>();
 
+/** Hard ceiling so a pathologically slow fetch cannot pin the dedupe slot. */
+const MDX_STATE_READ_TIMEOUT_MS = 10_000;
+
 async function sharedMdxStateRead(url: string): Promise<MdxStateReadResult> {
   const existing = mdxStateReadInFlight.get(url);
   if (existing) return existing;
   const task = (async (): Promise<MdxStateReadResult> => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MDX_STATE_READ_TIMEOUT_MS);
     try {
       const res = await fetch(url, {
         headers: { ...authHeaders() },
         credentials: "omit",
+        signal: controller.signal,
       });
       if (res.status === 404) return { kind: "absent" };
       if (!res.ok) return { kind: "error", status: res.status };
       const body = (await res.json()) as MdxStateBody;
       return { kind: "ok", body };
+    } catch (e) {
+      if ((e as { name?: string })?.name === "AbortError") {
+        return { kind: "error", status: 0 };
+      }
+      throw e;
     } finally {
+      clearTimeout(timer);
       mdxStateReadInFlight.delete(url);
     }
   })();
