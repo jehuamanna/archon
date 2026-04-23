@@ -10,6 +10,7 @@ import type { WpnNoteDetail, WpnNoteListItem } from "../shared/wpn-v2-types";
 import { authRefresh } from "./auth/auth-client";
 import { authedFetch } from "./auth/auth-retry";
 import { getAccessToken, setAccessToken } from "./auth/auth-session";
+import { terminateSession } from "./auth/session-termination";
 import { readElectronRunMode } from "./auth/electron-run-mode";
 import { isWebScratchSession } from "./auth/web-scratch";
 import {
@@ -21,7 +22,6 @@ import {
   useWebTryoutWpnIndexedDb,
   webScratchPlainStubOverrides,
 } from "./wpnscratch/web-scratch-archon-api";
-import { notifySyncSessionInvalidated } from "./sync-session-invalidation";
 import { wpnTrace } from "../shared/wpn-debug-trace";
 
 const noopUnsub = (): void => {};
@@ -215,7 +215,11 @@ async function syncWpnFetch<T>(
           return stub;
         }
       }
-      notifySyncSessionInvalidated();
+      void terminateSession(
+        err.reason === "refresh_failed_network"
+          ? "refresh_failed_network"
+          : "session_expired",
+      );
       throw new Error(`${method} ${apiPath} failed (401)`);
     }
     throw err;
