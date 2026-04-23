@@ -19,30 +19,35 @@
  * WebSocket without touching MDX authors.
  */
 import React from "react";
+import { createSyncBaseUrlResolver } from "@archon/platform";
 import { useMdxShell } from "../components/renderers/mdx-shell-context";
-import { getAccessToken } from "../auth/auth-session";
+import { readCloudSyncToken } from "../cloud-sync/cloud-sync-storage";
 
 const POLL_MS = 2000;
 const WRITE_DEBOUNCE_MS = 50;
 
+// Canonical renderer-side pattern — see upload-image-asset.ts:13 for prior art.
+// `getAccessToken()` in auth-session.ts is a *different* token surface and is
+// not populated in web mode; using it here was the reason every HTTP call
+// returned silently before.
+const resolveSyncBase = createSyncBaseUrlResolver();
+
 function syncBase(): string {
-  // Renderer uses same-origin /api/v1 — Next's colocated handler or the nginx
-  // gateway forwards to Fastify. Standalone hosts can override via window.
-  const w = typeof window !== "undefined" ? (window as Window & { __ARCHON_SYNC_API_BASE__?: string }) : undefined;
-  if (w?.__ARCHON_SYNC_API_BASE__) return w.__ARCHON_SYNC_API_BASE__.replace(/\/$/, "");
-  return "/api/v1";
+  const b = resolveSyncBase().trim().replace(/\/$/, "");
+  return b || "/api/v1";
 }
 
-function authHeaders(): HeadersInit {
-  const token = getAccessToken();
+function authHeaders(): Record<string, string> {
+  const token = readCloudSyncToken();
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 /**
  * The `Note` type exposed to MDX via `MdxShellContext` doesn't carry
  * `project_id` (see `src/shared/plugin-api.ts`). Resolve it lazily from
- * `GET /api/v1/wpn/notes/:id` and cache by noteId so we make one fetch per
- * note per session.
+ * `GET /wpn/notes-with-context` — the same endpoint used by image-notes
+ * for noteId→project lookup (see upload-image-asset.ts:55). Cached by
+ * noteId at module scope so we make one fetch per note per session.
  */
 const projectIdCache = new Map<string, string | null>();
 const projectIdInFlight = new Map<string, Promise<string | null>>();
@@ -54,22 +59,31 @@ async function resolveProjectIdFor(noteId: string): Promise<string | null> {
   if (pending) return pending;
   const promise = (async () => {
     try {
-      const res = await fetch(
-        `${syncBase()}/wpn/notes/${encodeURIComponent(noteId)}`,
-        { headers: authHeaders(), credentials: "include" },
-      );
+      const res = await fetch(`${syncBase()}/wpn/notes-with-context`, {
+        method: "GET",
+        headers: authHeaders(),
+        credentials: "omit",
+      });
       if (!res.ok) {
+        // eslint-disable-next-line no-console
+        console.warn(`[mdx-sdk] notes-with-context → ${res.status}`);
         projectIdCache.set(noteId, null);
         return null;
       }
-      const body = (await res.json()) as { note?: { project_id?: string } };
-      const pid =
-        typeof body.note?.project_id === "string" && body.note.project_id.length > 0
-          ? body.note.project_id
-          : null;
+      const body = (await res.json()) as {
+        notes?: { id: string; project_id: string }[];
+      };
+      const hit = (body.notes ?? []).find((n) => n.id === noteId);
+      const pid = hit?.project_id ?? null;
       projectIdCache.set(noteId, pid);
+      if (!pid) {
+        // eslint-disable-next-line no-console
+        console.warn(`[mdx-sdk] note ${noteId} not found in current scope`);
+      }
       return pid;
-    } catch {
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn("[mdx-sdk] notes-with-context threw:", e);
       projectIdCache.set(noteId, null);
       return null;
     } finally {
@@ -136,7 +150,7 @@ function useProjectState<T>(
     try {
       const res = await fetch(
         `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`,
-        { headers: { ...authHeaders() }, credentials: "include" },
+        { headers: { ...authHeaders() }, credentials: "omit" },
       );
       if (res.status === 404) {
         versionRef.current = 0;
@@ -200,7 +214,7 @@ function useProjectState<T>(
                     "If-Match": String(versionRef.current),
                     ...authHeaders(),
                   },
-                  credentials: "include",
+                  credentials: "omit",
                   body: JSON.stringify({ value: resolved }),
                 },
               );
@@ -593,7 +607,7 @@ export function NoteEmbed({
         if (id) {
           const res = await fetch(`${syncBase()}/wpn/notes/${encodeURIComponent(id)}`, {
             headers: authHeaders(),
-            credentials: "include",
+            credentials: "omit",
           });
           if (!res.ok) {
             if (!cancelled) setState({ source: "", loading: false, error: `GET ${res.status}` });
@@ -607,7 +621,7 @@ export function NoteEmbed({
         if (title && projectId) {
           const res = await fetch(
             `${syncBase()}/wpn/projects/${encodeURIComponent(projectId)}/notes`,
-            { headers: authHeaders(), credentials: "include" },
+            { headers: authHeaders(), credentials: "omit" },
           );
           if (!res.ok) {
             if (!cancelled) setState({ source: "", loading: false, error: `GET ${res.status}` });
