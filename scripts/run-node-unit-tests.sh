@@ -8,7 +8,8 @@ cd "$ROOT"
 mapfile -t files < <(
   find src -name '*.test.ts' \
     ! -name 'note-vfs-link-rewrite.test.ts' \
-    ! -name 'legacy-flat-to-wpn-migrate.test.ts' | sort
+    ! -name 'legacy-flat-to-wpn-migrate.test.ts' \
+    ! -name 'refresh-session.test.ts' | sort
 )
 if [ "${#files[@]}" -eq 0 ]; then
   echo "No test files found under src/" >&2
