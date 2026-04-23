@@ -23,6 +23,7 @@ import type {
   WorkspaceVisibility,
 } from "./org-schemas.js";
 import type { NotificationDoc } from "./notification-schemas.js";
+import { ensureMdxStateIndexes } from "./mdx-state/schema.js";
 
 export type SyncNoteDoc = {
   id: string;
@@ -290,6 +291,8 @@ async function ensureIndexes(database: Db): Promise<void> {
 
   const migrations = database.collection<MigrationDoc>("_migrations");
   await migrations.createIndex({ key: 1 }, { unique: true });
+
+  await ensureMdxStateIndexes(database);
 
   await runIdempotentMigrations(database);
 }
