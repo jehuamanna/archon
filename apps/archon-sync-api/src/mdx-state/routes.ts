@@ -25,21 +25,45 @@ const WS_TOKEN_TTL = "5m";
  * R2-Q3 ("anyone with access to the project can write"). Read-only shares
  * are excluded from state writes by design; they render MDX but can't mutate.
  */
+/**
+ * Short-TTL cache for requireProjectMember results. The permission cascade
+ * in userCanWriteProject fans out to ~10 Mongo lookups; the mdx-state GET
+ * poll re-hits this every 2s per key. Caching for 30s per (user, project)
+ * turns N polls/sec × K keys into one expensive check per 30s window.
+ */
+const MEMBERSHIP_CACHE_TTL_MS = 30_000;
+const membershipCache = new Map<string, { ok: boolean; expiresAt: number }>();
+
 async function requireProjectMember(
   auth: JwtPayload,
   projectId: string,
 ): Promise<boolean> {
+  const cacheKey = `${auth.sub}:${projectId}`;
+  const now = Date.now();
+  const cached = membershipCache.get(cacheKey);
+  if (cached && cached.expiresAt > now) {
+    return cached.ok;
+  }
   const t0 = Date.now();
   const project = await getWpnProjectsCollection().findOne({ id: projectId });
   const t1 = Date.now();
   if (!project) {
+    membershipCache.set(cacheKey, { ok: false, expiresAt: now + MEMBERSHIP_CACHE_TTL_MS });
     // eslint-disable-next-line no-console
     console.info(
       `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms result=not-found`,
     );
     return false;
   }
-  if (project.userId === auth.sub) {
+  // Tolerate ObjectId/string drift: the stored userId may be a string from
+  // the sync-api write path OR an ObjectId from a legacy insertion. Compare
+  // both string forms.
+  const storedUserId =
+    typeof project.userId === "string"
+      ? project.userId
+      : (project.userId as { toString?: () => string })?.toString?.() ?? "";
+  if (storedUserId === auth.sub) {
+    membershipCache.set(cacheKey, { ok: true, expiresAt: now + MEMBERSHIP_CACHE_TTL_MS });
     // eslint-disable-next-line no-console
     console.info(
       `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms result=owner-fastpath`,
@@ -52,6 +76,10 @@ async function requireProjectMember(
   );
   const canWrite = await userCanWriteProject(auth, projectId);
   const t2 = Date.now();
+  membershipCache.set(cacheKey, {
+    ok: canWrite,
+    expiresAt: now + MEMBERSHIP_CACHE_TTL_MS,
+  });
   // eslint-disable-next-line no-console
   console.info(
     `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms userCanWriteProject=${t2 - t1}ms result=${canWrite}`,
