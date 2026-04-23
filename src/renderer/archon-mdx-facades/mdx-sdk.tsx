@@ -38,10 +38,85 @@ function authHeaders(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
+/**
+ * The `Note` type exposed to MDX via `MdxShellContext` doesn't carry
+ * `project_id` (see `src/shared/plugin-api.ts`). Resolve it lazily from
+ * `GET /api/v1/wpn/notes/:id` and cache by noteId so we make one fetch per
+ * note per session.
+ */
+const projectIdCache = new Map<string, string | null>();
+const projectIdInFlight = new Map<string, Promise<string | null>>();
+
+async function resolveProjectIdFor(noteId: string): Promise<string | null> {
+  const cached = projectIdCache.get(noteId);
+  if (cached !== undefined) return cached;
+  const pending = projectIdInFlight.get(noteId);
+  if (pending) return pending;
+  const promise = (async () => {
+    try {
+      const res = await fetch(
+        `${syncBase()}/wpn/notes/${encodeURIComponent(noteId)}`,
+        { headers: authHeaders(), credentials: "include" },
+      );
+      if (!res.ok) {
+        projectIdCache.set(noteId, null);
+        return null;
+      }
+      const body = (await res.json()) as { note?: { project_id?: string } };
+      const pid =
+        typeof body.note?.project_id === "string" && body.note.project_id.length > 0
+          ? body.note.project_id
+          : null;
+      projectIdCache.set(noteId, pid);
+      return pid;
+    } catch {
+      projectIdCache.set(noteId, null);
+      return null;
+    } finally {
+      projectIdInFlight.delete(noteId);
+    }
+  })();
+  projectIdInFlight.set(noteId, promise);
+  return promise;
+}
+
 function useProjectId(): string | null {
   const shell = useMdxShell();
-  const pid = (shell as { note?: { project_id?: string } }).note?.project_id;
-  return typeof pid === "string" && pid.length > 0 ? pid : null;
+  // The renderer may pass a WpnNote (has project_id) or a plugin-api Note (doesn't).
+  // Try the direct field first — it's free.
+  const direct = (shell as unknown as { note?: { project_id?: string } }).note?.project_id;
+  const noteId = shell.note?.id;
+  const [pid, setPid] = React.useState<string | null>(() => {
+    if (typeof direct === "string" && direct.length > 0) return direct;
+    if (noteId) return projectIdCache.get(noteId) ?? null;
+    return null;
+  });
+
+  React.useEffect(() => {
+    if (typeof direct === "string" && direct.length > 0) {
+      setPid(direct);
+      return;
+    }
+    if (!noteId) {
+      setPid(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const resolved = await resolveProjectIdFor(noteId);
+      if (!cancelled) setPid(resolved);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [direct, noteId]);
+
+  return pid;
+}
+
+/** Keys that are intentionally unbound — skip network entirely, use local state only. */
+function isUnboundKey(key: string): boolean {
+  return key === "" || key.startsWith("__");
 }
 
 function useProjectState<T>(
@@ -50,13 +125,14 @@ function useProjectState<T>(
 ): [T | undefined, (next: T | ((prev: T | undefined) => T)) => void, { loading: boolean; error?: string }] {
   const projectId = useProjectId();
   const [value, setValue] = React.useState<T | undefined>(initial);
-  const [loading, setLoading] = React.useState<boolean>(true);
+  const [loading, setLoading] = React.useState<boolean>(!isUnboundKey(key));
   const [error, setError] = React.useState<string | undefined>(undefined);
   const versionRef = React.useRef<number>(0);
   const pendingRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const unbound = isUnboundKey(key);
 
   const read = React.useCallback(async (): Promise<void> => {
-    if (!projectId) return;
+    if (!projectId || unbound) return;
     try {
       const res = await fetch(
         `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`,
@@ -71,6 +147,8 @@ function useProjectState<T>(
       if (!res.ok) {
         setError(`GET ${res.status}`);
         setLoading(false);
+        // eslint-disable-next-line no-console
+        console.warn(`[mdx-sdk] GET ${key} → ${res.status}`);
         return;
       }
       const body = (await res.json()) as { value: T; version: number };
@@ -85,23 +163,30 @@ function useProjectState<T>(
     } catch (e) {
       setError((e as Error).message);
       setLoading(false);
+      // eslint-disable-next-line no-console
+      console.warn(`[mdx-sdk] GET ${key} threw:`, e);
     }
-  }, [projectId, key, initial]);
+  }, [projectId, key, initial, unbound]);
 
   React.useEffect(() => {
+    if (unbound) {
+      setLoading(false);
+      return;
+    }
+    if (!projectId) return;
     void read();
     const id = setInterval(() => {
       void read();
     }, POLL_MS);
     return () => clearInterval(id);
-  }, [read]);
+  }, [read, projectId, unbound]);
 
   const write = React.useCallback<(n: T | ((prev: T | undefined) => T)) => void>(
     (next) => {
       setValue((prev) => {
         const resolved =
           typeof next === "function" ? (next as (p: T | undefined) => T)(prev) : next;
-        if (!projectId) return resolved;
+        if (unbound || !projectId) return resolved;
         if (pendingRef.current) clearTimeout(pendingRef.current);
         pendingRef.current = setTimeout(() => {
           void (async () => {
@@ -122,6 +207,7 @@ function useProjectState<T>(
               if (res.status === 200) {
                 const body = (await res.json()) as { version: number };
                 versionRef.current = body.version;
+                setError(undefined);
               } else if (res.status === 409) {
                 // Server has a newer version — refetch.
                 await read();
@@ -131,16 +217,20 @@ function useProjectState<T>(
                 setError("value too large");
               } else {
                 setError(`PUT ${res.status}`);
+                // eslint-disable-next-line no-console
+                console.warn(`[mdx-sdk] PUT ${key} → ${res.status}`);
               }
             } catch (e) {
               setError((e as Error).message);
+              // eslint-disable-next-line no-console
+              console.warn(`[mdx-sdk] PUT ${key} threw:`, e);
             }
           })();
         }, WRITE_DEBOUNCE_MS);
         return resolved;
       });
     },
-    [projectId, key, read],
+    [projectId, key, unbound, read],
   );
 
   return [value, write, { loading, error }];
@@ -239,21 +329,36 @@ export function Button({
   label,
   onClick,
   children,
+  variant = "default",
 }: {
   label?: string;
   onClick?: string;
   children?: React.ReactNode;
+  variant?: "default" | "outline";
 }): React.ReactElement {
-  const [count, setCount] = useProjectState<number>(onClick ?? "__unbound", 0);
+  // When `onClick` is not a stateKey, skip all network — this lets existing
+  // `<Button>Text</Button>` notes keep working exactly as before.
+  const [count, setCount] = useProjectState<number>(onClick ?? "", 0);
   const handle = (): void => {
     if (onClick) setCount((prev) => (typeof prev === "number" ? prev + 1 : 1));
   };
-  const text = label ?? children;
+  // Prefer children (JSX body form), fall back to label prop, then to a
+  // visible placeholder so the button never renders empty.
+  const text =
+    (children !== undefined && children !== null && children !== "" ? children : undefined) ??
+    (typeof label === "string" && label.length > 0 ? label : undefined) ??
+    "Button";
+  const base =
+    "inline-flex items-center justify-center rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors";
+  const style =
+    variant === "outline"
+      ? "border border-border bg-background text-foreground hover:bg-muted/50"
+      : "bg-primary text-primary-foreground hover:bg-primary/90";
   return (
     <button
       type="button"
       onClick={handle}
-      className="inline-flex items-center justify-center rounded-md bg-primary px-3 py-1.5 text-[13px] font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+      className={`${base} ${style}`}
       data-count={count ?? 0}
     >
       {text}
