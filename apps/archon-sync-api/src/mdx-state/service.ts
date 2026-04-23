@@ -1,4 +1,4 @@
-import type { Db, ClientSession } from "mongodb";
+import type { Db } from "mongodb";
 import {
   CHUNK_SIZE_BYTES,
   INLINE_THRESHOLD_BYTES,
@@ -56,6 +56,24 @@ export interface PutResult {
   totalBytes: number;
 }
 
+/**
+ * Cached replica-set detection. `null` = unknown (haven't checked yet or check
+ * failed); true/false = known. Populated on the first put(); subsequent writes
+ * short-circuit the check.
+ */
+let replicaSetAvailable: boolean | null = null;
+
+async function detectReplicaSet(db: Db): Promise<boolean> {
+  try {
+    // Note: `hello` returns `setName` on replica-set members. On standalone
+    // Mongo, `setName` is absent.
+    const info = (await db.command({ hello: 1 })) as { setName?: string };
+    return typeof info.setName === "string" && info.setName.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export class MdxStateService {
   constructor(private readonly db: Db) {}
 
@@ -104,6 +122,16 @@ export class MdxStateService {
     return { value: parsed.v, version: doc.version, mode: "chunked" };
   }
 
+  /**
+   * Write a value, optionally chunking oversize payloads. The Mongo transaction
+   * path is used only when the server is a replica set; on standalone Mongo
+   * (common in local dev) we fall back to a non-transactional sequence.
+   *
+   * The inline path is a single-document upsert — atomic on standalone Mongo
+   * without a transaction. The chunked path is a multi-doc sequence; readers
+   * filter chunks by `headVersion` so torn state is never observed (only the
+   * fully-written previous version or the new one becomes visible).
+   */
   async put<T>(
     projectId: string,
     key: string,
@@ -116,104 +144,154 @@ export class MdxStateService {
       throw new MdxStateTooLargeError(size);
     }
 
-    const client = this.db.client ?? null;
-    if (!client) {
-      throw new Error("Mongo client not reachable from Db");
+    if (replicaSetAvailable === null) {
+      replicaSetAvailable = await detectReplicaSet(this.db);
     }
-    const session: ClientSession = client.startSession();
-    try {
-      let result: PutResult | undefined;
-      await session.withTransaction(async () => {
-        const head = getMdxStateHead(this.db);
-        const chunks = getMdxStateChunks(this.db);
 
-        const current = await head.findOne({ projectId, key }, { session });
-        const currentVersion = current?.version ?? 0;
-        if (currentVersion !== expectedVersion) {
-          throw new MdxStateConflictError(currentVersion);
-        }
+    const head = getMdxStateHead(this.db);
+    const chunks = getMdxStateChunks(this.db);
 
-        if (!current) {
-          const keyCount = await head.countDocuments(
-            { projectId },
+    const current = await head.findOne({ projectId, key });
+    const currentVersion = current?.version ?? 0;
+    if (currentVersion !== expectedVersion) {
+      throw new MdxStateConflictError(currentVersion);
+    }
+    if (!current) {
+      const keyCount = await head.countDocuments({ projectId });
+      if (keyCount >= MAX_KEYS_PER_PROJECT) {
+        throw new MdxStateKeyLimitError(keyCount);
+      }
+    }
+
+    const nextVersion = currentVersion + 1;
+    const updatedAt = new Date();
+
+    if (size <= INLINE_THRESHOLD_BYTES) {
+      const doc: MdxStateHeadDoc = {
+        projectId,
+        key,
+        mode: "inline",
+        value,
+        totalBytes: size,
+        version: nextVersion,
+        updatedAt,
+        updatedBy: actor,
+      };
+      // Conditional replace on (projectId, key, version) protects against
+      // concurrent writers — if another writer committed between our read and
+      // write, matchedCount is 0 and we surface a conflict.
+      const res = await head.replaceOne(
+        { projectId, key, version: currentVersion },
+        doc,
+        { upsert: currentVersion === 0 },
+      );
+      if (res.matchedCount === 0 && !res.upsertedId) {
+        const racerCurrent = await head.findOne({ projectId, key });
+        throw new MdxStateConflictError(racerCurrent?.version ?? 0);
+      }
+      // GC any stale chunks (transition from chunked → inline). Independent
+      // single-doc deletes; a failure here is cosmetic (stale chunks are
+      // filtered by headVersion on read anyway).
+      await chunks.deleteMany({ projectId, key });
+      return { version: nextVersion, mode: "inline", totalBytes: size };
+    }
+
+    // Chunked path. Prefer a transaction on replica-set Mongo; otherwise fall
+    // back to a non-transactional write sequence. Readers protect themselves
+    // by filtering chunks on `headVersion`, so even torn state during a
+    // crash is invisible to GET.
+    const serialized = Buffer.from(JSON.stringify({ v: value }), "utf8");
+    const totalChunks = Math.ceil(serialized.length / CHUNK_SIZE_BYTES);
+    const chunkDocs: Array<{
+      projectId: string;
+      key: string;
+      chunkIndex: number;
+      headVersion: number;
+      data: Buffer;
+    }> = [];
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE_BYTES;
+      const end = Math.min(start + CHUNK_SIZE_BYTES, serialized.length);
+      chunkDocs.push({
+        projectId,
+        key,
+        chunkIndex: i,
+        headVersion: nextVersion,
+        data: serialized.subarray(start, end),
+      });
+    }
+    const newHead: MdxStateHeadDoc = {
+      projectId,
+      key,
+      mode: "chunked",
+      totalChunks,
+      totalBytes: size,
+      version: nextVersion,
+      updatedAt,
+      updatedBy: actor,
+    };
+
+    if (replicaSetAvailable) {
+      const client = this.db.client;
+      const session = client.startSession();
+      try {
+        await session.withTransaction(async () => {
+          const res = await head.replaceOne(
+            { projectId, key, version: currentVersion },
+            newHead,
+            { upsert: currentVersion === 0, session },
+          );
+          if (res.matchedCount === 0 && !res.upsertedId) {
+            const racer = await head.findOne({ projectId, key }, { session });
+            throw new MdxStateConflictError(racer?.version ?? 0);
+          }
+          if (chunkDocs.length > 0) {
+            await chunks.insertMany(chunkDocs, { session, ordered: true });
+          }
+          await chunks.deleteMany(
+            { projectId, key, headVersion: { $lt: nextVersion } },
             { session },
           );
-          if (keyCount >= MAX_KEYS_PER_PROJECT) {
-            throw new MdxStateKeyLimitError(keyCount);
-          }
-        }
-
-        const version = currentVersion + 1;
-        const updatedAt = new Date();
-
-        if (size <= INLINE_THRESHOLD_BYTES) {
-          const doc: MdxStateHeadDoc = {
-            projectId,
-            key,
-            mode: "inline",
-            value,
-            totalBytes: size,
-            version,
-            updatedAt,
-            updatedBy: actor,
-          };
-          await head.replaceOne(
-            { projectId, key },
-            doc,
-            { upsert: true, session },
-          );
-          await chunks.deleteMany({ projectId, key }, { session });
-          result = { version, mode: "inline", totalBytes: size };
-          return;
-        }
-
-        const serialized = Buffer.from(
-          JSON.stringify({ v: value }),
-          "utf8",
-        );
-        const totalChunks = Math.ceil(serialized.length / CHUNK_SIZE_BYTES);
-        const doc: MdxStateHeadDoc = {
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      // Non-replica-set fallback: write chunks FIRST (stamped with nextVersion),
+      // then flip the head. Readers stay on the old version until the head
+      // update commits; once flipped, they see the fully-written new chunks.
+      if (chunkDocs.length > 0) {
+        await chunks.insertMany(chunkDocs, { ordered: true });
+      }
+      const res = await head.replaceOne(
+        { projectId, key, version: currentVersion },
+        newHead,
+        { upsert: currentVersion === 0 },
+      );
+      if (res.matchedCount === 0 && !res.upsertedId) {
+        // Race lost — someone else bumped the version. Orphan chunks will be
+        // GC'd by the next successful write (deleteMany below) or stay
+        // inaccessible because their headVersion doesn't match any head.
+        await chunks.deleteMany({
           projectId,
           key,
-          mode: "chunked",
-          totalChunks,
-          totalBytes: size,
-          version,
-          updatedAt,
-          updatedBy: actor,
-        };
-        await head.replaceOne(
-          { projectId, key },
-          doc,
-          { upsert: true, session },
-        );
-        const chunkDocs = [];
-        for (let i = 0; i < totalChunks; i++) {
-          const start = i * CHUNK_SIZE_BYTES;
-          const end = Math.min(start + CHUNK_SIZE_BYTES, serialized.length);
-          chunkDocs.push({
-            projectId,
-            key,
-            chunkIndex: i,
-            headVersion: version,
-            data: serialized.subarray(start, end),
-          });
-        }
-        if (chunkDocs.length > 0) {
-          await chunks.insertMany(chunkDocs, { session, ordered: true });
-        }
-        await chunks.deleteMany(
-          { projectId, key, headVersion: { $lt: version } },
-          { session },
-        );
-        result = { version, mode: "chunked", totalBytes: size };
-      });
-      if (!result) {
-        throw new Error("Transaction returned no result");
+          headVersion: nextVersion,
+        });
+        const racer = await head.findOne({ projectId, key });
+        throw new MdxStateConflictError(racer?.version ?? 0);
       }
-      return result;
-    } finally {
-      await session.endSession();
+      await chunks.deleteMany({
+        projectId,
+        key,
+        headVersion: { $lt: nextVersion },
+      });
     }
+
+    return { version: nextVersion, mode: "chunked", totalBytes: size };
   }
+}
+
+/** Test hook — reset the replica-set detection cache. */
+export function __resetMdxStateReplicaDetectionForTests(): void {
+  replicaSetAvailable = null;
 }
