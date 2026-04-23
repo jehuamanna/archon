@@ -29,10 +29,34 @@ async function requireProjectMember(
   auth: JwtPayload,
   projectId: string,
 ): Promise<boolean> {
+  const t0 = Date.now();
   const project = await getWpnProjectsCollection().findOne({ id: projectId });
-  if (!project) return false;
-  if (project.userId === auth.sub) return true;
-  return userCanWriteProject(auth, projectId);
+  const t1 = Date.now();
+  if (!project) {
+    // eslint-disable-next-line no-console
+    console.info(
+      `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms result=not-found`,
+    );
+    return false;
+  }
+  if (project.userId === auth.sub) {
+    // eslint-disable-next-line no-console
+    console.info(
+      `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms result=owner-fastpath`,
+    );
+    return true;
+  }
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[mdx-state] requireProjectMember falling through to userCanWriteProject — project.userId=${JSON.stringify(project.userId)} auth.sub=${JSON.stringify(auth.sub)}`,
+  );
+  const canWrite = await userCanWriteProject(auth, projectId);
+  const t2 = Date.now();
+  // eslint-disable-next-line no-console
+  console.info(
+    `[mdx-state] requireProjectMember projectLookup=${t1 - t0}ms userCanWriteProject=${t2 - t1}ms result=${canWrite}`,
+  );
+  return canWrite;
 }
 
 export function registerMdxStateRoutes(
@@ -62,6 +86,7 @@ export function registerMdxStateRoutes(
   app.get<{ Params: { projectId: string; key: string } }>(
     "/projects/:projectId/mdx-state/:key",
     async (request, reply) => {
+      const routeStart = Date.now();
       const auth = await requireAuth(request, reply, jwtSecret);
       if (!auth) return;
       const { projectId, key } = request.params;
@@ -69,10 +94,17 @@ export function registerMdxStateRoutes(
         return reply.status(400).send({ error: "invalid projectId or key" });
       }
       const db = getActiveDb();
+      const membershipStart = Date.now();
       const ok = await requireProjectMember(auth, projectId);
+      const membershipEnd = Date.now();
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       const svc = new MdxStateService(db);
       const res = await svc.get(projectId, key);
+      const svcEnd = Date.now();
+      // eslint-disable-next-line no-console
+      console.info(
+        `[mdx-state] GET ${key} membership=${membershipEnd - membershipStart}ms mongoGet=${svcEnd - membershipEnd}ms total=${svcEnd - routeStart}ms`,
+      );
       // Return 200 for absent keys (value: null, version: 0) instead of 404.
       // HTTP-404 for a documented "not yet written" case turned the polling
       // loop into visual spam in devtools. Clients treat `mode === "absent"`
