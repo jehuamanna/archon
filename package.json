@@ -63,7 +63,8 @@
     "test:vfs-link-rewrite": "tsx --test src/shared/note-vfs-link-rewrite.test.ts",
     "test:legacy-wpn-migrate": "tsx --test src/core/wpn/legacy-flat-to-wpn-migrate.test.ts",
     "test:refresh-session": "tsx --test src/renderer/auth/refresh-session.test.ts",
-    "test": "npm run test:node-unit && npm run test:vfs-link-rewrite && npm run test:legacy-wpn-migrate && npm run test:refresh-session && npm run test -w @archon/sync-api",
+    "test:with-auth-retry": "tsx --test src/renderer/auth/with-auth-retry.test.ts",
+    "test": "npm run test:node-unit && npm run test:vfs-link-rewrite && npm run test:legacy-wpn-migrate && npm run test:refresh-session && npm run test:with-auth-retry && npm run test -w @archon/sync-api",
     "test:mcp": "npm test -w @archon-studio/mcp",
     "test:e2e": "bash scripts/e2e-run-web.sh",
     "test:e2e:ci": "npx playwright install --with-deps chromium && npm run test:e2e"
