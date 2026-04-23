@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import type { ChangeStream, ResumeToken } from "mongodb";
+import type { JwtPayload } from "../auth.js";
 import { verifyToken } from "../auth.js";
 import { getActiveDb } from "../db.js";
 import { getMdxStateHead, getMdxStateWsCursors } from "./schema.js";
@@ -17,11 +18,14 @@ interface WsTokenPayload {
   exp?: number;
 }
 
-async function hasProjectAccess(userId: string, projectId: string): Promise<boolean> {
+async function hasProjectAccess(
+  auth: JwtPayload,
+  projectId: string,
+): Promise<boolean> {
   const project = await getWpnProjectsCollection().findOne({ id: projectId });
   if (!project) return false;
-  if (project.userId === userId) return true;
-  return userCanWriteProject(userId, projectId);
+  if (project.userId === auth.sub) return true;
+  return userCanWriteProject(auth, projectId);
 }
 
 /**
@@ -65,9 +69,10 @@ export function registerMdxStateWsRoutes(
         return;
       }
       const userId = payload.sub;
+      const auth: JwtPayload = { sub: payload.sub, email: payload.email };
 
       // Initial access check.
-      if (!(await hasProjectAccess(userId, projectId))) {
+      if (!(await hasProjectAccess(auth, projectId))) {
         socket.close(4403, "no access to project");
         return;
       }
@@ -103,7 +108,7 @@ export function registerMdxStateWsRoutes(
       }
 
       const reverifyTimer = setInterval(async () => {
-        if (!(await hasProjectAccess(userId, projectId))) {
+        if (!(await hasProjectAccess(auth, projectId))) {
           socket.close(4403, "access revoked");
         }
       }, REVERIFY_INTERVAL_MS);

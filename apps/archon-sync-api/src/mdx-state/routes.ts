@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { JwtPayload } from "../auth.js";
 import { requireAuth, signToken } from "../auth.js";
 import { getActiveDb, getWpnProjectsCollection } from "../db.js";
 import { userCanWriteProject } from "../permission-resolver.js";
@@ -25,13 +26,13 @@ const WS_TOKEN_TTL = "5m";
  * are excluded from state writes by design; they render MDX but can't mutate.
  */
 async function requireProjectMember(
-  userId: string,
+  auth: JwtPayload,
   projectId: string,
 ): Promise<boolean> {
   const project = await getWpnProjectsCollection().findOne({ id: projectId });
   if (!project) return false;
-  if (project.userId === userId) return true;
-  return userCanWriteProject(userId, projectId);
+  if (project.userId === auth.sub) return true;
+  return userCanWriteProject(auth, projectId);
 }
 
 export function registerMdxStateRoutes(
@@ -50,7 +51,7 @@ export function registerMdxStateRoutes(
         return reply.status(400).send({ error: "invalid projectId" });
       }
       const db = getActiveDb();
-      const ok = await requireProjectMember(auth.sub, projectId);
+      const ok = await requireProjectMember(auth, projectId);
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       const svc = new MdxStateService(db);
       const keys = await svc.list(projectId);
@@ -68,7 +69,7 @@ export function registerMdxStateRoutes(
         return reply.status(400).send({ error: "invalid projectId or key" });
       }
       const db = getActiveDb();
-      const ok = await requireProjectMember(auth.sub, projectId);
+      const ok = await requireProjectMember(auth, projectId);
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       const svc = new MdxStateService(db);
       const res = await svc.get(projectId, key);
@@ -102,7 +103,7 @@ export function registerMdxStateRoutes(
         return reply.status(428).send({ error: "If-Match required" });
       }
       const db = getActiveDb();
-      const ok = await requireProjectMember(auth.sub, projectId);
+      const ok = await requireProjectMember(auth, projectId);
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       if (!consumeWriteToken(projectId, auth.sub)) {
         return reply.status(429).send({ error: "rate limit" });
@@ -150,7 +151,7 @@ export function registerMdxStateRoutes(
       if (!parsed.success) {
         return reply.status(400).send({ error: parsed.error.flatten() });
       }
-      const ok = await requireProjectMember(auth.sub, parsed.data.projectId);
+      const ok = await requireProjectMember(auth, parsed.data.projectId);
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       const payload = {
         sub: auth.sub,
