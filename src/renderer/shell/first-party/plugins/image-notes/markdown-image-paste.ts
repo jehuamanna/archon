@@ -48,15 +48,53 @@ function placeholderTextFor(id: string): string {
   return `![Uploading…](#uploading-${id})`;
 }
 
+/**
+ * Clipboard image items almost always arrive as the generic name `image.png`,
+ * which makes the notes explorer unscannable ("image / image / image …").
+ * Rename each to `Pasted YYYY-MM-DD-HH-MM-SS.<ext>` so the note title (derived
+ * from the filename stem in `deriveImageNoteTitle`) is distinct and useful.
+ *
+ * If several images are pasted in the same second, append a `-N` suffix so
+ * note titles don't collide within a single paste batch.
+ */
+function pasteTimestamp(seq: number): string {
+  const d = new Date();
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  const base = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(
+    d.getDate(),
+  )}-${pad(d.getHours())}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
+  return seq > 1 ? `${base}-${seq}` : base;
+}
+
+function extensionFor(file: File): string {
+  const fromName = /\.([a-z0-9]+)$/i.exec(file.name)?.[1];
+  if (fromName) return fromName.toLowerCase();
+  const mime = file.type.toLowerCase();
+  if (mime === "image/png") return "png";
+  if (mime === "image/jpeg" || mime === "image/jpg") return "jpg";
+  if (mime === "image/gif") return "gif";
+  if (mime === "image/webp") return "webp";
+  if (mime === "image/bmp") return "bmp";
+  if (mime === "image/svg+xml") return "svg";
+  return "png";
+}
+
 function extractImageFiles(event: ClipboardEvent): File[] {
   const items = event.clipboardData?.items;
   if (!items) return [];
   const out: File[] = [];
+  let seq = 0;
   for (const item of Array.from(items)) {
     if (item.kind !== "file") continue;
     if (!item.type.startsWith("image/")) continue;
     const f = item.getAsFile();
-    if (f) out.push(f);
+    if (!f) continue;
+    seq += 1;
+    const renamed = new File([f], `Pasted ${pasteTimestamp(seq)}.${extensionFor(f)}`, {
+      type: f.type,
+      lastModified: f.lastModified,
+    });
+    out.push(renamed);
   }
   return out;
 }
