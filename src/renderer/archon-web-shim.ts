@@ -1,4 +1,4 @@
-import { createSyncBaseUrlResolver } from "@archon/platform";
+import { createSyncBaseUrlResolver, SessionExpiredError } from "@archon/platform";
 import { PLUGIN_UI_METADATA_KEY, validatePluginUiStateSize } from "../shared/plugin-state-protocol";
 import type {
   MarketplaceListResponse,
@@ -8,14 +8,13 @@ import type {
 } from "../shared/archon-renderer-api";
 import type { WpnNoteDetail, WpnNoteListItem } from "../shared/wpn-v2-types";
 import { authRefresh } from "./auth/auth-client";
+import { authedFetch } from "./auth/auth-retry";
 import { getAccessToken, setAccessToken } from "./auth/auth-session";
 import { readElectronRunMode } from "./auth/electron-run-mode";
 import { isWebScratchSession } from "./auth/web-scratch";
 import {
   readCloudSyncRefreshToken,
   readCloudSyncToken,
-  writeCloudSyncRefreshToken,
-  writeCloudSyncToken,
 } from "./cloud-sync/cloud-sync-storage";
 import { assertSignedInCloudWpnOnlineForMutation } from "./cloud-sync/signed-in-cloud-offline";
 import {
@@ -179,11 +178,9 @@ async function syncWpnFetch<T>(
   method: string,
   apiPath: string,
   body?: unknown,
-  attempt = 0,
 ): Promise<T> {
   const path = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
   const url = `${syncBase.replace(/\/$/, "")}${path}`;
-  const token = readCloudSyncToken();
   const hasBody =
     body !== undefined &&
     method !== "GET" &&
@@ -193,62 +190,38 @@ async function syncWpnFetch<T>(
   if (hasBody) {
     headers["Content-Type"] = "application/json";
   }
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  const init: RequestInit = {
-    method,
-    headers,
-    credentials: "omit",
-  };
-  if (hasBody) {
-    init.body = JSON.stringify(body);
-  }
-  let res = await fetch(url, init);
-  if (res.status === 401 && attempt < 1) {
-    const rt = readCloudSyncRefreshToken();
-    if (!rt) {
-      // Stale access token with no refresh (common in dev): clear it so later calls use
-      // unsigned read stubs; still serve this request like an unsigned read when possible.
-      writeCloudSyncToken(null);
-      if (!isMutatingWpnHttpMethod(method)) {
-        const stub = syncWpnUnsignedReadStub<T>(apiPath);
-        if (stub !== undefined) {
-          wpnTrace("wpnHttp.stub", { path: apiPath, method, reason: "401 no refresh token" });
-          return stub;
-        }
-      }
-      notifySyncSessionInvalidated();
-      throw new Error(`${method} ${apiPath} failed (401)`);
-    }
-    const r2 = await fetch(`${syncBase.replace(/\/$/, "")}/auth/refresh`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ refreshToken: rt }),
+  let res: Response;
+  try {
+    res = await authedFetch({
+      method,
+      url,
+      headersWithoutAuth: headers,
+      body: hasBody ? JSON.stringify(body) : null,
+      credentials: "omit",
     });
-    if (!r2.ok) {
-      writeCloudSyncToken(null);
-      writeCloudSyncRefreshToken(null);
+  } catch (err) {
+    if (err instanceof SessionExpiredError) {
+      // Unsigned read fallback: for GET-style calls with no usable refresh, still
+      // serve a stub so the UI doesn't degrade to a raw error during a dev-only
+      // stale-session scenario. Mutations must fail loudly.
       if (!isMutatingWpnHttpMethod(method)) {
         const stub = syncWpnUnsignedReadStub<T>(apiPath);
         if (stub !== undefined) {
-          wpnTrace("wpnHttp.stub", { path: apiPath, method, reason: "401 refresh rejected" });
+          wpnTrace("wpnHttp.stub", {
+            path: apiPath,
+            method,
+            reason: `session expired (${err.reason})`,
+          });
           return stub;
         }
       }
       notifySyncSessionInvalidated();
       throw new Error(`${method} ${apiPath} failed (401)`);
     }
-    const j = (await r2.json()) as { token: string; refreshToken: string };
-    writeCloudSyncToken(j.token);
-    writeCloudSyncRefreshToken(j.refreshToken);
-    return syncWpnFetch<T>(syncBase, method, apiPath, body, attempt + 1);
+    throw err;
   }
   const text = await res.text();
   if (!res.ok) {
-    if (res.status === 401) {
-      notifySyncSessionInvalidated();
-    }
     let msg = `${method} ${apiPath} failed (${res.status})`;
     try {
       const errObj = JSON.parse(text) as { error?: string };
