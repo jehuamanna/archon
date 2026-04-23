@@ -11,6 +11,7 @@ import {
 } from "../cloud-sync/cloud-sync-storage";
 import { clearAllElectronAppPinSettings } from "../auth/electron-app-pin-storage";
 import { setAccessToken, setActiveOrgId, setActiveSpaceId } from "../auth/auth-session";
+import { decodeJwtPayload } from "../auth/jwt-exp";
 import { clearPersistedWebSyncWpnPreference } from "../archon-web-shim";
 import {
   hydrateCloudNotesFromRxDbThunk,
@@ -24,28 +25,15 @@ import { showGlobalToast } from "../toast/toast-service";
 
 type CloudAuthThunkExtra = { extra: ArchonPlatformDeps };
 
-/**
- * Decode the JWT payload without verification. We only trust these claims to
- * seed UI state on startup — every subsequent API call re-verifies the token
- * server-side. Returns `null` on any parse error.
- */
 function decodeAccessTokenClaims(
   token: string,
 ): { activeOrgId?: string; activeSpaceId?: string } | null {
-  const parts = token.split(".");
-  if (parts.length < 2) return null;
-  try {
-    const padded = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const pad = padded.length % 4 === 0 ? "" : "=".repeat(4 - (padded.length % 4));
-    const json = atob(padded + pad);
-    const obj = JSON.parse(json) as { activeOrgId?: unknown; activeSpaceId?: unknown };
-    return {
-      activeOrgId: typeof obj.activeOrgId === "string" ? obj.activeOrgId : undefined,
-      activeSpaceId: typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined,
-    };
-  } catch {
-    return null;
-  }
+  const obj = decodeJwtPayload(token);
+  if (!obj) return null;
+  return {
+    activeOrgId: typeof obj.activeOrgId === "string" ? obj.activeOrgId : undefined,
+    activeSpaceId: typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined,
+  };
 }
 
 async function migrateWebScratchCloudNotesIfNeeded(realUserId: string): Promise<void> {
