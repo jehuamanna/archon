@@ -8,7 +8,7 @@ const IMPORT_FROM_RE = /from\s+['"]([^'"]+)['"]/g;
 const EXPORT_RE = /^\s*export\b/m;
 
 /** Specifiers note-authored MDX may import (stripped before evaluate; components come from MDXProvider map). */
-const ALLOWED_FACADE = /^@archon\/(ui|date)$/;
+const ALLOWED_FACADE = /^@archon\/(ui|date|mdx-sdk)$/;
 
 function validateAndStripMdxjsEsm(
   node: { type: string; value?: string },
@@ -26,7 +26,7 @@ function validateAndStripMdxjsEsm(
     const spec = m[1] ?? "";
     if (!ALLOWED_FACADE.test(spec)) {
       file.fail(
-        `MDX import "${spec}" is not allowed. Use only @archon/ui or @archon/date (virtual facades; components are provided by the host).`,
+        `MDX import "${spec}" is not allowed. Use only @archon/ui, @archon/date, or @archon/mdx-sdk (virtual facades; components are provided by the host).`,
         node,
         "archon:mdx-facade-import",
       );

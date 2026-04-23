@@ -7,7 +7,7 @@ import * as runtime from "react/jsx-runtime";
 import remarkGfm from "remark-gfm";
 import remarkMdx from "remark-mdx";
 import type { Note } from "@archon/ui-types";
-import { isMdxBundledTrust } from "../../utils/note-mdx-format";
+import { pickMdxTrustMode } from "../../utils/note-mdx-format";
 import { getArchonMdxFacadeComponentMap } from "../../archon-mdx-facades/component-map";
 import { remarkArchonMdxFacadeImports } from "../../utils/remark-archon-mdx-facade-imports";
 import { remarkArchonMdxTrust } from "../../utils/remark-archon-mdx-trust";
@@ -138,7 +138,7 @@ export function MdxRenderer({
   onWelcomeShellSegmentClick,
   isLinkTargetValid,
 }: MdxRendererProps): React.ReactElement {
-  const trustMode = isMdxBundledTrust(note) ? "bundled" : "user";
+  const trustMode = pickMdxTrustMode(note);
   const trustRemarkPlugin = useMemo(() => remarkArchonMdxTrust(trustMode), [trustMode]);
   const facadeImportsRemark = useMemo(() => remarkArchonMdxFacadeImports(), []);
   const remarkPlugins = useMemo(
