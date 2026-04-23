@@ -73,9 +73,16 @@ export function registerMdxStateRoutes(
       if (!ok) return reply.status(403).send({ error: "no access to project" });
       const svc = new MdxStateService(db);
       const res = await svc.get(projectId, key);
-      if (res.mode === "absent") return reply.status(404).send({ error: "not found" });
+      // Return 200 for absent keys (value: null, version: 0) instead of 404.
+      // HTTP-404 for a documented "not yet written" case turned the polling
+      // loop into visual spam in devtools. Clients treat `mode === "absent"`
+      // or `value === null` as "use initial".
       await reply.header("ETag", String(res.version));
-      return reply.send({ value: res.value, version: res.version });
+      return reply.send({
+        value: res.mode === "absent" ? null : res.value,
+        version: res.version,
+        mode: res.mode,
+      });
     },
   );
 

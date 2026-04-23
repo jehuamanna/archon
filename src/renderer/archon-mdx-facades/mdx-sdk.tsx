@@ -152,6 +152,8 @@ function useProjectState<T>(
         `${syncBase()}/projects/${encodeURIComponent(projectId)}/mdx-state/${encodeURIComponent(key)}`,
         { headers: { ...authHeaders() }, credentials: "omit" },
       );
+      // Back-compat: older sync-apis may still 404 for absent keys. Treat
+      // 404 identically to the new 200-absent response.
       if (res.status === 404) {
         versionRef.current = 0;
         if (initial !== undefined) setValue(initial);
@@ -165,12 +167,23 @@ function useProjectState<T>(
         console.warn(`[mdx-sdk] GET ${key} → ${res.status}`);
         return;
       }
-      const body = (await res.json()) as { value: T; version: number };
+      const body = (await res.json()) as {
+        value: T | null;
+        version: number;
+        mode?: "inline" | "chunked" | "absent";
+      };
+      if (body.mode === "absent" || (body.value === null && body.version === 0)) {
+        versionRef.current = 0;
+        if (initial !== undefined) setValue(initial);
+        setError(undefined);
+        setLoading(false);
+        return;
+      }
       // Only overwrite if the server version is strictly newer — avoids
       // stomping an in-flight local write that already bumped the version.
       if (body.version >= versionRef.current) {
         versionRef.current = body.version;
-        setValue(body.value);
+        setValue(body.value as T);
       }
       setError(undefined);
       setLoading(false);
