@@ -31,8 +31,14 @@ async function hasProjectAccess(
 /**
  * Registers the mini-app state WebSocket endpoint.
  *
- * Requires `@fastify/websocket` plugin to be registered on the app (done by
- * `build-app.ts`). Route: `GET /v1/ws/mdx-state?token=...&projectId=...`.
+ * Only mounts if `@fastify/websocket` has been registered on this Fastify
+ * instance (detected via the `websocketServer` property the plugin attaches).
+ * Contexts that don't support upgrade (e.g. Next.js `app.inject()` used by
+ * apps/archon-web) simply skip the route — the HTTP endpoints still work and
+ * clients fall back to polling via GET until they hit a deployment that
+ * exposes the raw Fastify server.
+ *
+ * Route: `GET /v1/ws/mdx-state?token=...&projectId=...`.
  */
 export function registerMdxStateWsRoutes(
   app: FastifyInstance,
@@ -40,21 +46,27 @@ export function registerMdxStateWsRoutes(
 ): void {
   const { jwtSecret } = opts;
 
-  // Type is loose because @fastify/websocket augments the registry.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  if (!(app as any).websocketServer) {
+    app.log.info(
+      "mdx-state: skipping WebSocket route (@fastify/websocket not registered on this instance)",
+    );
+    return;
+  }
+
+  // v11 handler signature is `(socket, request)`. Using `any` so this file
+  // compiles even when the plugin's type augmentation isn't loaded.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (app as any).get(
     "/ws/mdx-state",
     { websocket: true },
-    async (connection: {
-      socket: {
-        send: (data: string) => void;
-        close: (code?: number, reason?: string) => void;
-        on: (event: string, listener: (...args: unknown[]) => void) => void;
-        off?: (event: string, listener: (...args: unknown[]) => void) => void;
-        ping?: () => void;
-      };
+    async (socket: {
+      send: (data: string) => void;
+      close: (code?: number, reason?: string) => void;
+      on: (event: string, listener: (...args: unknown[]) => void) => void;
+      off?: (event: string, listener: (...args: unknown[]) => void) => void;
+      ping?: () => void;
     }, request: { query: { token?: string; projectId?: string } }) => {
-      const { socket } = connection;
       const token = request.query.token ?? "";
       const projectId = request.query.projectId ?? "";
       let payload: WsTokenPayload;
