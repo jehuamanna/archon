@@ -174,6 +174,11 @@ function useProjectState<T>(
   const inFlightRef = React.useRef<Promise<void> | null>(null);
   const queuedRef = React.useRef<boolean>(false);
   const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Pin `initial` so callers passing fresh object/array literals per render
+  // don't destabilize `read`'s identity and re-trigger the polling effect.
+  const initialRef = React.useRef<T | undefined>(initial);
+  initialRef.current = initial;
+  const readInFlightRef = React.useRef<Promise<void> | null>(null);
 
   const unbound = isUnboundKey(key);
 
@@ -187,55 +192,69 @@ function useProjectState<T>(
 
   const read = React.useCallback(async (): Promise<void> => {
     if (!putUrl || unbound) return;
+    // Suppress reads when a write is in-flight (the write already reflects the
+    // latest truth) or when a previous read has not resolved — otherwise parent
+    // re-renders stack cancelled fetches on top of pending ones.
+    if (inFlightRef.current) return;
+    if (readInFlightRef.current) return readInFlightRef.current;
     // Never overwrite local state if the user has pending edits.
-    const skipLocalUpdate = dirtyRef.current || inFlightRef.current !== null;
-    try {
-      const res = await fetch(putUrl, {
-        headers: { ...authHeaders() },
-        credentials: "omit",
-      });
-      if (res.status === 404) {
-        if (!skipLocalUpdate) {
-          versionRef.current = 0;
-          if (initial !== undefined) setValue(initial);
+    const skipLocalUpdate = dirtyRef.current;
+    const currentInitial = initialRef.current;
+    const task = (async (): Promise<void> => {
+      try {
+        const res = await fetch(putUrl, {
+          headers: { ...authHeaders() },
+          credentials: "omit",
+        });
+        if (res.status === 404) {
+          if (!skipLocalUpdate) {
+            versionRef.current = 0;
+            if (currentInitial !== undefined) setValue(currentInitial);
+          }
+          setLoading(false);
+          return;
         }
+        if (!res.ok) {
+          setError(`GET ${res.status}`);
+          setLoading(false);
+          // eslint-disable-next-line no-console
+          console.warn(`[mdx-sdk] GET ${key} → ${res.status}`);
+          return;
+        }
+        const body = (await res.json()) as {
+          value: T | null;
+          version: number;
+          mode?: "inline" | "chunked" | "absent";
+        };
+        const absent =
+          body.mode === "absent" || (body.value === null && body.version === 0);
+        if (absent) {
+          if (!skipLocalUpdate) {
+            versionRef.current = 0;
+            if (currentInitial !== undefined) setValue(currentInitial);
+          }
+        } else if (body.version >= versionRef.current) {
+          versionRef.current = body.version;
+          if (!skipLocalUpdate) {
+            setValue(body.value as T);
+          }
+        }
+        setError(undefined);
         setLoading(false);
-        return;
-      }
-      if (!res.ok) {
-        setError(`GET ${res.status}`);
+      } catch (e) {
+        setError((e as Error).message);
         setLoading(false);
         // eslint-disable-next-line no-console
-        console.warn(`[mdx-sdk] GET ${key} → ${res.status}`);
-        return;
+        console.warn(`[mdx-sdk] GET ${key} threw:`, e);
       }
-      const body = (await res.json()) as {
-        value: T | null;
-        version: number;
-        mode?: "inline" | "chunked" | "absent";
-      };
-      const absent =
-        body.mode === "absent" || (body.value === null && body.version === 0);
-      if (absent) {
-        if (!skipLocalUpdate) {
-          versionRef.current = 0;
-          if (initial !== undefined) setValue(initial);
-        }
-      } else if (body.version >= versionRef.current) {
-        versionRef.current = body.version;
-        if (!skipLocalUpdate) {
-          setValue(body.value as T);
-        }
-      }
-      setError(undefined);
-      setLoading(false);
-    } catch (e) {
-      setError((e as Error).message);
-      setLoading(false);
-      // eslint-disable-next-line no-console
-      console.warn(`[mdx-sdk] GET ${key} threw:`, e);
+    })();
+    readInFlightRef.current = task;
+    try {
+      await task;
+    } finally {
+      readInFlightRef.current = null;
     }
-  }, [putUrl, key, initial, unbound]);
+  }, [putUrl, key, unbound]);
 
   const drainWrites = React.useCallback(async (): Promise<void> => {
     if (!putUrl) return;
