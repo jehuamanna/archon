@@ -4,6 +4,22 @@ import type { FastifyInstance } from "fastify";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { registerRoutes } from "./routes.js";
 
+// @fastify/websocket is loaded dynamically so tooling that type-checks
+// without the dep installed doesn't fail. In dev/prod the dependency is
+// required (see package.json).
+async function registerWebSocketPlugin(app: FastifyInstance): Promise<void> {
+  try {
+    const mod = await import("@fastify/websocket");
+    const plugin = (mod as unknown as { default?: unknown }).default ?? mod;
+    await app.register(plugin as never);
+  } catch (err) {
+    app.log.warn(
+      { err: (err as Error).message },
+      "MDX mini-app WebSocket endpoint disabled — @fastify/websocket not installed",
+    );
+  }
+}
+
 export type BuildSyncApiAppOptions = {
   jwtSecret: string;
   /** Raw `CORS_ORIGIN` env value: `true`, `*`, or comma-separated origins. */
@@ -21,6 +37,8 @@ export async function buildSyncApiApp(
 ): Promise<FastifyInstance> {
   const app = Fastify({ logger: opts.logger ?? true });
   const corsOrigin = opts.corsOrigin;
+
+  await registerWebSocketPlugin(app);
 
   await app.register(cors, {
     origin:
