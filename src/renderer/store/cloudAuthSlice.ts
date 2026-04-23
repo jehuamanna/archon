@@ -102,6 +102,13 @@ const cloudAuthSlice = createSlice({
       void state;
       void action;
     },
+    authTerminationStarted(state, _action: { payload: string }) {
+      state.busy = true;
+      state.refreshing = false;
+    },
+    authTerminationCompleted() {
+      return { ...initialState };
+    },
   },
   extraReducers: (builder) => {
     builder
@@ -173,6 +180,8 @@ export const {
   sessionRefreshStarted,
   sessionRefreshEnded,
   sessionTokensRotated,
+  authTerminationStarted,
+  authTerminationCompleted,
 } = cloudAuthSlice.actions;
 
 export function selectIsSessionRefreshing(state: { cloudAuth: CloudAuthState }): boolean {
@@ -365,22 +374,9 @@ export const cloudRegisterThunk = createAsyncThunk<
 
 export const cloudLogoutThunk = createAsyncThunk<void, void, CloudAuthThunkExtra>(
   "cloudAuth/logout",
-  async (_, { extra, dispatch }) => {
-    stopSilentRefreshScheduler();
-    await closeCloudNotesDb();
-    writeCloudSyncToken(null);
-    writeCloudSyncRefreshToken(null);
-    writeCloudSyncEmail(null);
-    extra.remoteApi.setAuthToken(null);
-    extra.remoteApi.setRefreshToken(null);
-    setAccessToken(null);
-    clearAllElectronAppPinSettings();
-    setActiveOrgId(null);
-    setActiveSpaceId(null);
-    dispatch(resetCloudNotes());
-    dispatch(clearOrgMembership());
-    dispatch(clearSpaceMembership());
-    clearPersistedWebSyncWpnPreference();
+  async () => {
+    const { terminateSession } = await import("../auth/session-termination");
+    await terminateSession("user_logout");
   },
 );
 

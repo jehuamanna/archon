@@ -117,9 +117,25 @@ export function AuthGate({ children }: { children: React.ReactNode }): React.Rea
         !cloudAuth.busy &&
         showPinOffer;
 
+      // In cloud mode, never render the authenticated shell while signed-out.
+      // Doing so produces the "zombie" state users report: notes explorer is
+      // empty (notes state was reset) but the shell/menus still look logged-in.
+      // Swap in a lightweight placeholder so the ElectronSyncAuthPanel overlay
+      // opens over a neutral background instead of a stale authed layout.
+      const hideAuthedShellForCloudSignOut =
+        electronRunMode === "cloud" &&
+        cloudAuth.status !== "signedIn" &&
+        !cloudAuth.busy;
+
       return (
         <>
-          {children}
+          {hideAuthedShellForCloudSignOut ? (
+            <div className="flex h-screen min-h-0 w-full items-center justify-center bg-background text-[12px] text-muted-foreground">
+              Sign in to continue
+            </div>
+          ) : (
+            children
+          )}
           {electronSyncOverlay ? (
             <div className="fixed inset-0 z-[100] overflow-y-auto bg-background/90 backdrop-blur-sm">
               <div className="flex min-h-full items-center justify-center px-4 py-8">

@@ -10,13 +10,18 @@ import {
   setSyncSessionInvalidatedHandler,
 } from "../sync-session-invalidation";
 import { setRefreshSessionDeps } from "../auth/refresh-session";
+import { setSessionTerminationDeps, terminateSession } from "../auth/session-termination";
 import { setSilentRefreshSchedulerDeps } from "../auth/silent-refresh-scheduler";
 import cloudAuthReducer, {
-  cloudLogoutThunk,
+  authTerminationCompleted,
+  authTerminationStarted,
   sessionRefreshEnded,
   sessionRefreshStarted,
   sessionTokensRotated,
 } from "./cloudAuthSlice";
+import { resetCloudNotes } from "./cloudNotesSlice";
+import { clearOrgMembership } from "./orgMembershipSlice";
+import { clearSpaceMembership } from "./spaceMembershipSlice";
 import cloudNotesReducer from "./cloudNotesSlice";
 import { cloudNotesRxListener } from "./cloudNotesRxListener";
 import notesReducer from "./notesSlice";
@@ -60,11 +65,18 @@ export const store = configureStore({
     }).prepend(cloudNotesRxListener.middleware),
 });
 
+setSessionTerminationDeps({
+  store,
+  remoteApi: platformDeps.remoteApi,
+  resetCloudNotes,
+  clearOrgMembership,
+  clearSpaceMembership,
+  authTerminationStarted,
+  authTerminationCompleted,
+});
+
 setSyncSessionInvalidatedHandler(() => {
-  void store.dispatch(cloudLogoutThunk());
-  if (typeof window !== "undefined") {
-    window.location.replace("/");
-  }
+  void terminateSession("session_expired");
 });
 
 setRefreshSessionDeps({
