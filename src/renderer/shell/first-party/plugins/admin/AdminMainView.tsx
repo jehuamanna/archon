@@ -5,6 +5,7 @@ import { MasterConsolePanel } from "../../../../admin/MasterConsolePanel";
 import { PeoplePanel } from "../../../../admin/PeoplePanel";
 import { ProjectSharePanel } from "../../../../admin/ProjectSharePanel";
 import { SpacePeoplePanel } from "../../../../admin/SpacePeoplePanel";
+import { SpaceSettingsPanel } from "../../../../admin/SpaceSettingsPanel";
 import { TeamsPanel } from "../../../../admin/TeamsPanel";
 import { WorkspaceSharePanel } from "../../../../admin/WorkspaceSharePanel";
 import type { RootState } from "../../../../store";
@@ -118,6 +119,15 @@ export function AdminMainView(
       return (
         <div className={wrap}>
           <AuditLogPanel />
+        </div>
+      );
+    case "space":
+      return (
+        <div className={wrap}>
+          <SpaceSettingsPanel
+            spaceId={selection.spaceId}
+            canManage={canManageOrg}
+          />
         </div>
       );
     case "space-members":

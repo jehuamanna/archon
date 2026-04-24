@@ -6,6 +6,7 @@ export type AdminSelection =
   | { kind: "org-people" }
   | { kind: "org-teams" }
   | { kind: "org-activity" }
+  | { kind: "space"; spaceId: string }
   | { kind: "space-members"; spaceId: string }
   | {
       kind: "workspace-shares";
