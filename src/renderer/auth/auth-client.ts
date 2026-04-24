@@ -479,15 +479,22 @@ export type SpaceRow = {
   kind: "default" | "normal";
   role: SpaceRole | null;
   createdAt: string;
+  hidden?: boolean;
+  hiddenAt?: string | null;
+  hiddenByUserId?: string | null;
 };
 
-export async function listOrgSpaces(orgId: string): Promise<SpaceRow[]> {
+export async function listOrgSpaces(
+  orgId: string,
+  opts?: { includeHidden?: boolean },
+): Promise<SpaceRow[]> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
+  const qs = opts?.includeHidden ? "?includeHidden=true" : "";
   const r = await requestJson<{ spaces: SpaceRow[] }>(
-    `/orgs/${encodeURIComponent(orgId)}/spaces`,
+    `/orgs/${encodeURIComponent(orgId)}/spaces${qs}`,
     {
       method: "GET",
       headers: { Authorization: `Bearer ${token}` },
@@ -514,16 +521,37 @@ export async function createSpace(payload: {
 export async function renameSpace(payload: {
   spaceId: string;
   name: string;
-}): Promise<void> {
+}): Promise<SpaceRow> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
-  await requestJson(`/spaces/${encodeURIComponent(payload.spaceId)}`, {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ name: payload.name }),
-  });
+  return requestJson<SpaceRow>(
+    `/spaces/${encodeURIComponent(payload.spaceId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ name: payload.name }),
+    },
+  );
+}
+
+export async function setSpaceHidden(payload: {
+  spaceId: string;
+  hidden: boolean;
+}): Promise<SpaceRow> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  return requestJson<SpaceRow>(
+    `/spaces/${encodeURIComponent(payload.spaceId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ hidden: payload.hidden }),
+    },
+  );
 }
 
 export async function deleteSpace(spaceId: string): Promise<void> {
