@@ -8,9 +8,9 @@ import {
   writePersistedMcpAuth,
 } from "./mcp-cloud-auth-persist.js";
 import { mapWpnCaughtError, unauthenticatedToolResult } from "./mcp-unauthenticated.js";
-import { findNotesByQuery, findProjectsByQuery } from "./find-wpn.js";
+import { findNotesByQuery, findProjectsByQuery, isLikelyUuid } from "./find-wpn.js";
 import { parseParentWpnPath, resolveParentInTree } from "./resolve-parent-in-tree.js";
-import { resolveNoteFromCatalog } from "./resolve-note.js";
+import { norm, resolveNoteFromCatalog } from "./resolve-note.js";
 import { errorResult, jsonResult, type ToolReturn } from "./text-result.js";
 import {
   WpnHttpClient,
@@ -22,7 +22,7 @@ import {
   DEFAULT_MAX_BYTES as GET_IMAGE_NOTE_DEFAULT_MAX_BYTES,
   handleGetImageNote,
 } from "./get-image-note.js";
-import { installSkill } from "./install-skill.js";
+import { installSkill, writeAgentsMd } from "./install-skill.js";
 import { extractReferencedLinksFromMarkdown } from "./note-link-extract.js";
 import {
   canonicalVfsPathFromRow,
@@ -319,13 +319,13 @@ const installSkillInput = z.object({
     .string()
     .optional()
     .describe(
-      "Project to scan for skills. Default: \"Specs\". Ignored when noteId is given.",
+      "Project to scan for skills. Default: \"Skills\". Ignored when noteId is given.",
     ),
   noteName: z
     .string()
     .optional()
     .describe(
-      "Parent note whose direct children are the skill notes. Default: \"Skills\". Ignored when noteId is given.",
+      "Parent note whose direct children are the skill notes. Default: \"SKILLS.md\". Ignored when noteId is given.",
     ),
   repoPath: z
     .string()
@@ -341,11 +341,18 @@ const installSkillInput = z.object({
         "antigravity",
         "opencode",
         "pi",
+        "codex",
       ]),
     )
     .optional()
     .describe(
-      "Subset of providers to install for. Default: all 7. Canonical `skills/<name>/SKILL.md` is always written regardless of this list.",
+      "Subset of providers to install for. Default: all 8. Canonical `skills/<name>/SKILL.md` is always written regardless of this list. `pi` and `codex` are no-op provider flags that simply acknowledge coverage via repo-root AGENTS.md.",
+    ),
+  skipAgentsMd: z
+    .boolean()
+    .optional()
+    .describe(
+      "When true, do not create or touch <repoPath>/AGENTS.md. Default: false. Incompatible with `providers` that include only `codex` or only `pi`, since those depend on AGENTS.md for discovery.",
     ),
 });
 
@@ -386,6 +393,83 @@ const duplicateSubtreeInput = z.object({
 
 const backlinksInput = z.object({
   noteId: z.string().describe("Note UUID to find backlinks for (notes whose content references this note)."),
+});
+
+const copyIdInput = z.object({
+  kind: z
+    .enum(["org", "space", "workspace", "project", "note"])
+    .describe("What kind of id to resolve."),
+  query: z
+    .string()
+    .min(1)
+    .describe("Name (trim + case-insensitive) or UUID. UUIDs pass through as-is."),
+  workspaceQuery: z
+    .string()
+    .optional()
+    .describe("Narrow project/note searches to a workspace name or UUID."),
+  projectQuery: z
+    .string()
+    .optional()
+    .describe("Narrow note searches to a project name or UUID."),
+  orgQuery: z
+    .string()
+    .optional()
+    .describe("Narrow space searches to an org name, slug, or UUID."),
+  spaceQuery: z
+    .string()
+    .optional()
+    .describe(
+      "Unused today; reserved for future workspace-by-space narrowing. Callers should pass workspaceQuery instead.",
+    ),
+});
+
+const moveNoteToProjectInput = z.object({
+  noteId: z.string().describe("Note UUID to move (root of the subtree)."),
+  targetProjectId: z.string().describe("Destination project UUID."),
+  targetParentId: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      "Optional parent note UUID in the target project. Null (or omitted) inserts at the project root.",
+    ),
+});
+
+const moveProjectInput = z.object({
+  projectId: z.string().describe("Project UUID to move."),
+  targetWorkspaceId: z
+    .string()
+    .describe(
+      "Destination workspace UUID. Must be in the same space/org as the source.",
+    ),
+});
+
+const duplicateProjectInput = z.object({
+  projectId: z.string().describe("Project UUID to duplicate."),
+  targetWorkspaceId: z
+    .string()
+    .optional()
+    .describe(
+      "Destination workspace UUID. Defaults to the source workspace. Must be in the same space/org.",
+    ),
+  newName: z
+    .string()
+    .optional()
+    .describe("Optional name for the duplicate. Defaults to the source project name."),
+});
+
+const duplicateWorkspaceInput = z.object({
+  workspaceId: z.string().describe("Workspace UUID to duplicate."),
+  newName: z
+    .string()
+    .optional()
+    .describe("Optional name for the duplicate. Defaults to the source workspace name."),
+  targetSpaceId: z
+    .string()
+    .optional()
+    .describe(
+      "Destination space UUID. Defaults to the source workspace's space. Must be in the same org.",
+    ),
 });
 
 const exportWorkspacesInput = z.object({
@@ -777,7 +861,7 @@ export function createArchonMcpServer(
     "archon_install_skill",
     {
       description:
-        "Install skills from Archon into the local repo. Default (no args): resolve Space \"Archon\" → Workspace \"Archon\" → Project \"Specs\" → Note \"Skills\" (each step hard-errors if missing) and install every direct child of that Skills note. Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes canonical `skills/<name>/SKILL.md` plus all 6 provider targets (`.claude/skills`, `.cursor/rules`, `.windsurf/rules`, `.github/instructions`, `.agents/skills`, `.opencode/agents`); Pi is skipped — it reads canonical natively. Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
+        "Install skills from Archon into the local repo. Default (no args): resolve Space \"Archon\" → Workspace \"Archon\" → Project \"Skills\" → Note \"SKILLS.md\" and install every direct child. If that canonical path is missing or empty, the tool returns a guided error telling the user how to populate it (no migration, no fallback). Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes canonical `skills/<name>/SKILL.md` plus 6 provider dot-dirs (`.claude/skills`, `.cursor/rules`, `.windsurf/rules`, `.github/instructions`, `.agents/skills`, `.opencode/agents`); `pi` and `codex` are covered via repo-root AGENTS.md (written once per run unless `skipAgentsMd: true`). Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
       inputSchema: installSkillInput,
     },
     async (args) => {
@@ -785,8 +869,23 @@ export function createArchonMcpServer(
       if (denied) return denied;
       try {
         const repoPath = args.repoPath ?? process.cwd();
+        const skipAgentsMd = args.skipAgentsMd === true;
+
+        // Reject skipAgentsMd + providers that rely exclusively on AGENTS.md.
+        if (skipAgentsMd && Array.isArray(args.providers) && args.providers.length > 0) {
+          const agentsMdOnly = args.providers.every(
+            (p) => p === "codex" || p === "pi",
+          );
+          if (agentsMdOnly) {
+            throw new Error(
+              `archon_install_skill: skipAgentsMd=true is incompatible with providers=[${args.providers.join(", ")}] — those providers have no dot-directory and depend on AGENTS.md for discovery. Drop skipAgentsMd or include at least one dot-dir provider.`,
+            );
+          }
+        }
 
         // Branch 1: explicit noteId — install that one note, bypass scan.
+        // Does NOT touch AGENTS.md (single-note installs are targeted; the running
+        // index is only rebuilt by the default/scan branch).
         if (args.noteId && args.noteId.length > 0) {
           const note = await client.getNote(args.noteId);
           if (typeof note.content !== "string" || note.content.length === 0) {
@@ -808,17 +907,34 @@ export function createArchonMcpServer(
         }
 
         // Branch 2/3: resolve Space → Workspace → Project → Note, install children of that Note.
-        // Each resolution step hard-errors if the target is missing.
+        // When the caller passes no path overrides (pure defaults), resolution failures are
+        // rewritten as a single guided error telling them how to populate the canonical source.
+        // When overrides are passed, step-specific diagnostics are preserved.
         const spaceName = args.spaceName ?? "Archon";
         const workspaceName = args.workspaceName ?? "Archon";
-        const projectName = args.projectName ?? "Specs";
-        const noteName = args.noteName ?? "Skills";
+        const projectName = args.projectName ?? "Skills";
+        const noteName = args.noteName ?? "SKILLS.md";
+
+        const isAllDefaults =
+          args.spaceName === undefined &&
+          args.workspaceName === undefined &&
+          args.projectName === undefined &&
+          args.noteName === undefined;
+
+        const canonicalPath = `${spaceName} / ${workspaceName} / ${projectName} / ${noteName}`;
+        const guidedError = (reason: string) =>
+          new Error(
+            `archon_install_skill: no skills found at '${canonicalPath}'.\n\n${reason}\n\nTo populate the canonical source:\n  1. In Archon, navigate to (or create) space '${spaceName}' → workspace '${workspaceName}' → project '${projectName}'.\n  2. Create a root note titled '${noteName}' (markdown).\n  3. Under that note, create one child per skill (markdown). Each child's content is a full SKILL.md — YAML frontmatter (name, description) plus the body the agent will follow.\n  4. Re-run archon_install_skill.\n\nIf your skills live elsewhere, pass spaceName / workspaceName / projectName / noteName overrides, or pass noteId directly.`,
+          );
 
         const { spaces } = await client.listMySpaces();
         const spaceMatches = spaces.filter(
           (s) => s.name.trim().toLowerCase() === spaceName.trim().toLowerCase(),
         );
         if (spaceMatches.length === 0) {
+          if (isAllDefaults) {
+            throw guidedError(`Space '${spaceName}' does not exist.`);
+          }
           throw new Error(
             `archon_install_skill: Space "${spaceName}" not found. Available: ${spaces.map((s) => s.name).join(", ") || "(none)"}`,
           );
@@ -852,6 +968,9 @@ export function createArchonMcpServer(
               workspaceName.trim().toLowerCase(),
           );
           if (wsMatches.length === 0) {
+            if (isAllDefaults) {
+              throw guidedError(`Workspace '${workspaceName}' does not exist in Space '${spaceName}'.`);
+            }
             throw new Error(
               `archon_install_skill: Workspace "${workspaceName}" not found in Space "${spaceName}". Available: ${workspaces.map((w) => w.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
             );
@@ -870,6 +989,9 @@ export function createArchonMcpServer(
               projectName.trim().toLowerCase(),
           );
           if (projMatches.length === 0) {
+            if (isAllDefaults) {
+              throw guidedError(`Project '${projectName}' does not exist in Workspace '${workspaceName}'.`);
+            }
             throw new Error(
               `archon_install_skill: Project "${projectName}" not found in Workspace "${workspaceName}". Available: ${projects.map((p) => p.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
             );
@@ -888,6 +1010,9 @@ export function createArchonMcpServer(
               n.parent_id === null,
           );
           if (parentMatches.length === 0) {
+            if (isAllDefaults) {
+              throw guidedError(`Top-level note '${noteName}' does not exist in Project '${projectName}'.`);
+            }
             throw new Error(
               `archon_install_skill: top-level Note "${noteName}" not found in Project "${projectName}".`,
             );
@@ -903,6 +1028,9 @@ export function createArchonMcpServer(
             .filter((n) => n.parent_id === parentNoteId)
             .sort((a, b) => a.sibling_index - b.sibling_index);
           if (children.length === 0) {
+            if (isAllDefaults) {
+              throw guidedError(`Note '${noteName}' exists but has no children — no skills to install.`);
+            }
             throw new Error(
               `archon_install_skill: Note "${noteName}" has no children.`,
             );
@@ -954,11 +1082,25 @@ export function createArchonMcpServer(
             }
           }
 
+          // Rebuild the Archon-managed block inside <repoPath>/AGENTS.md with
+          // the full list of skills we just installed. Idempotent.
+          const agentsMd =
+            !skipAgentsMd && installed.length > 0
+              ? writeAgentsMd(
+                  repoPath,
+                  installed.map((r) => ({
+                    name: r.skillName,
+                    description: r.description,
+                  })),
+                )
+              : null;
+
           return jsonResult({
             ok: true as const,
             mode: (args.skillName ? "filtered" : "scan") as
               | "filtered"
               | "scan",
+            agentsMd,
             resolved: {
               spaceName,
               spaceId: targetSpaceId,
@@ -1118,6 +1260,285 @@ export function createArchonMcpServer(
       try {
         const result = await client.duplicateSubtree(args.projectId, args.noteId);
         return jsonResult({ ok: true as const, ...((result && typeof result === "object") ? result : {}) });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_copy_id",
+    {
+      description:
+        "Resolve a name (or passthrough UUID) to a copy-friendly id for org / space / workspace / project / note. " +
+        "Returns { status: 'unique' | 'ambiguous' | 'none', matches: [{ id, name, path }] }. " +
+        "UUID queries short-circuit to a single match. Use workspaceQuery / projectQuery / orgQuery to narrow ambiguous name matches. " +
+        "Cross-org lookups are not supported; operate within the active org.",
+      inputSchema: copyIdInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const q = args.query.trim();
+        if (args.kind === "org") {
+          const r = await client.listMyOrgs();
+          if (isLikelyUuid(q)) {
+            const hit = r.orgs.find((o) => o.orgId === q);
+            return jsonResult(
+              hit
+                ? {
+                    status: "unique" as const,
+                    matches: [{ id: hit.orgId, name: hit.name, path: hit.name }],
+                  }
+                : { status: "none" as const, matches: [] },
+            );
+          }
+          const nq = norm(q);
+          const hits = r.orgs.filter(
+            (o) => norm(o.name) === nq || norm(o.slug) === nq,
+          );
+          if (hits.length === 0) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          const matches = hits.map((o) => ({
+            id: o.orgId,
+            name: o.name,
+            path: o.name,
+          }));
+          return jsonResult({
+            status: (hits.length === 1 ? "unique" : "ambiguous") as
+              | "unique"
+              | "ambiguous",
+            matches,
+          });
+        }
+        if (args.kind === "space") {
+          const r = await client.listMySpaces();
+          let rows = r.spaces;
+          if (args.orgQuery && args.orgQuery.trim().length > 0) {
+            const oq = args.orgQuery.trim();
+            if (isLikelyUuid(oq)) {
+              rows = rows.filter((s) => s.orgId === oq);
+            } else {
+              const orgs = (await client.listMyOrgs()).orgs;
+              const noq = norm(oq);
+              const orgIds = new Set(
+                orgs
+                  .filter((o) => norm(o.name) === noq || norm(o.slug) === noq)
+                  .map((o) => o.orgId),
+              );
+              rows = rows.filter(
+                (s) => s.orgId !== null && orgIds.has(s.orgId),
+              );
+            }
+          }
+          if (isLikelyUuid(q)) {
+            const hit = rows.find((s) => s.spaceId === q);
+            return jsonResult(
+              hit
+                ? {
+                    status: "unique" as const,
+                    matches: [
+                      { id: hit.spaceId, name: hit.name, path: hit.name },
+                    ],
+                  }
+                : { status: "none" as const, matches: [] },
+            );
+          }
+          const nq = norm(q);
+          const hits = rows.filter((s) => norm(s.name) === nq);
+          if (hits.length === 0) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          const matches = hits.map((s) => ({
+            id: s.spaceId,
+            name: s.name,
+            path: s.name,
+          }));
+          return jsonResult({
+            status: (hits.length === 1 ? "unique" : "ambiguous") as
+              | "unique"
+              | "ambiguous",
+            matches,
+          });
+        }
+        if (args.kind === "workspace") {
+          type WsRow = { id: string; name?: string };
+          const rows = (await client.getWorkspaces()) as WsRow[];
+          if (isLikelyUuid(q)) {
+            const hit = rows.find((w) => w.id === q);
+            return jsonResult(
+              hit
+                ? {
+                    status: "unique" as const,
+                    matches: [
+                      {
+                        id: hit.id,
+                        name: hit.name ?? "",
+                        path: hit.name ?? "",
+                      },
+                    ],
+                  }
+                : { status: "none" as const, matches: [] },
+            );
+          }
+          const nq = norm(q);
+          const hits = rows.filter((w) => norm(w.name ?? "") === nq);
+          if (hits.length === 0) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          const matches = hits.map((w) => ({
+            id: w.id,
+            name: w.name ?? "",
+            path: w.name ?? "",
+          }));
+          return jsonResult({
+            status: (hits.length === 1 ? "unique" : "ambiguous") as
+              | "unique"
+              | "ambiguous",
+            matches,
+          });
+        }
+        if (args.kind === "project") {
+          const result = await findProjectsByQuery(client, q, args.workspaceQuery);
+          if (result.status === "unique" || result.status === "ambiguous") {
+            return jsonResult({
+              status: result.status,
+              matches: result.matches.map((m) => ({
+                id: m.projectId,
+                name: m.projectName,
+                path: m.path,
+              })),
+            });
+          }
+          return jsonResult({
+            status: "none" as const,
+            matches: [],
+            message: "message" in result ? result.message : undefined,
+          });
+        }
+        // note
+        const rows = await client.getNotesWithContext();
+        const result = findNotesByQuery(
+          rows,
+          q,
+          args.workspaceQuery,
+          args.projectQuery,
+        );
+        if (result.status === "unique" || result.status === "ambiguous") {
+          return jsonResult({
+            status: result.status,
+            matches: result.matches.map((m) => ({
+              id: m.noteId,
+              name: m.title,
+              path: m.path,
+            })),
+          });
+        }
+        return jsonResult({
+          status: "none" as const,
+          matches: [],
+          message: "message" in result ? result.message : undefined,
+        });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_move_note_to_project",
+    {
+      description:
+        "Move a note (with its entire subtree) to a different project, optionally nested under a parent note in the target project. " +
+        "Caller needs write access on both the source and destination workspaces. Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces instead.",
+      inputSchema: moveNoteToProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.moveNoteToProject(
+          args.noteId,
+          args.targetProjectId,
+          args.targetParentId ?? null,
+        );
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_move_project",
+    {
+      description:
+        "Move a project to a different workspace. Only works within the same space/org — if you need to migrate across spaces, use archon_move_workspace_to_space on the workspace first, then move the project. " +
+        "Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
+      inputSchema: moveProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const project = await client.updateProject(args.projectId, {
+          workspace_id: args.targetWorkspaceId,
+        });
+        return jsonResult({ ok: true as const, project });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_duplicate_project",
+    {
+      description:
+        "Deep-copy a project (every note in the tree gets a fresh id) into the source workspace or into targetWorkspaceId. " +
+        "The target workspace must be in the same space/org as the source. Caller needs write on both workspaces. " +
+        "Cross-org duplicates are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
+      inputSchema: duplicateProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const result = await client.duplicateProject(args.projectId, {
+          ...(args.targetWorkspaceId !== undefined
+            ? { targetWorkspaceId: args.targetWorkspaceId }
+            : {}),
+          ...(args.newName !== undefined ? { newName: args.newName } : {}),
+        });
+        return jsonResult({ ok: true as const, ...result });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_duplicate_workspace",
+    {
+      description:
+        "Deep-copy a workspace (every project + every note, with fresh ids) into the source space or into targetSpaceId. " +
+        "The target space must be in the same org as the source. Caller needs manage rights on the source workspace and on the target space. " +
+        "Cross-org duplicates are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
+      inputSchema: duplicateWorkspaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const result = await client.duplicateWorkspace(args.workspaceId, {
+          ...(args.newName !== undefined ? { newName: args.newName } : {}),
+          ...(args.targetSpaceId !== undefined
+            ? { targetSpaceId: args.targetSpaceId }
+            : {}),
+        });
+        return jsonResult({ ok: true as const, ...result });
       } catch (e) {
         return wpnCatch(e, runtime);
       }

@@ -103,15 +103,16 @@ export async function handleSyncApiRequest(request: Request): Promise<Response> 
     }
   }
 
-  const raw = res.body as string | Buffer | undefined | null;
+  // Always read `res.rawPayload` (Buffer), never `res.body` / `res.payload`
+  // (string). The string form is UTF-8-decoded by light-my-request, which
+  // corrupts binary responses (e.g. the export zip) by replacing every
+  // invalid UTF-8 byte with U+FFFD. Uint8Array preserves bytes losslessly
+  // for both binary and text responses; Content-Type is carried by `out`.
+  const raw: Buffer | undefined = res.rawPayload;
   const body: BodyInit | null =
-    res.statusCode === 204 || raw === null || raw === undefined
+    res.statusCode === 204 || raw === undefined || raw.length === 0
       ? null
-      : typeof raw === "string"
-        ? raw
-        : Buffer.isBuffer(raw)
-          ? new Uint8Array(raw)
-          : String(raw);
+      : new Uint8Array(raw);
 
   return new Response(body, {
     status: res.statusCode,

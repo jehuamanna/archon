@@ -695,6 +695,20 @@ export type ArchonRendererApi = {
     projectId: string,
     noteId: string,
   ) => Promise<{ newRootId: string }>;
+  /** Deep-copy a project into the source workspace or into `targetWorkspaceId` (same space/org only). */
+  wpnDuplicateProject: (
+    projectId: string,
+    opts?: { targetWorkspaceId?: string; newName?: string },
+  ) => Promise<{ projectId: string; name: string }>;
+  /** Deep-copy a workspace (with every project and note) into the source space or into `targetSpaceId` (same org only). */
+  wpnDuplicateWorkspace: (
+    workspaceId: string,
+    opts?: { newName?: string; targetSpaceId?: string },
+  ) => Promise<{
+    workspaceId: string;
+    name: string;
+    projects: { projectId: string; name: string; sourceProjectId: string }[];
+  }>;
   /** Export workspaces (and their projects/notes) as a ZIP. Electron: save dialog; Web: blob download. */
   wpnExportWorkspaces: (workspaceIds?: string[]) => Promise<void>;
   /**

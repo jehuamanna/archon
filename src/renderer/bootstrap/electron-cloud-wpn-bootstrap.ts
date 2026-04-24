@@ -45,6 +45,9 @@ const ELECTRON_CLOUD_WPN_DELEGATE_KEYS = new Set<keyof ArchonRendererApi>([
   "wpnDeleteNotes",
   "wpnMoveNote",
   "wpnDuplicateNoteSubtree",
+  "wpnDuplicateProject",
+  "wpnDuplicateWorkspace",
+  "wpnMoveNoteCrossProject",
 ]);
 
 function isDelegatedKey(prop: string | symbol): prop is keyof ArchonRendererApi {

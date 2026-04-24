@@ -167,14 +167,11 @@ describe("clearImageMetadataKeys", () => {
 // ────────────────────────────────────────────────────────────────────────────
 
 describe("chooseImportName", () => {
-  const now = Date.UTC(2026, 3, 22); // 2026-04-22
-
   it("creates under the original name when there's no collision", () => {
     const d = chooseImportName({
       name: "Testing",
       existing: new Set(),
       policy: "rename",
-      nowMs: now,
     });
     assert.deepEqual(d, { action: "create", name: "Testing" });
   });
@@ -184,7 +181,6 @@ describe("chooseImportName", () => {
       name: "Testing",
       existing: new Set(["Testing"]),
       policy: "skip",
-      nowMs: now,
     });
     assert.deepEqual(d, { action: "skip" });
   });
@@ -194,47 +190,33 @@ describe("chooseImportName", () => {
       name: "Testing",
       existing: new Set(["Testing"]),
       policy: "overwrite",
-      nowMs: now,
     });
     assert.deepEqual(d, { action: "reuse", name: "Testing" });
   });
 
-  it("appends '(imported YYYY-MM-DD)' on collision when policy is 'rename'", () => {
+  it("appends ' 2' on collision when policy is 'rename' (no date suffix)", () => {
     const d = chooseImportName({
       name: "Testing",
       existing: new Set(["Testing"]),
       policy: "rename",
-      nowMs: now,
     });
-    assert.deepEqual(d, {
-      action: "create",
-      name: "Testing (imported 2026-04-22)",
-    });
+    assert.deepEqual(d, { action: "create", name: "Testing 2" });
   });
 
-  it("disambiguates repeat-collision renames with a numeric suffix", () => {
+  it("advances the numeric suffix on repeat collisions", () => {
     const d = chooseImportName({
       name: "Testing",
-      existing: new Set(["Testing", "Testing (imported 2026-04-22)"]),
+      existing: new Set(["Testing", "Testing 2"]),
       policy: "rename",
-      nowMs: now,
     });
-    assert.deepEqual(d, {
-      action: "create",
-      name: "Testing (imported 2026-04-22) 2",
-    });
+    assert.deepEqual(d, { action: "create", name: "Testing 3" });
 
     const d2 = chooseImportName({
       name: "Testing",
-      existing: new Set([
-        "Testing",
-        "Testing (imported 2026-04-22)",
-        "Testing (imported 2026-04-22) 2",
-      ]),
+      existing: new Set(["Testing", "Testing 2", "Testing 3"]),
       policy: "rename",
-      nowMs: now,
     });
-    assert.equal((d2 as { name: string }).name, "Testing (imported 2026-04-22) 3");
+    assert.equal((d2 as { name: string }).name, "Testing 4");
   });
 
   it("trims whitespace and falls back to 'Workspace' when the name is empty", () => {
@@ -242,19 +224,8 @@ describe("chooseImportName", () => {
       name: "   ",
       existing: new Set(),
       policy: "rename",
-      nowMs: now,
     });
     assert.deepEqual(d, { action: "create", name: "Workspace" });
-  });
-
-  it("default injection uses current time but format is stable", () => {
-    const d = chooseImportName({
-      name: "Testing",
-      existing: new Set(["Testing"]),
-      policy: "rename",
-    });
-    assert.equal((d as { action: string }).action, "create");
-    assert.match((d as { name: string }).name, /^Testing \(imported \d{4}-\d{2}-\d{2}\)$/);
   });
 });
 
@@ -496,14 +467,11 @@ function bundleWithWorkspaces(names: string[]): WpnExportMetadata {
 }
 
 describe("planImportWorkspaces", () => {
-  const now = Date.UTC(2026, 3, 22);
-
   it("creates workspaces unchanged when there's no collision", () => {
     const plan = planImportWorkspaces({
       bundle: bundleWithWorkspaces(["Fresh"]),
       existingWorkspaces: [],
       policy: "rename",
-      nowMs: now,
     });
     assert.equal(plan.workspaces.length, 1);
     const action = plan.workspaces[0]!;
@@ -518,19 +486,18 @@ describe("planImportWorkspaces", () => {
       bundle: bundleWithWorkspaces(["Testing"]),
       existingWorkspaces: [{ id: "existing", name: "Testing" }],
       policy: "rename",
-      nowMs: now,
     });
     const action = plan.workspaces[0]!;
     assert.equal(action.kind, "create");
     assert.equal(
       (action as { chosenName: string }).chosenName,
-      "Testing (imported 2026-04-22)",
+      "Testing 2",
     );
     assert.equal((action as { renamed: boolean }).renamed, true);
     assert.deepEqual(plan.canonicalPathRewrites, [
       {
         oldCanonical: "Testing/P/Alpha",
-        newCanonical: "Testing (imported 2026-04-22)/P/Alpha",
+        newCanonical: "Testing 2/P/Alpha",
       },
     ]);
   });
@@ -540,7 +507,6 @@ describe("planImportWorkspaces", () => {
       bundle: bundleWithWorkspaces(["Testing", "Fresh"]),
       existingWorkspaces: [{ id: "existing", name: "Testing" }],
       policy: "skip",
-      nowMs: now,
     });
     assert.equal(plan.workspaces[0]!.kind, "skip");
     assert.equal(plan.workspaces[1]!.kind, "create");
@@ -553,7 +519,6 @@ describe("planImportWorkspaces", () => {
       bundle: bundleWithWorkspaces(["Testing"]),
       existingWorkspaces: [{ id: "existing-123", name: "Testing" }],
       policy: "overwrite",
-      nowMs: now,
     });
     const action = plan.workspaces[0]!;
     assert.equal(action.kind, "reuse");
@@ -569,14 +534,10 @@ describe("planImportWorkspaces", () => {
       bundle: bundleWithWorkspaces(["Testing", "Testing"]),
       existingWorkspaces: [{ id: "existing", name: "Testing" }],
       policy: "rename",
-      nowMs: now,
     });
     const names = plan.workspaces.map((a) =>
       a.kind === "create" ? a.chosenName : a.kind,
     );
-    assert.deepEqual(names, [
-      "Testing (imported 2026-04-22)",
-      "Testing (imported 2026-04-22) 2",
-    ]);
+    assert.deepEqual(names, ["Testing 2", "Testing 3"]);
   });
 });

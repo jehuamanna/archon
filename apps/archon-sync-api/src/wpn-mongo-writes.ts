@@ -847,6 +847,201 @@ export async function mongoWpnDuplicateSubtree(
 }
 
 /**
+ * Deep-copy a project into `targetWorkspaceId` (may be the same workspace) by
+ * creating a fresh project row and fresh note rows that preserve the parent/
+ * sibling structure of the source. Every note gets a new uuid; metadata,
+ * content, type, and visibility are preserved as-is. The `creatorUserId` on
+ * the new project is the caller (not the original creator).
+ *
+ * The caller is responsible for permission checks and for asserting the
+ * target workspace is in the same space/org (see the route).
+ *
+ * Returns `{ projectId, name }` for the new project.
+ */
+export async function mongoWpnDuplicateProject(
+  userId: string,
+  sourceProjectId: string,
+  opts: {
+    targetWorkspaceId: string;
+    newName?: string;
+    creatorUserId: string;
+  },
+): Promise<{ projectId: string; name: string }> {
+  const projCol = getWpnProjectsCollection();
+  const wsCol = getWpnWorkspacesCollection();
+  const noteCol = getWpnNotesCollection();
+
+  const srcProject = await projCol.findOne({ id: sourceProjectId, userId });
+  if (!srcProject) {
+    throw new Error("Project not found");
+  }
+  const targetWs = await wsCol.findOne({
+    id: opts.targetWorkspaceId,
+    userId,
+  });
+  if (!targetWs) {
+    throw new Error("Target workspace not found");
+  }
+
+  const baseName = (opts.newName ?? "").trim() || srcProject.name;
+  const t = nowMs();
+  const lastP = await projCol
+    .find({ userId, workspace_id: opts.targetWorkspaceId })
+    .sort({ sort_index: -1 })
+    .limit(1)
+    .toArray();
+  const maxSort = lastP[0]?.sort_index ?? -1;
+  const sort_index = maxSort + 1;
+  const newProjectId = newId();
+  const dupScopeFields: { orgId?: string; spaceId?: string } = {};
+  if (targetWs.orgId) {
+    dupScopeFields.orgId = targetWs.orgId;
+  }
+  if (targetWs.spaceId) {
+    dupScopeFields.spaceId = targetWs.spaceId;
+  }
+
+  const newProject: WpnProjectDoc = {
+    id: newProjectId,
+    userId,
+    ...dupScopeFields,
+    visibility: srcProject.visibility ?? "public",
+    creatorUserId: opts.creatorUserId,
+    workspace_id: opts.targetWorkspaceId,
+    name: baseName,
+    sort_index,
+    color_token: srcProject.color_token ?? null,
+    created_at_ms: t,
+    updated_at_ms: t,
+    settings:
+      srcProject.settings && typeof srcProject.settings === "object"
+        ? { ...srcProject.settings }
+        : {},
+  };
+  await projCol.insertOne(newProject);
+
+  const srcNotes = await noteCol
+    .find({ userId, project_id: sourceProjectId })
+    .toArray();
+  const active = srcNotes.filter((r) => r.deleted !== true);
+  if (active.length === 0) {
+    return { projectId: newProjectId, name: baseName };
+  }
+  const idMap = new Map<string, string>();
+  for (const n of active) {
+    idMap.set(n.id, newId());
+  }
+  const noteEditor = opts.creatorUserId;
+  for (const n of active) {
+    const newNoteId = idMap.get(n.id)!;
+    const newParent =
+      n.parent_id === null
+        ? null
+        : idMap.get(n.parent_id) ?? null;
+    await noteCol.insertOne({
+      id: newNoteId,
+      userId,
+      ...dupScopeFields,
+      created_by_user_id: noteEditor,
+      updated_by_user_id: noteEditor,
+      project_id: newProjectId,
+      parent_id: newParent,
+      type: n.type,
+      title: n.title,
+      content: n.content,
+      metadata: n.metadata,
+      sibling_index: n.sibling_index,
+      created_at_ms: t,
+      updated_at_ms: t,
+    });
+  }
+
+  return { projectId: newProjectId, name: baseName };
+}
+
+/**
+ * Deep-copy a workspace (including every project and every note in each
+ * project) into `targetSpaceId` when given, else into the source workspace's
+ * space. The caller must have manage rights on the source and (when
+ * cross-space) manage on the target space.
+ *
+ * Returns `{ workspaceId, name, projects: [{ projectId, name }] }` where the
+ * projects array maps source projects to their duplicates.
+ */
+export async function mongoWpnDuplicateWorkspace(
+  userId: string,
+  sourceWorkspaceId: string,
+  opts: {
+    targetSpaceId?: string;
+    newName?: string;
+    creatorUserId: string;
+  },
+): Promise<{
+  workspaceId: string;
+  name: string;
+  projects: { projectId: string; name: string; sourceProjectId: string }[];
+}> {
+  const wsCol = getWpnWorkspacesCollection();
+  const projCol = getWpnProjectsCollection();
+
+  const srcWs = await wsCol.findOne({ id: sourceWorkspaceId, userId });
+  if (!srcWs) {
+    throw new Error("Workspace not found");
+  }
+  const targetSpaceId = opts.targetSpaceId ?? srcWs.spaceId;
+  const t = nowMs();
+  const lastWs = await wsCol
+    .find({ userId })
+    .sort({ sort_index: -1 })
+    .limit(1)
+    .toArray();
+  const maxSort = lastWs[0]?.sort_index ?? -1;
+  const sort_index = maxSort + 1;
+  const newWsId = newId();
+  const baseName = (opts.newName ?? "").trim() || srcWs.name;
+  const newWs: WpnWorkspaceDoc = {
+    id: newWsId,
+    userId,
+    ...(srcWs.orgId ? { orgId: srcWs.orgId } : {}),
+    ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+    visibility: srcWs.visibility ?? "public",
+    creatorUserId: opts.creatorUserId,
+    name: baseName,
+    sort_index,
+    color_token: srcWs.color_token ?? null,
+    created_at_ms: t,
+    updated_at_ms: t,
+    settings:
+      srcWs.settings && typeof srcWs.settings === "object"
+        ? { ...srcWs.settings }
+        : {},
+  };
+  await wsCol.insertOne(newWs);
+
+  const srcProjects = await projCol
+    .find({ userId, workspace_id: sourceWorkspaceId })
+    .sort({ sort_index: 1 })
+    .toArray();
+  const projectMap: {
+    projectId: string;
+    name: string;
+    sourceProjectId: string;
+  }[] = [];
+  for (const p of srcProjects) {
+    const dup = await mongoWpnDuplicateProject(userId, p.id, {
+      targetWorkspaceId: newWsId,
+      creatorUserId: opts.creatorUserId,
+    });
+    projectMap.push({
+      projectId: dup.projectId,
+      name: dup.name,
+      sourceProjectId: p.id,
+    });
+  }
+  return { workspaceId: newWsId, name: baseName, projects: projectMap };
+}
+
+/**
  * Upsert the caller's explorer-expansion set for a project. Access control
  * lives in the route (see `assertCanReadProject`): explorer state is per-user
  * and scoped by `{ userId, project_id }`, so creator-ownership is not required.

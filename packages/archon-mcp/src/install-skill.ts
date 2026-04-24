@@ -11,13 +11,20 @@
 //   antigravity — .agents/skills/<name>/            (symlink — same format as Claude)
 //   opencode    — .opencode/agents/<name>.md        (verbatim source)
 //   pi          — skipped (Pi reads canonical + AGENTS.md natively)
+//   codex       — skipped (OpenAI Codex reads AGENTS.md natively — no dot-dir)
+//
+// AGENTS.md at repo root is written by writeAgentsMd() as a post-loop step by
+// the caller, so Codex / Antigravity / opencode / Pi / Copilot coding agent
+// all know the skills exist.
 //
 // Zero runtime deps; stdlib only.
 
 import {
   cpSync,
+  existsSync,
   lstatSync,
   mkdirSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -31,7 +38,8 @@ export type Provider =
   | "copilot"
   | "antigravity"
   | "opencode"
-  | "pi";
+  | "pi"
+  | "codex";
 
 export const ALL_PROVIDERS: Provider[] = [
   "claude",
@@ -41,6 +49,7 @@ export const ALL_PROVIDERS: Provider[] = [
   "antigravity",
   "opencode",
   "pi",
+  "codex",
 ];
 
 export type InstallWrite = {
@@ -265,6 +274,14 @@ export function installSkill(opts: InstallSkillOptions): InstallSkillReport {
         });
         break;
       }
+      case "codex": {
+        skipped.push({
+          provider,
+          reason:
+            "Codex reads the repo-root AGENTS.md natively — no dot-directory needed. Covered by writeAgentsMd().",
+        });
+        break;
+      }
     }
   }
 
@@ -275,4 +292,109 @@ export function installSkill(opts: InstallSkillOptions): InstallSkillReport {
     wrote: wrote.map((w) => ({ ...w, path: relative(repo, w.path) })),
     skipped,
   };
+}
+
+/** Marker pair used to delimit the Archon-managed block inside AGENTS.md.
+ *  HTML comments so every markdown renderer hides them. */
+const AGENTS_MD_BEGIN = "<!-- archon:skills:begin -->";
+const AGENTS_MD_END = "<!-- archon:skills:end -->";
+
+export type AgentsMdEntry = {
+  name: string;
+  description: string;
+};
+
+export type AgentsMdWriteReport = {
+  path: string;
+  action: "created" | "block-replaced" | "block-appended" | "unchanged";
+};
+
+/** Render the marker-bracketed Archon block. The content between the markers is
+ *  what future runs replace; everything outside stays exactly as the user wrote it. */
+function renderAgentsMdBlock(skills: AgentsMdEntry[]): string {
+  const rows = skills
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((s) => `| \`${s.name}\` | ${s.description.replace(/\|/g, "\\|")} |`)
+    .join("\n");
+  const table = rows.length > 0
+    ? `| Skill | When to invoke |\n|---|---|\n${rows}`
+    : "_No skills installed yet._";
+  return [
+    AGENTS_MD_BEGIN,
+    "",
+    "## Archon skills",
+    "",
+    "Canonical source: `skills/<name>/SKILL.md`. Each skill below is discoverable",
+    "by every AGENTS.md-aware agent (Codex, Antigravity, opencode, Pi, Copilot).",
+    "Tools with dot-directory support (Claude, Cursor, Windsurf, Copilot,",
+    "Antigravity, opencode) also get their own provider-specific file layout.",
+    "",
+    "**Edit rule:** change `skills/<name>/SKILL.md` only. Re-run `archon_install_skill`",
+    "(or `npm run sync-skills` if your repo is Node-based) to regenerate the provider",
+    "dot-directories and this table. Do not hand-edit anything inside the marker block.",
+    "",
+    table,
+    "",
+    AGENTS_MD_END,
+  ].join("\n");
+}
+
+/** Template used when AGENTS.md does not yet exist. Deliberately minimal — the
+ *  user may expand it later; we only own the marker block. */
+function renderAgentsMdTemplate(skills: AgentsMdEntry[]): string {
+  return [
+    "# AGENTS.md",
+    "",
+    "Standing instructions for AI coding agents (Claude, Cursor, Windsurf,",
+    "Copilot, Antigravity, opencode, Pi, Codex, etc.) working in this repo.",
+    "",
+    renderAgentsMdBlock(skills),
+    "",
+  ].join("\n");
+}
+
+/** Write or update the Archon-managed block inside `<repoPath>/AGENTS.md`.
+ *
+ *  - File absent → create from template seeded with the skill list.
+ *  - File present with markers → replace the block between markers.
+ *  - File present without markers → append a new marker-bracketed block at EOF.
+ *
+ *  Idempotent: writing with the same inputs twice produces no disk delta the
+ *  second time (the content hash matches; we skip the write).
+ */
+export function writeAgentsMd(
+  repoPath: string,
+  skills: AgentsMdEntry[],
+): AgentsMdWriteReport {
+  const repo = resolve(repoPath);
+  const path = join(repo, "AGENTS.md");
+  const desired = renderAgentsMdBlock(skills);
+
+  if (!existsSync(path)) {
+    writeFileSync(path, renderAgentsMdTemplate(skills));
+    return { path: relative(repo, path), action: "created" };
+  }
+
+  const current = readFileSync(path, "utf8");
+  const begin = current.indexOf(AGENTS_MD_BEGIN);
+  const end = current.indexOf(AGENTS_MD_END);
+
+  if (begin !== -1 && end !== -1 && end > begin) {
+    const before = current.slice(0, begin);
+    const afterStart = end + AGENTS_MD_END.length;
+    const after = current.slice(afterStart);
+    const next = `${before}${desired}${after}`;
+    if (next === current) {
+      return { path: relative(repo, path), action: "unchanged" };
+    }
+    writeFileSync(path, next);
+    return { path: relative(repo, path), action: "block-replaced" };
+  }
+
+  // No markers — append a fresh block at EOF, preserving existing content.
+  const sep = current.endsWith("\n") ? "\n" : "\n\n";
+  const next = `${current}${sep}${desired}\n`;
+  writeFileSync(path, next);
+  return { path: relative(repo, path), action: "block-appended" };
 }

@@ -189,15 +189,14 @@ export type ConflictDecision =
  *   `{ action: "create", name }`.
  * - `overwrite`: returns `{ action: "reuse", name }` when a collision exists
  *   (the route merges into the existing workspace); otherwise `create`.
- * - `rename`: always `create`; on collision, append `" (imported YYYY-MM-DD)"`
- *   and a numeric disambiguator on repeat collisions.
+ * - `rename`: always `create`; on collision, append `" 2"` (or `" 3"`, `" 4"`,
+ *   …) until a free name is found. The imported workspace keeps its original
+ *   name verbatim when there is no collision.
  */
 export function chooseImportName(args: {
   name: string;
   existing: ReadonlySet<string>;
   policy: WpnImportConflictPolicy;
-  /** Timestamp used to stamp the rename suffix. Injected for testability. */
-  nowMs?: number;
 }): ConflictDecision {
   const trimmed = args.name.trim() || "Workspace";
   const collision = args.existing.has(trimmed);
@@ -210,24 +209,10 @@ export function chooseImportName(args: {
   if (args.policy === "overwrite") {
     return { action: "reuse", name: trimmed };
   }
-  // rename
-  const datestamp = formatDatestamp(args.nowMs ?? Date.now());
-  const baseSuffix = ` (imported ${datestamp})`;
-  const base = `${trimmed}${baseSuffix}`;
-  if (!args.existing.has(base)) {
-    return { action: "create", name: base };
-  }
+  // rename: append a numeric disambiguator.
   let n = 2;
-  while (args.existing.has(`${base} ${n}`)) n++;
-  return { action: "create", name: `${base} ${n}` };
-}
-
-function formatDatestamp(epochMs: number): string {
-  const d = new Date(epochMs);
-  const yyyy = d.getUTCFullYear();
-  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const dd = String(d.getUTCDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  while (args.existing.has(`${trimmed} ${n}`)) n++;
+  return { action: "create", name: `${trimmed} ${n}` };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -385,7 +370,6 @@ export function planImportWorkspaces(args: {
   bundle: WpnExportMetadata;
   existingWorkspaces: ReadonlyArray<{ id: string; name: string }>;
   policy: WpnImportConflictPolicy;
-  nowMs?: number;
 }): ImportPlan {
   const existingByName = new Map<string, string>();
   const existingNames = new Set<string>();
@@ -402,7 +386,6 @@ export function planImportWorkspaces(args: {
       name: ws.name,
       existing: claimedNames,
       policy: args.policy,
-      nowMs: args.nowMs,
     });
     if (decision.action === "skip") {
       workspaces.push({ kind: "skip", sourceWorkspaceId: ws.id });

@@ -348,12 +348,25 @@ export async function registerWpnImportExportRoutes(
     const projCol = getWpnProjectsCollection();
     const noteCol = getWpnNotesCollection();
 
-    const existingWs = await wsCol.find({ userId }).toArray();
+    // Collision scope = workspaces owned by this user in the destination space.
+    // Mirrors the stamp logic a few lines down (auth.activeSpaceId), so importing
+    // `Foo` into Space B never falsely collides with a `Foo` the user owns in
+    // Space A. Legacy workspaces (predating the space rollout, no `spaceId`
+    // field) are still included so they continue to participate in the check.
+    const wsScopeFilter = auth.activeSpaceId
+      ? {
+          userId,
+          $or: [
+            { spaceId: auth.activeSpaceId },
+            { spaceId: { $exists: false } },
+          ],
+        }
+      : { userId };
+    const existingWs = await wsCol.find(wsScopeFilter).toArray();
     const plan = planImportWorkspaces({
       bundle: metadataJson,
       existingWorkspaces: existingWs.map((w) => ({ id: w.id, name: w.name })),
       policy,
-      nowMs: nowMs(),
     });
 
     const lastWs = await wsCol

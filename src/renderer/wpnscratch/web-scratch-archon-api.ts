@@ -220,6 +220,12 @@ export function webScratchPlainStubOverrides(): Partial<ArchonRendererApi> {
     wpnMoveNote: (payload) => scratchWpnMoveNote(payload),
     wpnDuplicateNoteSubtree: (projectId, noteId) =>
       scratchWpnDuplicateNoteSubtree(projectId, noteId),
+    wpnDuplicateProject: async () => {
+      throw new Error("wpnDuplicateProject: only supported against the sync-api");
+    },
+    wpnDuplicateWorkspace: async () => {
+      throw new Error("wpnDuplicateWorkspace: only supported against the sync-api");
+    },
     wpnExportWorkspaces: async (workspaceIds?: string[]) => {
       const { zipSync, strToU8 } = await import("fflate");
       const { metadata, noteContents } = await scratchWpnBuildExportBundle(workspaceIds);

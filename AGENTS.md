@@ -61,3 +61,33 @@ Run `npm run sync-skills` after editing anything under `skills/`. `npm install` 
 - **A Fastify route returns 404 even though you added it** — the colocated sync-api's Fastify app is cached on `globalThis.__archonSyncFastifyApp`. Rebuild sync-api (`npm run build:lib -w @archon/sync-api`) and fully restart the Next dev server (`Ctrl+C` the terminal running `npm run dev:web`, then start it again).
 - **An MCP tool does not appear** — tools are statically registered in `packages/archon-mcp/src/server.ts`. Requires an MCP server restart. `/mcp` in Claude Code picks up a reconnect.
 - **Tests fail with Mongo errors** — the test harness tries `resolveTestMongoUri()` and skips if unreachable. Make sure a local Mongo is up (`npm run docker:api:up`).
+
+<!-- archon:skills:begin -->
+
+## Archon skills
+
+Canonical source: `skills/<name>/SKILL.md`. Each skill below is discoverable
+by every AGENTS.md-aware agent (Codex, Antigravity, opencode, Pi, Copilot).
+Tools with dot-directory support (Claude, Cursor, Windsurf, Copilot,
+Antigravity, opencode) also get their own provider-specific file layout.
+
+**Edit rule:** change `skills/<name>/SKILL.md` only. Re-run `archon_install_skill`
+(or `npm run sync-skills` if your repo is Node-based) to regenerate the provider
+dot-directories and this table. Do not hand-edit anything inside the marker block.
+
+| Skill | When to invoke |
+|---|---|
+| `archon-analyze` | Read-only cross-artifact consistency check across Prompt-Phase, Plans-Phase, Tasks-Phase, TestCase-Phase, and the Constitution. Produces an Analysis-Phase-<N>-<topic> findings report that gates archon-implement (CRITICAL findings block execution). Invoke when the user says "analyze", "check consistency", or "run /analyze", or before archon-implement runs. |
+| `archon-clarify-prompts` | Clarification pass over an existing Prompt-Phase-<N>-<topic> note — surface ambiguity, ask up to 5 structured questions one at a time, and apply each accepted answer in place (bumping the phase note's revision). Invoke when the user says "clarify the spec", "clarify phase N", "run /clarify", or when an upstream skill detects unresolved [NEEDS CLARIFICATION] markers. |
+| `archon-cr-seed-prompts` | Treat a change request (CR) as its own child seed-prompt under an existing Archon seed, then run the full seed-prompt pipeline scoped to that CR so the delta is tracked separately from the original scope. Invoke when the user introduces a CR / change request / scope change against an existing Archon seed. |
+| `archon-create-plans` | Act as a principal solution architect to turn Archon "Prompts" phase notes into implementation plans (Plans-Phase-<N>-<topic>) under a "Plans" container of the seed, covering HLD, LLD, tech stack, risks, feasibility, and a strict execution order. Invoke when the user asks to plan a seed, create prompts from prompts, or run the architecture phase of the Archon workflow. |
+| `archon-create-prompts` | Act as a senior business analyst to dissect an Archon seed-prompt note into phased prompt notes (Prompt-Phase-<N>-<topic>) saved as children of a "Prompts" container under the seed. Invoke when the user asks to create prompts from a seed, decompose requirements into prompts, or run the BA phase of the Archon workflow. |
+| `archon-create-tasks` | Convert each approved Plans-Phase-<N>-<topic> note into a matching Tasks-Phase-<N>-<topic> note under a "Tasks" container on the seed, using the strict `- [ ] [TaskID] [P?] [Story?] Description with file path` format so archon-implement can iterate mechanically. Invoke when the user says "create tasks", "break plan into tasks", "run /tasks", or after archon-create-plans completes. |
+| `archon-create-test-cases` | Write comprehensive unit, integration, and end-to-end test cases (Playwright for UI) as phase notes (TestCase-Phase-<N>-<topic>) under a "Test Cases" container of the seed. Invoke when the user asks to write or create test cases from an Archon plan or seed prompt. |
+| `archon-execute-notes` | Resolve any Archon note by title or UUID via archon_execute_note and follow its content as executable instructions, handling ambiguity by surfacing candidates for the user to pick. Invoke when the user asks to run, execute, or follow an Archon note without specifying a workflow phase. |
+| `archon-execute-test-cases` | Run the test cases specified in TestCase-Phase-<N> notes (unit, integration, e2e via Playwright) and write results as children of a "Test Results" container under the seed. No user interruption. Invoke when the user asks to run, execute, or validate test cases for an Archon seed prompt. |
+| `archon-fix-bugs` | Triage and fix bugs surfaced from failing tests or user reports in an Archon seed-prompt workflow, keeping each bug as a child note under a "Bugs" container on the seed, grouped by topic. Invoke when the user reports a bug, asks Claude to fix failing tests, or says "fix bugs in <seed>". |
+| `archon-implement` | Execute Archon Plans-Phase-<N> notes in the recorded execution order, write code, commit at every [commit] boundary, and attach a summary child under each plan note. No user interruption. Invoke when the user asks to execute plans, implement a seed prompt, or run the build phase of an Archon workflow. |
+| `archon-use-seed-prompt` | Run the end-to-end Archon seed-prompt workflow — disect requirements, plan, write tests, execute, run tests, and write each phase back as children of the seed note. Invoke when the user says "use seed prompt", "run seed", "drive seed <note>", passes an Archon note UUID as the starting point, or asks to take an Archon note from requirements to delivery. |
+
+<!-- archon:skills:end -->

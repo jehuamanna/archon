@@ -62,6 +62,19 @@ import {
   ADMIN_CMD_OPEN_PROJECT_SHARES,
   ADMIN_CMD_OPEN_WORKSPACE_SHARES,
 } from "../admin/adminConstants";
+import {
+  clearClipboard as clearWpnClipboard,
+  setClipboard as setWpnClipboard,
+  type WpnClipboardItem,
+} from "../../../../store/wpnClipboardSlice";
+import {
+  bumpUndoVersion,
+  popRedoEntry,
+  popUndoEntry,
+  pushRedoEntry,
+  pushUndoEntry,
+  type WpnUndoEntry,
+} from "../../../../store/wpnUndoSlice";
 
 type ShellViewComponentProps = {
   viewId: string;
@@ -370,7 +383,15 @@ type MenuState =
   | {
       x: number;
       y: number;
-      kind: "ws" | "project" | "note" | "projectBody" | "no_project" | "panel_empty";
+      kind:
+        | "ws"
+        | "project"
+        | "note"
+        | "projectBody"
+        | "no_project"
+        | "panel_empty"
+        | "org"
+        | "space";
       id: string;
       workspaceId?: string;
       projectId?: string;
@@ -522,6 +543,18 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const noteRenameEpoch = useSelector((s: RootState) => s.notes.noteRenameEpoch);
   const noteTitleDraftById = useSelector((s: RootState) => s.notes.noteTitleDraftById);
   const activeSpaceId = useSelector((s: RootState) => s.spaceMembership.activeSpaceId);
+  const activeOrgId = useSelector((s: RootState) => s.orgMembership.activeOrgId);
+  const orgs = useSelector((s: RootState) => s.orgMembership.orgs);
+  const spaces = useSelector((s: RootState) => s.spaceMembership.spaces);
+  const clipboard = useSelector((s: RootState) => s.wpnClipboard);
+  const activeOrgName = useMemo(
+    () => orgs.find((o) => o.orgId === activeOrgId)?.name ?? null,
+    [orgs, activeOrgId],
+  );
+  const activeSpaceName = useMemo(
+    () => spaces.find((s) => s.spaceId === activeSpaceId)?.name ?? null,
+    [spaces, activeSpaceId],
+  );
 
   const showFolderBasedWorkspaceCreate = isElectronUserAgent() || rootPath != null;
 
@@ -585,6 +618,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     explorerStateByProjectId: Record<string, { expanded_ids: string[] }>;
   } | null>(null);
   const [, bumpClip] = useState(0);
+  const shownNonUndoableToastRef = useRef(false);
 
   const projectOpen = workspaceRoots.length > 0;
 
@@ -1206,6 +1240,15 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     });
   }, [notes, search]);
 
+  const cutNoteIdSet = useMemo(() => {
+    if (clipboard.mode !== "cut") return new Set<string>();
+    const s = new Set<string>();
+    for (const it of clipboard.items) {
+      if (it.kind === "note") s.add(it.id);
+    }
+    return s;
+  }, [clipboard]);
+
   const noteParentsMap = useMemo(() => {
     const m = new Map<string, string | null>();
     for (const n of notes) {
@@ -1370,6 +1413,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
 
   const onDeleteWorkspace = async (id: string) => {
     if (!window.confirm("Delete this workspace and all projects and notes inside it?")) return;
+    reportNonUndoable();
     lastMutationAtRef.current = Date.now();
     closeAllMenus();
     beginWpnSync();
@@ -1400,6 +1444,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
 
   const onDeleteProject = async (id: string) => {
     if (!window.confirm("Delete this project and all its notes?")) return;
+    reportNonUndoable();
     lastMutationAtRef.current = Date.now();
     closeAllMenus();
     beginWpnSync();
@@ -1856,6 +1901,359 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     [notes, runMoveNote, loadProjectTree, closeAllMenus, setNoteClipboard],
   );
 
+  const recordUndo = useCallback(
+    (entry: Omit<WpnUndoEntry, "at">) => {
+      pushUndoEntry(entry);
+      dispatch(bumpUndoVersion());
+    },
+    [dispatch],
+  );
+
+  const reportNonUndoable = useCallback(() => {
+    if (shownNonUndoableToastRef.current) return;
+    shownNonUndoableToastRef.current = true;
+    showToast({ severity: "log", message: "This action can't be undone yet." });
+  }, [showToast]);
+
+  /** Snapshot current selection + `selection.kind` into the Redux clipboard (Phase B). */
+  const snapshotSelectionToClipboard = useCallback(
+    (mode: "cut" | "copy"): boolean => {
+      const sel = selectionRef.current;
+      if (!sel.kind || sel.ids.size === 0) return false;
+      const items: WpnClipboardItem[] = [];
+      const snapOrg = activeOrgId ?? null;
+      const snapSpace = activeSpaceId ?? null;
+      if (sel.kind === "note" && sel.scopeId) {
+        const projectId = sel.scopeId;
+        for (const id of sel.ids) {
+          const n = notesRef.current.find((x) => x.id === id);
+          items.push({
+            kind: "note",
+            id,
+            sourceProjectId: projectId,
+            sourceParentId: n?.parent_id ?? null,
+            sourceOrgId: snapOrg,
+          });
+        }
+      } else if (sel.kind === "project") {
+        const wsId = sel.scopeId ?? undefined;
+        for (const id of sel.ids) {
+          items.push({
+            kind: "project",
+            id,
+            sourceWorkspaceId: wsId,
+            sourceOrgId: snapOrg,
+          });
+        }
+      } else if (sel.kind === "ws") {
+        for (const id of sel.ids) {
+          items.push({
+            kind: "workspace",
+            id,
+            sourceSpaceId: snapSpace ?? undefined,
+            sourceOrgId: snapOrg,
+          });
+        }
+      } else {
+        return false;
+      }
+      dispatch(setWpnClipboard({ items, mode }));
+      return true;
+    },
+    [activeOrgId, activeSpaceId, dispatch],
+  );
+
+  const clipOrgMismatch = useCallback(
+    (items: WpnClipboardItem[]): boolean => {
+      for (const it of items) {
+        if (it.sourceOrgId && activeOrgId && it.sourceOrgId !== activeOrgId) {
+          return true;
+        }
+      }
+      return false;
+    },
+    [activeOrgId],
+  );
+
+  /**
+   * Generic paste: target is inferred from the current single-row selection.
+   * Notes paste onto a target note (inserts after) or project row (appends to root).
+   * Projects paste onto a workspace row. Workspaces paste onto the active space (cut only).
+   */
+  const pasteFromStore = useCallback(async () => {
+    const items = clipboard.items;
+    const mode = clipboard.mode;
+    if (!mode || items.length === 0) return;
+    if (clipOrgMismatch(items)) {
+      showToast({
+        severity: "error",
+        message: "Cross-org move/copy is not supported — use export/import",
+      });
+      return;
+    }
+    const sel = selectionRef.current;
+    const kind = items[0]!.kind;
+    if (items.some((i) => i.kind !== kind)) {
+      showToast({ severity: "error", message: "Mixed-kind clipboard is not supported." });
+      return;
+    }
+
+    if (kind === "note") {
+      // Target: selected note (paste after) or project (append to root).
+      let targetProjectId: string | null = null;
+      let targetNoteId: string | null = null;
+      if (sel.kind === "note" && sel.scopeId && sel.ids.size >= 1) {
+        targetProjectId = sel.scopeId;
+        targetNoteId = [...sel.ids][0] ?? null;
+      } else if (sel.kind === "project" && sel.ids.size >= 1) {
+        targetProjectId = [...sel.ids][0] ?? null;
+      } else if (selectedProjectId) {
+        targetProjectId = selectedProjectId;
+      }
+      if (!targetProjectId) {
+        showToast({ severity: "error", message: "Pick a target note or project to paste into." });
+        return;
+      }
+      for (const it of items) {
+        if (!it.sourceProjectId) continue;
+        const isSameProject = it.sourceProjectId === targetProjectId;
+        if (mode === "cut") {
+          if (isSameProject && targetNoteId && targetNoteId !== it.id) {
+            await getArchon().wpnMoveNote({
+              projectId: targetProjectId,
+              draggedId: it.id,
+              targetId: targetNoteId,
+              placement: "after",
+            });
+            const srcProject = it.sourceProjectId;
+            const srcParent = it.sourceParentId ?? null;
+            recordUndo({
+              label: `Move note`,
+              forward: async () => {
+                await getArchon().wpnMoveNote({
+                  projectId: targetProjectId!,
+                  draggedId: it.id,
+                  targetId: targetNoteId!,
+                  placement: "after",
+                });
+              },
+              inverse: async () => {
+                if (srcParent) {
+                  await getArchon().wpnMoveNote({
+                    projectId: srcProject,
+                    draggedId: it.id,
+                    targetId: srcParent,
+                    placement: "into",
+                  });
+                }
+              },
+            });
+          } else if (!isSameProject) {
+            await getArchon().wpnMoveNoteCrossProject({
+              noteId: it.id,
+              targetProjectId,
+            });
+            const srcProject = it.sourceProjectId;
+            const srcParent = it.sourceParentId ?? undefined;
+            recordUndo({
+              label: `Move note to project`,
+              forward: async () => {
+                await getArchon().wpnMoveNoteCrossProject({
+                  noteId: it.id,
+                  targetProjectId: targetProjectId!,
+                });
+              },
+              inverse: async () => {
+                await getArchon().wpnMoveNoteCrossProject({
+                  noteId: it.id,
+                  targetProjectId: srcProject,
+                  ...(srcParent ? { targetParentId: srcParent } : {}),
+                });
+              },
+            });
+          }
+        } else {
+          // copy
+          if (isSameProject) {
+            const { newRootId } = await getArchon().wpnDuplicateNoteSubtree(
+              targetProjectId,
+              it.id,
+            );
+            if (targetNoteId && targetNoteId !== newRootId) {
+              await getArchon().wpnMoveNote({
+                projectId: targetProjectId,
+                draggedId: newRootId,
+                targetId: targetNoteId,
+                placement: "after",
+              });
+            }
+            recordUndo({
+              label: `Duplicate note`,
+              forward: async () => {
+                /* re-duplication would create a second copy; forward here is a no-op for replay safety */
+              },
+              inverse: async () => {
+                await getArchon().wpnDeleteNotes([newRootId]);
+              },
+            });
+          } else {
+            // Cross-project copy: duplicate in source, then move to target.
+            const { newRootId } = await getArchon().wpnDuplicateNoteSubtree(
+              it.sourceProjectId,
+              it.id,
+            );
+            await getArchon().wpnMoveNoteCrossProject({
+              noteId: newRootId,
+              targetProjectId,
+            });
+            recordUndo({
+              label: `Duplicate note to project`,
+              forward: async () => {
+                /* forward replay is skipped; see above */
+              },
+              inverse: async () => {
+                await getArchon().wpnDeleteNotes([newRootId]);
+              },
+            });
+          }
+        }
+      }
+      if (mode === "cut") dispatch(clearWpnClipboard());
+      await loadWorkspaces();
+      if (targetProjectId) void loadProjectTree(targetProjectId).catch(() => {});
+      return;
+    }
+
+    if (kind === "project") {
+      if (sel.kind !== "ws" || sel.ids.size !== 1) {
+        showToast({ severity: "error", message: "Select a target workspace to paste project into." });
+        return;
+      }
+      const targetWs = [...sel.ids][0]!;
+      if (mode === "cut") {
+        for (const it of items) {
+          if (!it.sourceWorkspaceId) continue;
+          if (it.sourceWorkspaceId === targetWs) continue;
+          await getArchon().wpnUpdateProject(it.id, { workspace_id: targetWs });
+          const originalWs = it.sourceWorkspaceId;
+          recordUndo({
+            label: `Move project`,
+            forward: async () => {
+              await getArchon().wpnUpdateProject(it.id, { workspace_id: targetWs });
+            },
+            inverse: async () => {
+              await getArchon().wpnUpdateProject(it.id, { workspace_id: originalWs });
+            },
+          });
+        }
+      } else {
+        // copy: duplicate each project into the target workspace.
+        for (const it of items) {
+          const dup = await getArchon().wpnDuplicateProject(it.id, {
+            targetWorkspaceId: targetWs,
+          });
+          recordUndo({
+            label: `Duplicate project`,
+            forward: async () => {
+              /* forward replay is skipped — re-running would produce a second clone */
+            },
+            inverse: async () => {
+              await getArchon().wpnDeleteProject(dup.projectId);
+            },
+          });
+        }
+      }
+      dispatch(clearWpnClipboard());
+      await loadWorkspaces();
+      return;
+    }
+
+    if (kind === "workspace") {
+      // Cross-space workspace cut still needs a target-space picker. Within the
+      // currently-visible space we can offer workspace copy in-place (useful
+      // for branching a workspace); cross-space copy waits on the same picker.
+      if (mode === "cut") {
+        showToast({
+          severity: "warning",
+          message: "Workspace cross-space move needs a space picker — not wired in the explorer yet.",
+        });
+        return;
+      }
+      for (const it of items) {
+        const dup = await getArchon().wpnDuplicateWorkspace(it.id, {});
+        recordUndo({
+          label: `Duplicate workspace`,
+          forward: async () => {
+            /* forward replay is skipped — re-running would produce a second clone */
+          },
+          inverse: async () => {
+            await getArchon().wpnDeleteWorkspace(dup.workspaceId);
+          },
+        });
+      }
+      dispatch(clearWpnClipboard());
+      await loadWorkspaces();
+      return;
+    }
+  }, [
+    clipboard,
+    clipOrgMismatch,
+    dispatch,
+    loadProjectTree,
+    loadWorkspaces,
+    recordUndo,
+    reportNonUndoable,
+    selectedProjectId,
+    showToast,
+  ]);
+
+  const doUndo = useCallback(async () => {
+    const entry = popUndoEntry();
+    if (!entry) {
+      showToast({ severity: "info", message: "Nothing to undo." });
+      return;
+    }
+    try {
+      await entry.inverse();
+      pushRedoEntry(entry);
+      dispatch(bumpUndoVersion());
+      showToast({ severity: "info", message: `Undid: ${entry.label}` });
+      await loadWorkspaces();
+      if (selectedProjectId) void loadProjectTree(selectedProjectId).catch(() => {});
+    } catch (e) {
+      // Put it back so the user can retry after fixing the cause.
+      pushUndoEntry(entry);
+      dispatch(bumpUndoVersion());
+      showToast({
+        severity: "error",
+        message: `Undo failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }, [dispatch, loadProjectTree, loadWorkspaces, selectedProjectId, showToast]);
+
+  const doRedo = useCallback(async () => {
+    const entry = popRedoEntry();
+    if (!entry) {
+      showToast({ severity: "info", message: "Nothing to redo." });
+      return;
+    }
+    try {
+      await entry.forward();
+      pushUndoEntry(entry);
+      dispatch(bumpUndoVersion());
+      showToast({ severity: "info", message: `Redid: ${entry.label}` });
+      await loadWorkspaces();
+      if (selectedProjectId) void loadProjectTree(selectedProjectId).catch(() => {});
+    } catch (e) {
+      pushRedoEntry(entry);
+      dispatch(bumpUndoVersion());
+      showToast({
+        severity: "error",
+        message: `Redo failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  }, [dispatch, loadProjectTree, loadWorkspaces, selectedProjectId, showToast]);
+
   const commitRename = useCallback(async () => {
     if (!renaming) return;
     const name = renaming.draft.trim();
@@ -1863,17 +2261,49 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     setIsCommittingRename(true);
     try {
       if (renaming.kind === "ws") {
-        await getArchon().wpnUpdateWorkspace(renaming.id, { name: name || "Workspace" });
+        const wsRow = workspacesRef.current.find((x) => x.id === renaming.id);
+        const prevName = wsRow?.name ?? "";
+        const newName = name || "Workspace";
+        await getArchon().wpnUpdateWorkspace(renaming.id, { name: newName });
         await loadWorkspaces();
+        if (prevName && prevName !== newName) {
+          const targetId = renaming.id;
+          recordUndo({
+            label: `Rename workspace`,
+            forward: async () => {
+              await getArchon().wpnUpdateWorkspace(targetId, { name: newName });
+            },
+            inverse: async () => {
+              await getArchon().wpnUpdateWorkspace(targetId, { name: prevName });
+            },
+          });
+        }
       } else if (renaming.kind === "project") {
-        await getArchon().wpnUpdateProject(renaming.id, { name: name || "Project" });
+        const prList = projectsByWsRef.current[renaming.workspaceId ?? ""] ?? [];
+        const prRow = prList.find((x) => x.id === renaming.id);
+        const prevName = prRow?.name ?? "";
+        const newName = name || "Project";
+        await getArchon().wpnUpdateProject(renaming.id, { name: newName });
         await loadWorkspaces();
+        if (prevName && prevName !== newName) {
+          const targetId = renaming.id;
+          recordUndo({
+            label: `Rename project`,
+            forward: async () => {
+              await getArchon().wpnUpdateProject(targetId, { name: newName });
+            },
+            inverse: async () => {
+              await getArchon().wpnUpdateProject(targetId, { name: prevName });
+            },
+          });
+        }
       } else if (renaming.kind === "note" && renaming.projectId) {
         const title = name || "Untitled";
         const noteRow = notes.find((n) => n.id === renaming.id);
+        const prevTitle = noteRow?.title ?? "";
         const outcome = await runWpnNoteTitleRenameWithVfsDependentsFlow({
           noteId: renaming.id,
-          currentTitle: noteRow?.title ?? "",
+          currentTitle: prevTitle,
           newTitle: title,
           prompt: vfsRenameChoice.prompt,
           rename: async (updateVfsDependentLinks) => {
@@ -1888,6 +2318,18 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
           return;
         }
         if (outcome === "renamed") {
+          if (prevTitle && prevTitle !== title) {
+            const noteId = renaming.id;
+            recordUndo({
+              label: `Rename note`,
+              forward: async () => {
+                await getArchon().wpnPatchNote(noteId, { title });
+              },
+              inverse: async () => {
+                await getArchon().wpnPatchNote(noteId, { title: prevTitle });
+              },
+            });
+          }
           dispatch(clearNoteTitleDraft(renaming.id));
           setNotes((prev) =>
             prev.map((x) => (x.id === renaming.id ? { ...x, title } : x)),
@@ -1921,6 +2363,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     tabs,
     currentNoteId,
     dispatch,
+    recordUndo,
   ]);
 
   const scheduleOpenNote = useCallback(
@@ -2109,6 +2552,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
       const rowDropHint =
         wpnNoteDropHint?.targetId === n.id ? wpnNoteDropHint.placement : null;
       const noteSelected = isRowSelected("note", n.id, projectId);
+      const noteCut = cutNoteIdSet.has(n.id);
       rows.push(
         <div
           key={n.id}
@@ -2120,7 +2564,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
               : currentNoteId === n.id
                 ? "bg-muted/50"
                 : "hover:bg-muted/25"
-          }`}
+          }${noteCut ? " opacity-50" : ""}`}
           style={
             noteSelected
               ? { paddingLeft: pad, backgroundColor: "hsl(var(--primary) / 0.32)" }
@@ -2485,6 +2929,46 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
           ) {
             return;
           }
+          const mod = e.ctrlKey || e.metaKey;
+          const keyLower = e.key.toLowerCase();
+          if (mod && !e.shiftKey && keyLower === "z") {
+            e.preventDefault();
+            e.stopPropagation();
+            void doUndo();
+            return;
+          }
+          if (mod && (e.shiftKey && keyLower === "z")) {
+            e.preventDefault();
+            e.stopPropagation();
+            void doRedo();
+            return;
+          }
+          if (mod && keyLower === "y") {
+            e.preventDefault();
+            e.stopPropagation();
+            void doRedo();
+            return;
+          }
+          if (mod && keyLower === "c") {
+            if (snapshotSelectionToClipboard("copy")) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+            return;
+          }
+          if (mod && keyLower === "x") {
+            if (snapshotSelectionToClipboard("cut")) {
+              e.preventDefault();
+              e.stopPropagation();
+            }
+            return;
+          }
+          if (mod && keyLower === "v") {
+            e.preventDefault();
+            e.stopPropagation();
+            void pasteFromStore();
+            return;
+          }
           if (e.key === "Escape") {
             if (selectionRef.current.kind != null) {
               clearSelection();
@@ -2571,6 +3055,34 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
             title={`WPN owner: ${wpnOwnerLabel}`}
           >
             {wpnOwnerLabel}
+          </span>
+        ) : null}
+        {activeOrgId ? (
+          <span
+            className="max-w-[8rem] truncate rounded border border-border/60 bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+            title={`Org: ${activeOrgName ?? activeOrgId} — right-click for options`}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setTypePicker(null);
+              setMenu({ x: e.clientX, y: e.clientY, kind: "org", id: activeOrgId });
+            }}
+          >
+            org: {activeOrgName ?? activeOrgId.slice(0, 6)}
+          </span>
+        ) : null}
+        {activeSpaceId ? (
+          <span
+            className="max-w-[8rem] truncate rounded border border-border/60 bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
+            title={`Space: ${activeSpaceName ?? activeSpaceId} — right-click for options`}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setTypePicker(null);
+              setMenu({ x: e.clientX, y: e.clientY, kind: "space", id: activeSpaceId });
+            }}
+          >
+            space: {activeSpaceName ?? activeSpaceId.slice(0, 6)}
           </span>
         ) : null}
         <WpnSyncStatusBadge
@@ -2764,6 +3276,62 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                                 workspaceId: w.id,
                               });
                             }}
+                            onDragOver={(e) => {
+                              const types = e.dataTransfer.types;
+                              if (!types.includes(DND_NOTE_MIME)) return;
+                              const drag = explorerNoteDragRef.current;
+                              if (!drag || drag.projectId === p.id) return;
+                              e.preventDefault();
+                              e.dataTransfer.dropEffect = "move";
+                            }}
+                            onDrop={(e) => {
+                              const raw = e.dataTransfer.getData(DND_NOTE_MIME);
+                              if (!raw) return;
+                              let parsed: { projectId: string; noteId: string };
+                              try {
+                                parsed = JSON.parse(raw) as { projectId: string; noteId: string };
+                              } catch {
+                                return;
+                              }
+                              if (parsed.projectId === p.id) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              explorerNoteDragRef.current = null;
+                              setWpnNoteDropHint(null);
+                              const sourceProjectId = parsed.projectId;
+                              const noteId = parsed.noteId;
+                              const targetProjectId = p.id;
+                              void (async () => {
+                                try {
+                                  await getArchon().wpnMoveNoteCrossProject({
+                                    noteId,
+                                    targetProjectId,
+                                  });
+                                  recordUndo({
+                                    label: "Move note to project",
+                                    forward: async () => {
+                                      await getArchon().wpnMoveNoteCrossProject({
+                                        noteId,
+                                        targetProjectId,
+                                      });
+                                    },
+                                    inverse: async () => {
+                                      await getArchon().wpnMoveNoteCrossProject({
+                                        noteId,
+                                        targetProjectId: sourceProjectId,
+                                      });
+                                    },
+                                  });
+                                  await loadWorkspaces();
+                                  void loadProjectTree(sourceProjectId).catch(() => {});
+                                } catch (err) {
+                                  showToast({
+                                    severity: "error",
+                                    message: err instanceof Error ? err.message : String(err),
+                                  });
+                                }
+                              })();
+                            }}
                           >
                             <button
                               type="button"
@@ -2920,6 +3488,24 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                 type="button"
                 className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
                 onClick={() => {
+                  const id = menu.id;
+                  closeAllMenus();
+                  void (async () => {
+                    try {
+                      await navigator.clipboard.writeText(id);
+                      showToast({ severity: "info", message: "workspace ID copied" });
+                    } catch {
+                      showToast({ severity: "error", message: "Could not copy" });
+                    }
+                  })();
+                }}
+              >
+                Copy workspace ID
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
+                onClick={() => {
                   closeAllMenus();
                   void (async () => {
                     try {
@@ -3058,6 +3644,24 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                 type="button"
                 className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
                 onClick={() => {
+                  const id = menu.id;
+                  closeAllMenus();
+                  void (async () => {
+                    try {
+                      await navigator.clipboard.writeText(id);
+                      showToast({ severity: "info", message: "project ID copied" });
+                    } catch {
+                      showToast({ severity: "error", message: "Could not copy" });
+                    }
+                  })();
+                }}
+              >
+                Copy project ID
+              </button>
+              <button
+                type="button"
+                className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
+                onClick={() => {
                   const list = projectsByWs[menu.workspaceId!] ?? [];
                   const pr = list.find((x) => x.id === menu.id);
                   if (pr) {
@@ -3161,6 +3765,46 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
               </button>
             </>
           ) : null}
+          {menu.kind === "org" ? (
+            <button
+              type="button"
+              className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
+              onClick={() => {
+                const id = menu.id;
+                closeAllMenus();
+                void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(id);
+                    showToast({ severity: "info", message: "org ID copied" });
+                  } catch {
+                    showToast({ severity: "error", message: "Could not copy" });
+                  }
+                })();
+              }}
+            >
+              Copy org ID
+            </button>
+          ) : null}
+          {menu.kind === "space" ? (
+            <button
+              type="button"
+              className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
+              onClick={() => {
+                const id = menu.id;
+                closeAllMenus();
+                void (async () => {
+                  try {
+                    await navigator.clipboard.writeText(id);
+                    showToast({ severity: "info", message: "space ID copied" });
+                  } catch {
+                    showToast({ severity: "error", message: "Could not copy" });
+                  }
+                })();
+              }}
+            >
+              Copy space ID
+            </button>
+          ) : null}
           {menu.kind === "note" && menu.projectId ? (
             <>
               <button
@@ -3246,10 +3890,12 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                 type="button"
                 className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
                 onClick={() => {
+                  const id = menu.id;
                   closeAllMenus();
                   void (async () => {
                     try {
-                      await navigator.clipboard.writeText(menu.id);
+                      await navigator.clipboard.writeText(id);
+                      showToast({ severity: "info", message: "note ID copied" });
                     } catch {
                       showToast({ severity: "error", message: "Could not copy" });
                     }

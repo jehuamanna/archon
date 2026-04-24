@@ -56,7 +56,9 @@ import {
   mongoWpnDeleteProjects,
   mongoWpnDeleteWorkspace,
   mongoWpnDeleteWorkspaces,
+  mongoWpnDuplicateProject,
   mongoWpnDuplicateSubtree,
+  mongoWpnDuplicateWorkspace,
   mongoWpnGetProjectSettings,
   mongoWpnGetWorkspaceSettings,
   mongoWpnMoveNote,
@@ -859,11 +861,150 @@ export function registerWpnWriteRoutes(
     if (typeof body.workspace_id === "string") {
       patch.workspace_id = body.workspace_id;
     }
+    // Cross-workspace move: when the body names a different workspace, also
+    // assert write on the target workspace and forbid cross-space/org hops
+    // through this path. Cross-space moves go through
+    // `PATCH /wpn/workspaces/:id/space` (space-level manage gate).
+    if (patch.workspace_id !== undefined && patch.workspace_id !== ws.id) {
+      const targetWs = await assertCanWriteWorkspace(
+        reply,
+        auth,
+        patch.workspace_id,
+      );
+      if (!targetWs) {
+        return;
+      }
+      if ((targetWs.orgId ?? null) !== (ws.orgId ?? null)) {
+        return reply
+          .status(400)
+          .send({ error: "Cross-org project moves are not supported" });
+      }
+      if ((targetWs.spaceId ?? null) !== (ws.spaceId ?? null)) {
+        return reply.status(400).send({
+          error:
+            "Cross-space project moves go through PATCH /wpn/workspaces/:id/space",
+        });
+      }
+    }
     const project = await mongoWpnUpdateProject(ws.userId, id, patch);
     if (!project) {
       return reply.status(404).send({ error: "Project not found" });
     }
     return reply.send({ project });
+  });
+
+  /**
+   * Duplicate a project (deep copy of every note in the subtree) into the
+   * source workspace by default, or into `targetWorkspaceId` when provided.
+   * Cross-space/org hops are rejected — callers should move the source
+   * workspace into the target space first, then duplicate in-place.
+   * Body: `{ targetWorkspaceId?: string; newName?: string }`.
+   */
+  app.post("/wpn/projects/:id/duplicate", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { id } = request.params as { id: string };
+    const writeResult = await assertCanWriteProject(reply, auth, id);
+    if (!writeResult) {
+      return;
+    }
+    const { workspace: srcWs, project: srcProj } = writeResult;
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const targetWorkspaceIdRaw =
+      typeof body.targetWorkspaceId === "string"
+        ? body.targetWorkspaceId.trim()
+        : "";
+    const newNameRaw = typeof body.newName === "string" ? body.newName : "";
+    const targetWorkspaceId =
+      targetWorkspaceIdRaw.length > 0 ? targetWorkspaceIdRaw : srcWs.id;
+
+    let targetWs = srcWs;
+    if (targetWorkspaceId !== srcWs.id) {
+      const ws = await assertCanWriteWorkspace(reply, auth, targetWorkspaceId);
+      if (!ws) {
+        return;
+      }
+      if ((ws.orgId ?? null) !== (srcWs.orgId ?? null)) {
+        return reply
+          .status(400)
+          .send({ error: "Cross-org project duplicates are not supported" });
+      }
+      if ((ws.spaceId ?? null) !== (srcWs.spaceId ?? null)) {
+        return reply.status(400).send({
+          error: "Target workspace must be in the same space as the source",
+        });
+      }
+      targetWs = ws;
+    }
+
+    try {
+      const result = await mongoWpnDuplicateProject(targetWs.userId, id, {
+        targetWorkspaceId,
+        newName: newNameRaw.trim() || undefined,
+        creatorUserId: auth.sub,
+      });
+      return reply.status(201).send(result);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg === "Project not found") {
+        return reply.status(404).send({ error: msg });
+      }
+      // Explicit no-op: reference srcProj so the type narrowing above is used.
+      void srcProj;
+      return sendWpnError(reply, e, 400);
+    }
+  });
+
+  /**
+   * Duplicate a workspace (with every project and note in it) into the source
+   * space by default, or into `targetSpaceId` when provided. Cross-org hops
+   * are rejected. Body: `{ newName?: string; targetSpaceId?: string }`.
+   */
+  app.post("/wpn/workspaces/:id/duplicate", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { id } = request.params as { id: string };
+    const srcWs = await assertCanManageWorkspace(reply, auth, id);
+    if (!srcWs) {
+      return;
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const newNameRaw = typeof body.newName === "string" ? body.newName : "";
+    const targetSpaceIdRaw =
+      typeof body.targetSpaceId === "string" ? body.targetSpaceId.trim() : "";
+    const targetSpaceId =
+      targetSpaceIdRaw.length > 0 ? targetSpaceIdRaw : srcWs.spaceId ?? null;
+
+    if (targetSpaceId && targetSpaceId !== (srcWs.spaceId ?? null)) {
+      const ctx = await requireSpaceManage(request, reply, auth, targetSpaceId);
+      if (!ctx) {
+        return;
+      }
+      if (srcWs.orgId && ctx.space.orgId !== srcWs.orgId) {
+        return reply
+          .status(400)
+          .send({ error: "Cross-org workspace duplicates are not supported" });
+      }
+    }
+
+    try {
+      const result = await mongoWpnDuplicateWorkspace(srcWs.userId, id, {
+        targetSpaceId: targetSpaceId ?? undefined,
+        newName: newNameRaw.trim() || undefined,
+        creatorUserId: auth.sub,
+      });
+      return reply.status(201).send(result);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg === "Workspace not found") {
+        return reply.status(404).send({ error: msg });
+      }
+      return sendWpnError(reply, e, 400);
+    }
   });
 
   app.delete("/wpn/projects/:id", async (request, reply) => {

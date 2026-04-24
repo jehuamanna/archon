@@ -945,6 +945,28 @@ export function createWebArchonApi(baseUrl: string): ArchonRendererApi {
         `/wpn/projects/${encodeURIComponent(projectId)}/notes/${encodeURIComponent(noteId)}/duplicate`,
         {},
       ),
+    wpnDuplicateProject: (projectId, opts) =>
+      wpnReq(
+        "POST",
+        `/wpn/projects/${encodeURIComponent(projectId)}/duplicate`,
+        {
+          ...(opts?.targetWorkspaceId !== undefined
+            ? { targetWorkspaceId: opts.targetWorkspaceId }
+            : {}),
+          ...(opts?.newName !== undefined ? { newName: opts.newName } : {}),
+        },
+      ),
+    wpnDuplicateWorkspace: (workspaceId, opts) =>
+      wpnReq(
+        "POST",
+        `/wpn/workspaces/${encodeURIComponent(workspaceId)}/duplicate`,
+        {
+          ...(opts?.newName !== undefined ? { newName: opts.newName } : {}),
+          ...(opts?.targetSpaceId !== undefined
+            ? { targetSpaceId: opts.targetSpaceId }
+            : {}),
+        },
+      ),
     wpnExportWorkspaces: async (workspaceIds) => {
       const syncBase = resolveSyncApiBase().trim().replace(/\/$/, "");
       const token = readCloudSyncToken();
@@ -1710,6 +1732,12 @@ export function createPlainBrowserDevStub(): ArchonRendererApi {
     wpnDuplicateNoteSubtree: async () => ({
       newRootId: "00000000-0000-4000-8000-000000000000",
     }),
+    wpnDuplicateProject: async () => {
+      throw new Error("Not available in plain browser — use Electron or ?web=1&api=…");
+    },
+    wpnDuplicateWorkspace: async () => {
+      throw new Error("Not available in plain browser — use Electron or ?web=1&api=…");
+    },
     wpnExportWorkspaces: async () => {
       throw new Error("Not available in plain browser — use Electron or ?web=1&api=…");
     },

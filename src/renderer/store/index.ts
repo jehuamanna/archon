@@ -29,6 +29,8 @@ import notificationsReducer from "./notificationsSlice";
 import orgMembershipReducer from "./orgMembershipSlice";
 import pluginUiReducer from "./pluginUiSlice";
 import spaceMembershipReducer from "./spaceMembershipSlice";
+import wpnClipboardReducer from "./wpnClipboardSlice";
+import wpnUndoReducer from "./wpnUndoSlice";
 
 /**
  * Next / browser: other modules may import `store` before any client entry runs; `createArchonPlatformDeps`
@@ -58,6 +60,8 @@ export const store = configureStore({
     notifications: notificationsReducer,
     orgMembership: orgMembershipReducer,
     spaceMembership: spaceMembershipReducer,
+    wpnClipboard: wpnClipboardReducer,
+    wpnUndo: wpnUndoReducer,
   },
   middleware: (getDefaultMiddleware) =>
     getDefaultMiddleware({

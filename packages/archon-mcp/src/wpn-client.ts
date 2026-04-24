@@ -542,6 +542,107 @@ export class WpnHttpClient {
     return parsed;
   }
 
+  async moveNoteToProject(
+    noteId: string,
+    targetProjectId: string,
+    targetParentId?: string | null,
+  ): Promise<void> {
+    const payload: {
+      noteId: string;
+      targetProjectId: string;
+      targetParentId?: string | null;
+    } = { noteId, targetProjectId };
+    if (targetParentId !== undefined) {
+      payload.targetParentId = targetParentId;
+    }
+    const { res, text, body: parsed } = await this.fetchWpn(
+      "/wpn/notes/move-to-project",
+      "POST",
+      "WPN move note to project",
+      payload,
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`WPN move-to-project failed (${res.status}): ${err}`);
+    }
+    this.invalidateNotesWithContextCacheInternal();
+  }
+
+  async duplicateProject(
+    projectId: string,
+    opts: { targetWorkspaceId?: string; newName?: string } = {},
+  ): Promise<{ projectId: string; name: string }> {
+    const body: Record<string, string> = {};
+    if (opts.targetWorkspaceId !== undefined) {
+      body.targetWorkspaceId = opts.targetWorkspaceId;
+    }
+    if (opts.newName !== undefined) {
+      body.newName = opts.newName;
+    }
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/wpn/projects/${encodeURIComponent(projectId)}/duplicate`,
+      "POST",
+      "WPN duplicate project",
+      body,
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`WPN duplicate project failed (${res.status}): ${err}`);
+    }
+    const p = parsed as { projectId?: unknown; name?: unknown };
+    if (typeof p.projectId !== "string" || typeof p.name !== "string") {
+      throw new Error("WPN duplicate project: missing projectId/name in response");
+    }
+    this.invalidateNotesWithContextCacheInternal();
+    return { projectId: p.projectId, name: p.name };
+  }
+
+  async duplicateWorkspace(
+    workspaceId: string,
+    opts: { newName?: string; targetSpaceId?: string } = {},
+  ): Promise<{
+    workspaceId: string;
+    name: string;
+    projects: { projectId: string; name: string; sourceProjectId: string }[];
+  }> {
+    const body: Record<string, string> = {};
+    if (opts.newName !== undefined) {
+      body.newName = opts.newName;
+    }
+    if (opts.targetSpaceId !== undefined) {
+      body.targetSpaceId = opts.targetSpaceId;
+    }
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/duplicate`,
+      "POST",
+      "WPN duplicate workspace",
+      body,
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`WPN duplicate workspace failed (${res.status}): ${err}`);
+    }
+    const p = parsed as {
+      workspaceId?: unknown;
+      name?: unknown;
+      projects?: unknown;
+    };
+    if (typeof p.workspaceId !== "string" || typeof p.name !== "string") {
+      throw new Error(
+        "WPN duplicate workspace: missing workspaceId/name in response",
+      );
+    }
+    const projects = Array.isArray(p.projects)
+      ? (p.projects as {
+          projectId: string;
+          name: string;
+          sourceProjectId: string;
+        }[])
+      : [];
+    this.invalidateNotesWithContextCacheInternal();
+    return { workspaceId: p.workspaceId, name: p.name, projects };
+  }
+
   async getBacklinks(noteId: string): Promise<{ id: string; title: string; project_id: string }[]> {
     const { res, text, body: parsed } = await this.fetchWpn(
       `/wpn/backlinks/${encodeURIComponent(noteId)}`,

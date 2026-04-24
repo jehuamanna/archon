@@ -555,6 +555,16 @@ const api: ArchonRendererApi = {
     ipcRenderer.invoke(IPC_CHANNELS.WPN_PREVIEW_NOTE_MOVE_VFS_IMPACT, noteId, targetProjectId),
   wpnDuplicateNoteSubtree: (projectId, noteId) =>
     ipcRenderer.invoke(IPC_CHANNELS.WPN_DUPLICATE_NOTE_SUBTREE, projectId, noteId),
+  wpnDuplicateProject: async () => {
+    throw new Error(
+      "wpnDuplicateProject requires cloud sync mode (sync-api back-end).",
+    );
+  },
+  wpnDuplicateWorkspace: async () => {
+    throw new Error(
+      "wpnDuplicateWorkspace requires cloud sync mode (sync-api back-end).",
+    );
+  },
   wpnExportWorkspaces: (workspaceIds) =>
     ipcRenderer.invoke(IPC_CHANNELS.WPN_EXPORT_WORKSPACES, workspaceIds),
   wpnImportWorkspaces: () =>

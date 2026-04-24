@@ -16,7 +16,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "NODE_ENV=production tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/integration-auth-wpn.test.ts src/integration-org-invites.test.ts src/integration-invites-cross-org.test.ts src/integration-spaces.test.ts src/integration-teams.test.ts src/integration-visibility-acl.test.ts src/integration-project-acl.test.ts src/integration-announcements.test.ts src/integration-audit.test.ts src/mcp-device-auth.test.ts src/marked-smoke.test.ts src/repo-bundled-docs-path.test.ts src/refresh-sessions.test.ts src/image-asset-path.test.ts src/integration-me-assets.test.ts src/note-search-hints.test.ts src/note-backlinks-vfs.test.ts src/export-import-helpers.test.ts",
+    "test": "tsx --test src/integration-auth-wpn.test.ts src/integration-org-invites.test.ts src/integration-invites-cross-org.test.ts src/integration-spaces.test.ts src/integration-teams.test.ts src/integration-visibility-acl.test.ts src/integration-project-acl.test.ts src/integration-announcements.test.ts src/integration-audit.test.ts src/integration-cross-boundary.test.ts src/mcp-device-auth.test.ts src/marked-smoke.test.ts src/repo-bundled-docs-path.test.ts src/refresh-sessions.test.ts src/image-asset-path.test.ts src/integration-me-assets.test.ts src/note-search-hints.test.ts src/note-backlinks-vfs.test.ts src/export-import-helpers.test.ts",
     "seed:wpn": "tsx scripts/seed-wpn-demo.ts"
   },
   "main": "./dist/index.js",
