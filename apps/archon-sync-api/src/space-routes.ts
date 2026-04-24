@@ -275,9 +275,13 @@ export function registerSpaceRoutes(
   });
 
   /**
-   * Owner-only: delete a Space. Refuses to delete the org's default space, or
-   * any space that still has WPN content (workspaces) — caller must move/delete
-   * workspaces first. Cascades the membership rows.
+   * Owner-or-org-admin: delete a Space. Refuses to delete the org's default
+   * space, or any space that still has WPN content (workspaces) — caller must
+   * move/delete workspaces first. Cascades the membership rows. Emits a
+   * `space.delete` audit row on success.
+   *
+   * Narrows (but does not fully close) the add-workspace race by counting once
+   * up-front and again immediately before the space delete.
    */
   app.delete("/spaces/:spaceId", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
@@ -289,19 +293,37 @@ export function registerSpaceRoutes(
     if (!ctx) {
       return;
     }
-    if (ctx.space.kind === "default") {
-      return reply.status(400).send({ error: "Cannot delete the default space" });
+    const guard = assertNotDefault(ctx.space, "delete");
+    if (guard) {
+      return reply.status(guard.status).send(guard.body);
     }
-    const wsCount = await getActiveDb()
-      .collection("wpn_workspaces")
-      .countDocuments({ spaceId });
+    const workspaces = getActiveDb().collection("wpn_workspaces");
+    const wsCount = await workspaces.countDocuments({ spaceId });
     if (wsCount > 0) {
-      return reply
-        .status(409)
-        .send({ error: "Space still has workspaces; move or delete them first" });
+      return reply.status(409).send({
+        error: "Space still has workspaces; move or delete them first",
+        code: "space_not_empty",
+      });
     }
     await getSpaceMembershipsCollection().deleteMany({ spaceId });
+    // Re-check right before the space delete to narrow the window where a
+    // workspace could be inserted between the initial count and here.
+    const wsCountPre = await workspaces.countDocuments({ spaceId });
+    if (wsCountPre > 0) {
+      return reply.status(409).send({
+        error: "Space still has workspaces; move or delete them first",
+        code: "space_not_empty",
+      });
+    }
     await getSpacesCollection().deleteOne({ _id: new ObjectId(spaceId) });
+    await recordAudit({
+      orgId: ctx.space.orgId,
+      actorUserId: auth.sub,
+      action: "space.delete",
+      targetType: "space",
+      targetId: spaceId,
+      metadata: { name: ctx.space.name },
+    });
     return reply.status(204).send();
   });
 
