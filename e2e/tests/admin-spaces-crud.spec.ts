@@ -105,4 +105,38 @@ test.describe("admin spaces CRUD", () => {
       );
     },
   );
+
+  test.fixme(
+    "SpaceSwitcher: admin renames a space from the dropdown",
+    async ({ page }) => {
+      await page.goto("/");
+      // Open the top-bar space switcher.
+      await page.getByTitle("Switch space").click();
+      const adminRow = page.getByTestId(/^space-switcher-row-/).first();
+      const rowTestId = await adminRow.getAttribute("data-testid");
+      const spaceId = rowTestId?.replace("space-switcher-row-", "") ?? "";
+      await page.getByTestId(`space-switcher-more-${spaceId}`).click();
+      await page.getByTestId(`space-switcher-rename-${spaceId}`).click();
+      await page.getByTestId("space-switcher-rename-input").fill("Renamed-1");
+      await page.getByTestId("space-switcher-rename-input").press("Enter");
+      await expect(adminRow).toContainText("Renamed-1");
+    },
+  );
+
+  test.fixme(
+    "SpaceSwitcher: admin deletes a space from the dropdown (confirm dialog)",
+    async ({ page }) => {
+      await page.goto("/");
+      await page.getByTitle("Switch space").click();
+      const adminRow = page.getByTestId(/^space-switcher-row-/).first();
+      const rowTestId = await adminRow.getAttribute("data-testid");
+      const spaceId = rowTestId?.replace("space-switcher-row-", "") ?? "";
+      await page.getByTestId(`space-switcher-more-${spaceId}`).click();
+      await page.getByTestId(`space-switcher-delete-${spaceId}`).click();
+      await page.getByRole("button", { name: "Delete forever" }).click();
+      await expect(
+        page.getByTestId(`space-switcher-row-${spaceId}`),
+      ).toHaveCount(0);
+    },
+  );
 });

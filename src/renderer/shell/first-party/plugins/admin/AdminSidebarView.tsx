@@ -62,6 +62,7 @@ type TreeRowProps = {
   icon?: string;
   active?: boolean;
   onClick?: () => void;
+  trailing?: React.ReactNode;
 };
 
 function TreeRow({
@@ -73,6 +74,7 @@ function TreeRow({
   icon,
   active,
   onClick,
+  trailing,
 }: TreeRowProps): React.ReactElement {
   return (
     <div
@@ -102,6 +104,7 @@ function TreeRow({
       >
         {label}
       </button>
+      {trailing ? <span className="shrink-0">{trailing}</span> : null}
     </div>
   );
 }
@@ -361,6 +364,23 @@ export function AdminSidebarView(
                           select({ kind: "space", spaceId: sp.spaceId });
                           if (!spaceExpanded) toggleSpace(sp.spaceId);
                         }}
+                        trailing={
+                          canManageOrg ? (
+                            <button
+                              type="button"
+                              className="rounded px-1 text-[11px] text-muted-foreground opacity-60 hover:bg-muted/60 hover:text-foreground hover:opacity-100"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                select({ kind: "space", spaceId: sp.spaceId });
+                              }}
+                              aria-label="Open space settings"
+                              title="Open space settings"
+                              data-testid={`space-settings-trigger-${sp.spaceId}`}
+                            >
+                              ⚙
+                            </button>
+                          ) : null
+                        }
                       />
                       {spaceExpanded ? (
                         <>
