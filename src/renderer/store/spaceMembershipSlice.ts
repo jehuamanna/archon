@@ -1,8 +1,11 @@
 import { createAsyncThunk, createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import {
   createSpace,
+  deleteSpace,
   listOrgSpaces,
+  renameSpace,
   setActiveSpaceRemote,
+  setSpaceHidden,
   type SpaceRow,
 } from "../auth/auth-client";
 import { setActiveSpaceId } from "../auth/auth-session";
@@ -31,9 +34,12 @@ const initialState: SpaceMembershipState = {
 
 export const loadOrgSpacesThunk = createAsyncThunk<
   { orgId: string; spaces: SpaceRow[] },
-  { orgId: string }
->("spaceMembership/loadForOrg", async ({ orgId }) => {
-  const spaces = await listOrgSpaces(orgId);
+  { orgId: string; includeHidden?: boolean }
+>("spaceMembership/loadForOrg", async ({ orgId, includeHidden }) => {
+  const spaces = await listOrgSpaces(
+    orgId,
+    includeHidden ? { includeHidden: true } : undefined,
+  );
   return { orgId, spaces };
 });
 
@@ -53,6 +59,42 @@ export const createSpaceThunk = createAsyncThunk<
   await dispatch(loadOrgSpacesThunk({ orgId }));
   return { spaceId: r.spaceId, orgId: r.orgId, name: r.name };
 });
+
+export const renameSpaceThunk = createAsyncThunk<
+  SpaceRow,
+  { orgId: string; spaceId: string; name: string; includeHidden?: boolean }
+>(
+  "spaceMembership/rename",
+  async ({ orgId, spaceId, name, includeHidden }, { dispatch }) => {
+    const updated = await renameSpace({ spaceId, name });
+    await dispatch(loadOrgSpacesThunk({ orgId, includeHidden }));
+    return updated;
+  },
+);
+
+export const setSpaceHiddenThunk = createAsyncThunk<
+  SpaceRow,
+  { orgId: string; spaceId: string; hidden: boolean; includeHidden?: boolean }
+>(
+  "spaceMembership/setHidden",
+  async ({ orgId, spaceId, hidden, includeHidden }, { dispatch }) => {
+    const updated = await setSpaceHidden({ spaceId, hidden });
+    await dispatch(loadOrgSpacesThunk({ orgId, includeHidden }));
+    return updated;
+  },
+);
+
+export const deleteSpaceThunk = createAsyncThunk<
+  { spaceId: string },
+  { orgId: string; spaceId: string; includeHidden?: boolean }
+>(
+  "spaceMembership/delete",
+  async ({ orgId, spaceId, includeHidden }, { dispatch }) => {
+    await deleteSpace(spaceId);
+    await dispatch(loadOrgSpacesThunk({ orgId, includeHidden }));
+    return { spaceId };
+  },
+);
 
 const slice = createSlice({
   name: "spaceMembership",
