@@ -9,7 +9,8 @@
     "packages/*"
   ],
   "scripts": {
-    "postinstall": "node scripts/npm-postinstall.js",
+    "postinstall": "node scripts/npm-postinstall.js && node scripts/sync-skills.mjs",
+    "sync-skills": "node scripts/sync-skills.mjs",
     "rebuild:electron": "electron-rebuild -f",
     "install:web": "node scripts/npm-web-install.js",
     "ci:web": "node scripts/npm-web-install.js ci",

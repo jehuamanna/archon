@@ -48,6 +48,44 @@ const mdxStateReadInFlight = new Map<string, Promise<MdxStateReadResult>>();
 /** Hard ceiling so a pathologically slow fetch cannot pin the dedupe slot. */
 const MDX_STATE_READ_TIMEOUT_MS = 10_000;
 
+/**
+ * Cross-hook latest-value broadcast. Two `useProjectState` hooks bound to
+ * the same (projectId, key) — e.g. `<Input onChange="x">` and
+ * `<PushButton fromKey="x">` — each hold their own React state. Without
+ * this, the PushButton only sees what's in its local state from the last
+ * 2 s poll, so clicking it immediately after typing reads stale "" and
+ * the push silently no-ops. Writes and successful reads publish here;
+ * subscribers adopt the new value unless they have pending local edits.
+ */
+const latestByUrl = new Map<string, unknown>();
+type LatestListener = (value: unknown) => void;
+const latestListeners = new Map<string, Set<LatestListener>>();
+
+function publishLatest(url: string, value: unknown): void {
+  latestByUrl.set(url, value);
+  const subs = latestListeners.get(url);
+  if (!subs) return;
+  for (const cb of subs) {
+    try {
+      cb(value);
+    } catch {
+      /* listener errors are cosmetic */
+    }
+  }
+}
+
+function subscribeLatest(url: string, cb: LatestListener): () => void {
+  let set = latestListeners.get(url);
+  if (!set) {
+    set = new Set();
+    latestListeners.set(url, set);
+  }
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+  };
+}
+
 async function sharedMdxStateRead(url: string): Promise<MdxStateReadResult> {
   const existing = mdxStateReadInFlight.get(url);
   if (existing) return existing;
@@ -63,6 +101,11 @@ async function sharedMdxStateRead(url: string): Promise<MdxStateReadResult> {
       if (res.status === 404) return { kind: "absent" };
       if (!res.ok) return { kind: "error", status: res.status };
       const body = (await res.json()) as MdxStateBody;
+      const absent =
+        body.mode === "absent" || (body.value === null && body.version === 0);
+      if (!absent) {
+        publishLatest(url, body.value);
+      }
       return { kind: "ok", body };
     } catch (e) {
       if ((e as { name?: string })?.name === "AbortError") {
@@ -395,20 +438,52 @@ function useProjectState<T>(
     return () => clearInterval(id);
   }, [read, projectId, unbound]);
 
+  // Subscribe to cross-hook broadcasts so this hook reflects writes made by
+  // other <Input>/<PushButton>/etc. instances on the same key immediately.
+  // Without this, the PushButton click handler reads a stale `src` and the
+  // push is dropped. Skip when the user has pending local edits so a
+  // broadcast can't clobber mid-type.
+  React.useEffect(() => {
+    if (unbound || !putUrl) return;
+    const known = latestByUrl.get(putUrl);
+    if (known !== undefined && !dirtyRef.current) {
+      setValue(known as T);
+      latestRef.current = known as T;
+    }
+    return subscribeLatest(putUrl, (v) => {
+      if (dirtyRef.current) return;
+      setValue(v as T);
+      latestRef.current = v as T;
+    });
+  }, [putUrl, unbound]);
+
   const write = React.useCallback<(n: T | ((prev: T | undefined) => T)) => void>(
     (next) => {
-      setValue((prev) => {
-        const resolved =
-          typeof next === "function" ? (next as (p: T | undefined) => T)(prev) : next;
-        latestRef.current = resolved;
-        if (unbound || !putUrl) return resolved;
-        dirtyRef.current = true;
-        if (debounceRef.current) clearTimeout(debounceRef.current);
-        debounceRef.current = setTimeout(() => {
-          kickDrain();
-        }, WRITE_DEBOUNCE_MS);
-        return resolved;
-      });
+      // Resolve against `latestRef` (kept in sync on every write and every
+      // authoritative read) instead of using a `setValue` updater. React
+      // may replay updater functions, and side effects inside a replayed
+      // updater can fire `setValue` on sibling hooks mid-render — that's
+      // the "Cannot update a component while rendering a different
+      // component" warning we hit before. Pre-computing `resolved` and
+      // passing it as a plain value means the update is not replayed, so
+      // the broadcast below stays in the event tick where it belongs.
+      const prev = latestRef.current;
+      const resolved =
+        typeof next === "function"
+          ? (next as (p: T | undefined) => T)(prev)
+          : next;
+      latestRef.current = resolved;
+      setValue(resolved);
+      if (unbound || !putUrl) return;
+      dirtyRef.current = true;
+      // Broadcast to sibling hooks on the same key (e.g. <Input>'s write
+      // needs to be visible to <PushButton fromKey=…> before the next
+      // 2 s poll, otherwise clicking the button reads stale state).
+      publishLatest(putUrl, resolved);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => {
+        kickDrain();
+      }, WRITE_DEBOUNCE_MS);
     },
     [unbound, putUrl, kickDrain],
   );
@@ -764,6 +839,14 @@ export function Chart({
       </svg>
     );
   }
+  // Tokens in src/renderer/styles/tokens.css are bare HSL tuples (e.g.
+  // `--primary: 239 64% 48%`), so wrap in hsl() and use the slash alpha
+  // form. Raw tuples as input to color-mix() are invalid and cause the
+  // browser to drop the declaration — which is why the bars rendered
+  // transparent in the MDX preview after the earlier color-mix attempt.
+  const barFill = "hsl(var(--primary, 239 64% 48%) / 0.7)";
+  const barFillDim = "hsl(var(--primary, 239 64% 48%) / 0.4)";
+  const emptyColor = "hsl(var(--muted-foreground, 215.4 16.3% 46.9%))";
   if (kind === "pie") {
     // Degenerate pie: render slices as proportional horizontal bars for v1.
     const total = series.reduce((a, b) => a + b, 0) || 1;
@@ -772,8 +855,10 @@ export function Chart({
         {series.map((v, i) => (
           <div
             key={i}
-            style={{ width: `${(v / total) * 100}%` }}
-            className={`${i % 2 === 0 ? "bg-primary/70" : "bg-primary/40"}`}
+            style={{
+              width: `${(v / total) * 100}%`,
+              background: i % 2 === 0 ? barFill : barFillDim,
+            }}
           />
         ))}
       </div>
@@ -786,12 +871,18 @@ export function Chart({
         <span
           key={i}
           title={String(v)}
-          className="inline-block bg-primary/70"
-          style={{ width: 10, height: `${(v / max) * 100}%` }}
+          className="inline-block"
+          style={{
+            width: 10,
+            height: `${(v / max) * 100}%`,
+            background: barFill,
+          }}
         />
       ))}
       {series.length === 0 && (
-        <span className="text-[12px] text-muted-foreground">(empty)</span>
+        <span className="text-[12px]" style={{ color: emptyColor }}>
+          (empty)
+        </span>
       )}
     </div>
   );
@@ -829,25 +920,39 @@ export function NoteEmbed({
           return;
         }
         if (title && projectId) {
-          const res = await fetch(
+          // Two-step: the `/wpn/projects/:projectId/notes` endpoint returns a
+          // flat list with id/title but intentionally without `content` (to
+          // keep list payloads tight). Find the matching title here, then
+          // fetch the full note by id from `/wpn/notes/:id` which does
+          // include content.
+          const listRes = await fetch(
             `${syncBase()}/wpn/projects/${encodeURIComponent(projectId)}/notes`,
             { headers: authHeaders(), credentials: "omit" },
           );
-          if (!res.ok) {
-            if (!cancelled) setState({ source: "", loading: false, error: `GET ${res.status}` });
+          if (!listRes.ok) {
+            if (!cancelled) setState({ source: "", loading: false, error: `GET ${listRes.status}` });
             return;
           }
-          const body = (await res.json()) as {
-            notes?: Array<{ id: string; title: string; content?: string }>;
+          const listBody = (await listRes.json()) as {
+            notes?: Array<{ id: string; title: string }>;
           };
-          const hit = body.notes?.find((n) => n.title === title);
-          if (!cancelled) {
-            setState({
-              source: hit?.content ?? "",
-              loading: false,
-              error: hit ? undefined : "note not found",
-            });
+          const hit = listBody.notes?.find((n) => n.title === title);
+          if (!hit) {
+            if (!cancelled)
+              setState({ source: "", loading: false, error: "note not found" });
+            return;
           }
+          const noteRes = await fetch(
+            `${syncBase()}/wpn/notes/${encodeURIComponent(hit.id)}`,
+            { headers: authHeaders(), credentials: "omit" },
+          );
+          if (!noteRes.ok) {
+            if (!cancelled) setState({ source: "", loading: false, error: `GET ${noteRes.status}` });
+            return;
+          }
+          const noteBody = (await noteRes.json()) as { note?: { content?: string } };
+          if (!cancelled)
+            setState({ source: noteBody.note?.content ?? "", loading: false });
           return;
         }
         if (!cancelled) setState({ source: "", loading: false, error: "title or id required" });

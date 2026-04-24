@@ -135,6 +135,59 @@ export async function mongoWpnUpdateWorkspace(
   return pub;
 }
 
+/**
+ * Reparent a workspace to a different space by cascading `spaceId` across the
+ * workspace doc and every descendant (projects, notes, explorer state). Does
+ * not transact — a crash mid-sweep leaves a partial move that re-running this
+ * helper (or a subsequent move) converges. Idempotent: re-applying the same
+ * target is a no-op. Returns the refreshed workspace public shape or null if
+ * the workspace doc was not found.
+ */
+export async function mongoWpnReassignWorkspaceSpace(
+  workspaceId: string,
+  targetSpaceId: string,
+): Promise<Omit<WpnWorkspaceDoc, "userId" | "settings"> | null> {
+  const wsCol = getWpnWorkspacesCollection();
+  const projCol = getWpnProjectsCollection();
+  const noteCol = getWpnNotesCollection();
+  const exCol = getWpnExplorerStateCollection();
+
+  const ws = await wsCol.findOne({ id: workspaceId });
+  if (!ws) {
+    return null;
+  }
+  const ts = nowMs();
+  await wsCol.updateOne(
+    { id: workspaceId },
+    { $set: { spaceId: targetSpaceId, updated_at_ms: ts } },
+  );
+  const projIds = (
+    await projCol
+      .find({ workspace_id: workspaceId }, { projection: { id: 1 } })
+      .toArray()
+  ).map((p) => p.id);
+  await projCol.updateMany(
+    { workspace_id: workspaceId },
+    { $set: { spaceId: targetSpaceId, updated_at_ms: ts } },
+  );
+  if (projIds.length > 0) {
+    await noteCol.updateMany(
+      { project_id: { $in: projIds } },
+      { $set: { spaceId: targetSpaceId } },
+    );
+    await exCol.updateMany(
+      { project_id: { $in: projIds } },
+      { $set: { spaceId: targetSpaceId } },
+    );
+  }
+  const next = await wsCol.findOne({ id: workspaceId });
+  if (!next) {
+    return null;
+  }
+  const { userId: _u, settings: _s, ...pub } = next;
+  return pub;
+}
+
 export async function mongoWpnDeleteWorkspace(userId: string, id: string): Promise<boolean> {
   const wsCol = getWpnWorkspacesCollection();
   const owned = await wsCol.findOne({ id, userId });

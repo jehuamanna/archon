@@ -121,6 +121,10 @@ export const setWorkspaceVisibilityBody = z.object({
   visibility: workspaceVisibilitySchema,
 });
 
+export const moveWorkspaceToSpaceBody = z.object({
+  targetSpaceId: z.string().min(1),
+});
+
 export const addWorkspaceShareBody = z.object({
   userId: z.string().min(1),
   role: shareRoleSchema.default("reader"),
@@ -211,6 +215,7 @@ export type AuditAction =
   | "team.grant.set"
   | "team.grant.revoke"
   | "workspace.visibility.set"
+  | "workspace.move_to_space"
   | "workspace.share.add"
   | "workspace.share.update"
   | "workspace.share.remove"

@@ -20,6 +20,7 @@ import { resolveActiveOrgId } from "./org-auth.js";
 import {
   addProjectShareBody,
   addWorkspaceShareBody,
+  moveWorkspaceToSpaceBody,
   setProjectVisibilityBody,
   setWorkspaceVisibilityBody,
   updateProjectShareBody,
@@ -38,6 +39,7 @@ import {
 } from "./permission-resolver.js";
 import {
   getSpaceMembership,
+  requireSpaceManage,
   resolveActiveSpaceId,
 } from "./space-auth.js";
 import {
@@ -61,6 +63,7 @@ import {
   mongoWpnMoveNoteToProject,
   mongoWpnPatchProjectSettings,
   mongoWpnPatchWorkspaceSettings,
+  mongoWpnReassignWorkspaceSpace,
   mongoWpnSetExplorerExpanded,
   mongoWpnUpdateNote,
   WpnDuplicateSiblingTitleError,
@@ -363,6 +366,61 @@ export function registerWpnWriteRoutes(
       });
     }
     return reply.send({ id, visibility: parsed.data.visibility });
+  });
+
+  /**
+   * Move a workspace into a different space within the same org. Caller must
+   * have manage rights on both the source workspace and the target space.
+   * Cascades `spaceId` across the workspace doc and every descendant project,
+   * note, and explorer_state row.
+   */
+  app.patch("/wpn/workspaces/:id/space", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { id } = request.params as { id: string };
+    const ws = await assertCanManageWorkspace(reply, auth, id);
+    if (!ws) {
+      return;
+    }
+    const parsed = moveWorkspaceToSpaceBody.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.status(400).send({ error: parsed.error.flatten() });
+    }
+    const { targetSpaceId } = parsed.data;
+    if (ws.spaceId === targetSpaceId) {
+      return reply
+        .status(400)
+        .send({ error: "Workspace is already in the target space" });
+    }
+    const ctx = await requireSpaceManage(request, reply, auth, targetSpaceId);
+    if (!ctx) {
+      return;
+    }
+    if (ws.orgId && ctx.space.orgId !== ws.orgId) {
+      return reply
+        .status(400)
+        .send({ error: "Target space must belong to the same org as the workspace" });
+    }
+    const workspace = await mongoWpnReassignWorkspaceSpace(id, targetSpaceId);
+    if (!workspace) {
+      return reply.status(404).send({ error: "Workspace not found" });
+    }
+    if (ws.orgId) {
+      await recordAudit({
+        orgId: ws.orgId,
+        actorUserId: auth.sub,
+        action: "workspace.move_to_space",
+        targetType: "workspace",
+        targetId: id,
+        metadata: {
+          fromSpaceId: ws.spaceId ?? null,
+          toSpaceId: targetSpaceId,
+        },
+      });
+    }
+    return reply.send({ workspace });
   });
 
   /** Phase 4/8 — list shares on a workspace. Reader access required. Returns per-row role. */

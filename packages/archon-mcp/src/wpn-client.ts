@@ -410,6 +410,26 @@ export class WpnHttpClient {
     return (parsed as { workspace?: unknown }).workspace ?? parsed;
   }
 
+  async moveWorkspaceToSpace(
+    workspaceId: string,
+    targetSpaceId: string,
+  ): Promise<unknown> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/space`,
+      "PATCH",
+      "WPN move workspace to space",
+      { targetSpaceId },
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(
+        `WPN PATCH workspace/space failed (${res.status}): ${err}`,
+      );
+    }
+    this.invalidateNotesWithContextCacheInternal();
+    return (parsed as { workspace?: unknown }).workspace ?? parsed;
+  }
+
   async deleteWorkspace(workspaceId: string): Promise<void> {
     const { res, text, body: parsed } = await this.fetchWpn(
       `/wpn/workspaces/${encodeURIComponent(workspaceId)}`,
@@ -625,6 +645,45 @@ export class WpnHttpClient {
     }
     this.invalidateNotesWithContextCacheInternal();
     return workspace;
+  }
+
+  async createSpace(
+    orgId: string,
+    name: string,
+  ): Promise<{
+    spaceId: string;
+    orgId: string;
+    name: string;
+    kind: string;
+    role: string;
+  }> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/orgs/${encodeURIComponent(orgId)}/spaces`,
+      "POST",
+      "WPN create space",
+      { name },
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`WPN POST space failed (${res.status}): ${err}`);
+    }
+    const space = parsed as {
+      spaceId?: string;
+      orgId?: string;
+      name?: string;
+      kind?: string;
+      role?: string;
+    };
+    if (!space || typeof space.spaceId !== "string") {
+      throw new Error("WPN POST space: missing spaceId in response");
+    }
+    return {
+      spaceId: space.spaceId,
+      orgId: typeof space.orgId === "string" ? space.orgId : orgId,
+      name: typeof space.name === "string" ? space.name : name,
+      kind: typeof space.kind === "string" ? space.kind : "normal",
+      role: typeof space.role === "string" ? space.role : "owner",
+    };
   }
 
   /**

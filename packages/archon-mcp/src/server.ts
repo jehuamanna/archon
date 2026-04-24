@@ -22,6 +22,7 @@ import {
   DEFAULT_MAX_BYTES as GET_IMAGE_NOTE_DEFAULT_MAX_BYTES,
   handleGetImageNote,
 } from "./get-image-note.js";
+import { installSkill } from "./install-skill.js";
 import { extractReferencedLinksFromMarkdown } from "./note-link-extract.js";
 import {
   canonicalVfsPathFromRow,
@@ -272,6 +273,80 @@ const updateWorkspaceInput = z.object({
 
 const deleteWorkspaceInput = z.object({
   workspaceId: z.string().describe("Workspace UUID to delete. Deletes all contained projects and notes."),
+});
+
+const createSpaceInput = z.object({
+  name: z.string().min(1).describe("Name for the new space."),
+  orgId: z
+    .string()
+    .optional()
+    .describe("Parent org UUID. Defaults to the active org for the current session."),
+});
+
+const moveWorkspaceToSpaceInput = z.object({
+  workspaceId: z.string().describe("Workspace UUID to move."),
+  targetSpaceId: z
+    .string()
+    .describe("Destination space UUID. Must be in the same org as the workspace."),
+});
+
+const installSkillInput = z.object({
+  noteId: z
+    .string()
+    .optional()
+    .describe(
+      "Install one specific note by UUID. When given, takes precedence over scan. Note content may be a raw SKILL.md (starts with `---\\nname: …`) or a wrapper note with a ```markdown` fence containing the SKILL.md.",
+    ),
+  skillName: z
+    .string()
+    .optional()
+    .describe(
+      "Install only the skill whose frontmatter `name` matches this value. Ignored when noteId is given.",
+    ),
+  spaceName: z
+    .string()
+    .optional()
+    .describe(
+      "Space to scan for skills. Default: \"Archon\". Ignored when noteId is given.",
+    ),
+  workspaceName: z
+    .string()
+    .optional()
+    .describe(
+      "Workspace to scan for skills. Default: \"Archon\". Ignored when noteId is given.",
+    ),
+  projectName: z
+    .string()
+    .optional()
+    .describe(
+      "Project to scan for skills. Default: \"Specs\". Ignored when noteId is given.",
+    ),
+  noteName: z
+    .string()
+    .optional()
+    .describe(
+      "Parent note whose direct children are the skill notes. Default: \"Skills\". Ignored when noteId is given.",
+    ),
+  repoPath: z
+    .string()
+    .optional()
+    .describe("Absolute path to the repo root. Defaults to the MCP server's process.cwd()."),
+  providers: z
+    .array(
+      z.enum([
+        "claude",
+        "cursor",
+        "windsurf",
+        "copilot",
+        "antigravity",
+        "opencode",
+        "pi",
+      ]),
+    )
+    .optional()
+    .describe(
+      "Subset of providers to install for. Default: all 7. Canonical `skills/<name>/SKILL.md` is always written regardless of this list.",
+    ),
 });
 
 const createProjectInput = z.object({
@@ -638,6 +713,273 @@ export function createArchonMcpServer(
         if (args.color_token !== undefined) patch.color_token = args.color_token;
         const workspace = await client.updateWorkspace(args.workspaceId, patch);
         return jsonResult({ ok: true as const, workspace });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_create_space",
+    {
+      description:
+        "Create a new Space inside an Org. If orgId is omitted, uses the active org for this session. Caller becomes the Space owner.",
+      inputSchema: createSpaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        let orgId = args.orgId?.trim();
+        if (!orgId) {
+          orgId = runtime.holder.activeOrgId ?? undefined;
+        }
+        if (!orgId) {
+          const r = await client.listMyOrgs();
+          orgId = r.activeOrgId ?? r.defaultOrgId ?? undefined;
+        }
+        if (!orgId) {
+          throw new Error(
+            "No active org available. Pass orgId explicitly or call archon_set_active_org first.",
+          );
+        }
+        const space = await client.createSpace(orgId, args.name);
+        return jsonResult({ ok: true as const, space });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_move_workspace_to_space",
+    {
+      description:
+        "Move a workspace to a different Space within the same Org. Cascades spaceId to every project, note, and explorer row under the workspace. Caller needs manage rights on both the source workspace and the target space.",
+      inputSchema: moveWorkspaceToSpaceInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const workspace = await client.moveWorkspaceToSpace(
+          args.workspaceId,
+          args.targetSpaceId,
+        );
+        return jsonResult({ ok: true as const, workspace });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_install_skill",
+    {
+      description:
+        "Install skills from Archon into the local repo. Default (no args): resolve Space \"Archon\" → Workspace \"Archon\" → Project \"Specs\" → Note \"Skills\" (each step hard-errors if missing) and install every direct child of that Skills note. Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes canonical `skills/<name>/SKILL.md` plus all 6 provider targets (`.claude/skills`, `.cursor/rules`, `.windsurf/rules`, `.github/instructions`, `.agents/skills`, `.opencode/agents`); Pi is skipped — it reads canonical natively. Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
+      inputSchema: installSkillInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const repoPath = args.repoPath ?? process.cwd();
+
+        // Branch 1: explicit noteId — install that one note, bypass scan.
+        if (args.noteId && args.noteId.length > 0) {
+          const note = await client.getNote(args.noteId);
+          if (typeof note.content !== "string" || note.content.length === 0) {
+            throw new Error(
+              `archon_install_skill: note ${args.noteId} has empty content`,
+            );
+          }
+          const report = installSkill({
+            noteContent: note.content,
+            repoPath,
+            providers: args.providers,
+          });
+          return jsonResult({
+            ok: true as const,
+            mode: "single" as const,
+            installed: [report],
+            warnings: [] as string[],
+          });
+        }
+
+        // Branch 2/3: resolve Space → Workspace → Project → Note, install children of that Note.
+        // Each resolution step hard-errors if the target is missing.
+        const spaceName = args.spaceName ?? "Archon";
+        const workspaceName = args.workspaceName ?? "Archon";
+        const projectName = args.projectName ?? "Specs";
+        const noteName = args.noteName ?? "Skills";
+
+        const { spaces } = await client.listMySpaces();
+        const spaceMatches = spaces.filter(
+          (s) => s.name.trim().toLowerCase() === spaceName.trim().toLowerCase(),
+        );
+        if (spaceMatches.length === 0) {
+          throw new Error(
+            `archon_install_skill: Space "${spaceName}" not found. Available: ${spaces.map((s) => s.name).join(", ") || "(none)"}`,
+          );
+        }
+        if (spaceMatches.length > 1) {
+          throw new Error(
+            `archon_install_skill: Space "${spaceName}" is ambiguous (${spaceMatches.length} matches across orgs). Pass a more specific spaceName or use noteId.`,
+          );
+        }
+        const targetSpaceId = spaceMatches[0]!.spaceId;
+
+        const prevOrg = runtime.holder.activeOrgId;
+        const prevSpace = runtime.holder.activeSpaceId;
+        const spaceOrgId = spaceMatches[0]!.orgId;
+        const needsSpaceSwitch =
+          targetSpaceId !== prevSpace ||
+          (spaceOrgId !== null && spaceOrgId !== prevOrg);
+        if (needsSpaceSwitch) {
+          if (spaceOrgId !== null) runtime.holder.setActiveOrg(spaceOrgId);
+          runtime.holder.setActiveSpace(targetSpaceId);
+          client.invalidateNotesWithContextCache();
+        }
+
+        try {
+          type WsRow = { id: string; name?: string };
+          type ProjRow = { id: string; name?: string };
+          const workspaces = (await client.getWorkspaces()) as WsRow[];
+          const wsMatches = workspaces.filter(
+            (w) =>
+              (w.name ?? "").trim().toLowerCase() ===
+              workspaceName.trim().toLowerCase(),
+          );
+          if (wsMatches.length === 0) {
+            throw new Error(
+              `archon_install_skill: Workspace "${workspaceName}" not found in Space "${spaceName}". Available: ${workspaces.map((w) => w.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
+            );
+          }
+          if (wsMatches.length > 1) {
+            throw new Error(
+              `archon_install_skill: Workspace "${workspaceName}" is ambiguous (${wsMatches.length} matches) in Space "${spaceName}".`,
+            );
+          }
+          const workspaceId = wsMatches[0]!.id;
+
+          const projects = (await client.getProjects(workspaceId)) as ProjRow[];
+          const projMatches = projects.filter(
+            (p) =>
+              (p.name ?? "").trim().toLowerCase() ===
+              projectName.trim().toLowerCase(),
+          );
+          if (projMatches.length === 0) {
+            throw new Error(
+              `archon_install_skill: Project "${projectName}" not found in Workspace "${workspaceName}". Available: ${projects.map((p) => p.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
+            );
+          }
+          if (projMatches.length > 1) {
+            throw new Error(
+              `archon_install_skill: Project "${projectName}" is ambiguous (${projMatches.length} matches) in Workspace "${workspaceName}".`,
+            );
+          }
+          const projectId = projMatches[0]!.id;
+
+          const flat = await client.getNotesFlat(projectId);
+          const parentMatches = flat.filter(
+            (n) =>
+              n.title.trim().toLowerCase() === noteName.trim().toLowerCase() &&
+              n.parent_id === null,
+          );
+          if (parentMatches.length === 0) {
+            throw new Error(
+              `archon_install_skill: top-level Note "${noteName}" not found in Project "${projectName}".`,
+            );
+          }
+          if (parentMatches.length > 1) {
+            throw new Error(
+              `archon_install_skill: top-level Note "${noteName}" is ambiguous (${parentMatches.length} matches) in Project "${projectName}".`,
+            );
+          }
+          const parentNoteId = parentMatches[0]!.id;
+
+          const children = flat
+            .filter((n) => n.parent_id === parentNoteId)
+            .sort((a, b) => a.sibling_index - b.sibling_index);
+          if (children.length === 0) {
+            throw new Error(
+              `archon_install_skill: Note "${noteName}" has no children.`,
+            );
+          }
+
+          // Optionally filter to a single child by title (skillName match against the note title).
+          const selected =
+            args.skillName && args.skillName.length > 0
+              ? children.filter(
+                  (c) =>
+                    c.title.trim().toLowerCase() ===
+                    args.skillName!.trim().toLowerCase(),
+                )
+              : children;
+          if (args.skillName && selected.length === 0) {
+            throw new Error(
+              `archon_install_skill: no child titled "${args.skillName}" under Note "${noteName}".`,
+            );
+          }
+
+          // Install each child. Skills without a valid SKILL.md block are reported
+          // under `failed` but do not abort the run.
+          type FailedEntry = { noteId: string; title: string; error: string };
+          const installed: Array<ReturnType<typeof installSkill>> = [];
+          const failed: FailedEntry[] = [];
+          for (const child of selected) {
+            try {
+              const note = await client.getNote(child.id);
+              if (typeof note.content !== "string" || note.content.length === 0) {
+                failed.push({
+                  noteId: child.id,
+                  title: child.title,
+                  error: "empty content",
+                });
+                continue;
+              }
+              const report = installSkill({
+                noteContent: note.content,
+                repoPath,
+                providers: args.providers,
+              });
+              installed.push(report);
+            } catch (err) {
+              failed.push({
+                noteId: child.id,
+                title: child.title,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
+          return jsonResult({
+            ok: true as const,
+            mode: (args.skillName ? "filtered" : "scan") as
+              | "filtered"
+              | "scan",
+            resolved: {
+              spaceName,
+              spaceId: targetSpaceId,
+              workspaceName,
+              workspaceId,
+              projectName,
+              projectId,
+              noteName,
+              parentNoteId,
+              childCount: children.length,
+            },
+            installed,
+            failed,
+          });
+        } finally {
+          if (needsSpaceSwitch) {
+            runtime.holder.setActiveOrg(prevOrg);
+            runtime.holder.setActiveSpace(prevSpace);
+            client.invalidateNotesWithContextCache();
+          }
+        }
       } catch (e) {
         return wpnCatch(e, runtime);
       }

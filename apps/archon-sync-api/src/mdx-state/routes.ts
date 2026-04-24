@@ -137,7 +137,13 @@ export function registerMdxStateRoutes(
       // HTTP-404 for a documented "not yet written" case turned the polling
       // loop into visual spam in devtools. Clients treat `mode === "absent"`
       // or `value === null` as "use initial".
-      await reply.header("ETag", String(res.version));
+      //
+      // NOTE: `reply.header(...)` must NOT be awaited — `FastifyReply` is a
+      // thenable whose `.then` waits for the response stream to end. Under
+      // `app.inject` (used by apps/archon-web's Next.js wrapper) the raw
+      // stream only ends after reply.send, so `await reply.header(...)`
+      // before send deadlocks the handler until the client times out.
+      reply.header("ETag", String(res.version));
       return reply.send({
         value: res.mode === "absent" ? null : res.value,
         version: res.version,
@@ -184,7 +190,7 @@ export function registerMdxStateRoutes(
           expectedVersion,
           { userId: auth.sub, email: auth.email },
         );
-        await reply.header("ETag", String(result.version));
+        reply.header("ETag", String(result.version));
         return reply.send(result);
       } catch (err) {
         if (err instanceof MdxStateConflictError) {

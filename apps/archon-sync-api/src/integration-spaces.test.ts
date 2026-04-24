@@ -6,7 +6,13 @@ import jwt from "jsonwebtoken";
 import type { FastifyInstance } from "fastify";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import { closeMongo, connectMongo } from "./db.js";
+import {
+  closeMongo,
+  connectMongo,
+  getWpnExplorerStateCollection,
+  getWpnNotesCollection,
+  getWpnProjectsCollection,
+} from "./db.js";
 import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
@@ -248,6 +254,219 @@ test(
         headers: adminAuth,
       });
       assert.strictEqual(legacy.statusCode, 200);
+    } finally {
+      if (app) {
+        await app.close();
+      }
+      await dropActiveMongoDb();
+      try {
+        await closeMongo();
+      } catch {
+        /* ignore */
+      }
+    }
+  },
+);
+
+test(
+  "Workspace move-to-space cascades spaceId and enforces auth + same-org",
+  { timeout: 20_000 },
+  async (t) => {
+    const dbName = `archon_sync_move_ws_it_${randomBytes(8).toString("hex")}`;
+    let app: FastifyInstance | undefined;
+
+    try {
+      await connectMongo(resolveTestMongoUri(), dbName);
+    } catch (err) {
+      t.skip(`MongoDB not reachable: ${String(err)}`);
+      return;
+    }
+
+    try {
+      app = await buildSyncApiApp({ jwtSecret, corsOrigin: "true", logger: false });
+
+      // ----- Admin registers; default org + default space exist.
+      const adminEmail = `mv-admin-${Date.now()}@p2.test`;
+      const reg = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/auth/register`,
+        payload: { email: adminEmail, password: "password12345" },
+      });
+      assert.strictEqual(reg.statusCode, 200);
+      const regJson = JSON.parse(reg.body) as {
+        token: string;
+        userId: string;
+        defaultOrgId: string;
+      };
+      const adminAuth = { authorization: `Bearer ${regJson.token}` };
+
+      const orgSpaces = await app.inject({
+        method: "GET",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/orgs/${regJson.defaultOrgId}/spaces`,
+        headers: adminAuth,
+      });
+      const defaultSpaceId = (
+        JSON.parse(orgSpaces.body) as {
+          spaces: Array<{ spaceId: string; kind: string }>;
+        }
+      ).spaces.find((s) => s.kind === "default")!.spaceId;
+
+      // ----- Create a workspace in the default space, then a project + note inside it.
+      const wsRes = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ name: "Default WS" }),
+      });
+      assert.strictEqual(wsRes.statusCode, 201, wsRes.body);
+      const wsId = (
+        JSON.parse(wsRes.body) as { workspace: { id: string; spaceId?: string } }
+      ).workspace.id;
+
+      const projRes = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces/${wsId}/projects`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ name: "Proj" }),
+      });
+      assert.strictEqual(projRes.statusCode, 201, projRes.body);
+      const projId = (JSON.parse(projRes.body) as { project: { id: string } }).project.id;
+
+      const noteRes = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/projects/${projId}/notes`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({
+          type: "markdown",
+          relation: "root",
+          title: "hello",
+          content: "# hi",
+        }),
+      });
+      assert.strictEqual(noteRes.statusCode, 201, noteRes.body);
+      const noteId = (JSON.parse(noteRes.body) as { id: string }).id;
+
+      // ----- Create target space in the same org.
+      const engRes = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/orgs/${regJson.defaultOrgId}/spaces`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ name: "Engineering" }),
+      });
+      assert.strictEqual(engRes.statusCode, 200, engRes.body);
+      const engSpaceId = (JSON.parse(engRes.body) as { spaceId: string }).spaceId;
+
+      // ----- Negative: outsider (registered in a new org) is not a space manager on Eng.
+      const outsiderReg = await app.inject({
+        method: "POST",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/auth/register`,
+        payload: { email: `mv-out-${Date.now()}@p2.test`, password: "password12345" },
+      });
+      assert.strictEqual(outsiderReg.statusCode, 200);
+      const outsiderAuth = {
+        authorization: `Bearer ${(JSON.parse(outsiderReg.body) as { token: string }).token}`,
+      };
+      const outsiderMove = await app.inject({
+        method: "PATCH",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces/${wsId}/space`,
+        headers: { ...outsiderAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ targetSpaceId: engSpaceId }),
+      });
+      // Outsider cannot even read the workspace → assertCanManageWorkspace rejects (403 or 404).
+      assert.ok(
+        outsiderMove.statusCode === 403 || outsiderMove.statusCode === 404,
+        `expected 403/404, got ${outsiderMove.statusCode}: ${outsiderMove.body}`,
+      );
+
+      // ----- Negative: cross-org move is rejected. The outsider's default org
+      // has its own default space. Admin has no manage rights there, so that
+      // request is short-circuited at requireSpaceManage before the same-org
+      // check. Confirming the behavioural outcome is equivalent: the move is
+      // refused without mutating state.
+      const outsiderOrgId = (
+        jwt.verify(
+          (JSON.parse(outsiderReg.body) as { token: string }).token,
+          jwtSecret,
+        ) as { activeOrgId?: string }
+      ).activeOrgId!;
+      const outsiderOrgSpacesRes = await app.inject({
+        method: "GET",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/orgs/${outsiderOrgId}/spaces`,
+        headers: outsiderAuth,
+      });
+      const outsiderDefaultSpaceId = (
+        JSON.parse(outsiderOrgSpacesRes.body) as {
+          spaces: Array<{ spaceId: string; kind: string }>;
+        }
+      ).spaces.find((s) => s.kind === "default")!.spaceId;
+      const crossOrgMove = await app.inject({
+        method: "PATCH",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces/${wsId}/space`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ targetSpaceId: outsiderDefaultSpaceId }),
+      });
+      assert.strictEqual(crossOrgMove.statusCode, 403, crossOrgMove.body);
+
+      // ----- Happy path: admin moves the workspace into Engineering.
+      const moveRes = await app.inject({
+        method: "PATCH",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces/${wsId}/space`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ targetSpaceId: engSpaceId }),
+      });
+      assert.strictEqual(moveRes.statusCode, 200, moveRes.body);
+      const moved = (
+        JSON.parse(moveRes.body) as {
+          workspace: { id: string; spaceId?: string; orgId?: string };
+        }
+      ).workspace;
+      assert.strictEqual(moved.id, wsId);
+      assert.strictEqual(moved.spaceId, engSpaceId);
+      assert.strictEqual(moved.orgId, regJson.defaultOrgId);
+
+      // ----- Space-scoped workspace listings flipped.
+      const defaultList = await app.inject({
+        method: "GET",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/spaces/${defaultSpaceId}/workspaces`,
+        headers: adminAuth,
+      });
+      const defaultWsIds = (
+        JSON.parse(defaultList.body) as { workspaces: Array<{ id: string }> }
+      ).workspaces.map((w) => w.id);
+      assert.ok(!defaultWsIds.includes(wsId), "workspace should be out of default space");
+
+      const engList = await app.inject({
+        method: "GET",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/spaces/${engSpaceId}/workspaces`,
+        headers: adminAuth,
+      });
+      const engWsIds = (
+        JSON.parse(engList.body) as { workspaces: Array<{ id: string }> }
+      ).workspaces.map((w) => w.id);
+      assert.ok(engWsIds.includes(wsId), "workspace should be in engineering space");
+
+      // ----- Cascade check: projects + notes + explorer_state all carry the new spaceId.
+      const projectDoc = await getWpnProjectsCollection().findOne({ id: projId });
+      assert.ok(projectDoc, "project row must still exist");
+      assert.strictEqual(projectDoc.spaceId, engSpaceId);
+
+      const noteDoc = await getWpnNotesCollection().findOne({ id: noteId });
+      assert.ok(noteDoc, "note row must still exist");
+      assert.strictEqual(noteDoc.spaceId, engSpaceId);
+
+      const exDoc = await getWpnExplorerStateCollection().findOne({ project_id: projId });
+      if (exDoc) {
+        assert.strictEqual(exDoc.spaceId, engSpaceId);
+      }
+
+      // ----- No-op rejection: same target again returns 400.
+      const noop = await app.inject({
+        method: "PATCH",
+        url: `${ARCHON_SYNC_API_V1_PREFIX}/wpn/workspaces/${wsId}/space`,
+        headers: { ...adminAuth, "content-type": "application/json" },
+        payload: JSON.stringify({ targetSpaceId: engSpaceId }),
+      });
+      assert.strictEqual(noop.statusCode, 400, noop.body);
     } finally {
       if (app) {
         await app.close();
