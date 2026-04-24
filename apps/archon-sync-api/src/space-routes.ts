@@ -75,7 +75,11 @@ export function registerSpaceRoutes(
 ): void {
   const { jwtSecret } = opts;
 
-  /** List spaces in an org that the caller is a member of. Admins see all. */
+  /**
+   * List spaces in an org that the caller is a member of. Admins see all.
+   * Hidden spaces are excluded by default for every caller; pass
+   * `?includeHidden=true` to opt in (org admins only; others get 403).
+   */
   app.get("/orgs/:orgId/spaces", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) {
@@ -89,21 +93,27 @@ export function registerSpaceRoutes(
     if (!orgMember) {
       return reply.status(404).send({ error: "Organization not found" });
     }
-    const allSpaces = await getSpacesCollection().find({ orgId }).toArray();
+    const query = request.query as { includeHidden?: string } | undefined;
+    const includeHidden = query?.includeHidden === "true";
+    if (includeHidden && orgMember.role !== "admin") {
+      return reply
+        .status(403)
+        .send({ error: "Org admin role required", code: "admin_only" });
+    }
+    const filter: Record<string, unknown> = { orgId };
+    if (!includeHidden) {
+      filter.$or = [{ hidden: { $exists: false } }, { hidden: false }];
+    }
+    const allSpaces = await getSpacesCollection().find(filter).toArray();
     const memberRoleBySpace = await getEffectiveSpaceRoles(auth.sub);
     const visible = allSpaces.filter((s) => {
       if (orgMember.role === "admin") return true;
       return memberRoleBySpace.has(s._id.toHexString());
     });
     return reply.send({
-      spaces: visible.map((s) => ({
-        spaceId: s._id.toHexString(),
-        orgId: s.orgId,
-        name: s.name,
-        kind: s.kind,
-        role: memberRoleBySpace.get(s._id.toHexString()) ?? null,
-        createdAt: s.createdAt,
-      })),
+      spaces: visible.map((s) =>
+        serializeSpace(s, memberRoleBySpace.get(s._id.toHexString()) ?? null),
+      ),
     });
   });
 
