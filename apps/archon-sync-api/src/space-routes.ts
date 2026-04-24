@@ -20,6 +20,7 @@ import {
   setActiveSpaceBody,
   setSpaceMemberRoleBody,
   updateSpaceBody,
+  type SpaceDoc,
   type SpaceRole,
 } from "./org-schemas.js";
 import { recordAudit } from "./audit.js";
@@ -32,6 +33,40 @@ import {
 
 function isObjectIdHex(s: string): boolean {
   return /^[a-f0-9]{24}$/i.test(s);
+}
+
+/** Central guard so every default-space protection uses the same error shape. */
+function assertNotDefault(
+  space: SpaceDoc,
+  op: "delete" | "hide",
+): { status: number; body: { error: string; code: string } } | null {
+  if (space.kind === "default") {
+    const code = `cannot_${op}_default_space`;
+    const msg =
+      op === "delete"
+        ? "Cannot delete the default space"
+        : "Cannot hide the default space";
+    return { status: 400, body: { error: msg, code } };
+  }
+  return null;
+}
+
+/** Single serializer so list + detail responses emit the same shape. */
+function serializeSpace(
+  s: SpaceDoc,
+  role: SpaceRole | null,
+): Record<string, unknown> {
+  return {
+    spaceId: s._id.toHexString(),
+    orgId: s.orgId,
+    name: s.name,
+    kind: s.kind,
+    role,
+    createdAt: s.createdAt,
+    hidden: s.hidden === true,
+    hiddenAt: s.hiddenAt ?? null,
+    hiddenByUserId: s.hiddenByUserId ?? null,
+  };
 }
 
 export function registerSpaceRoutes(
@@ -119,7 +154,14 @@ export function registerSpaceRoutes(
     });
   });
 
-  /** Owner-only: rename a Space. (Default-kind spaces can be renamed too.) */
+  /**
+   * Owner-or-org-admin: rename a Space and/or toggle hidden visibility.
+   * - Rename: emits `space.rename` audit with {oldName, newName}; default space
+   *   may be renamed.
+   * - Hidden: soft-visibility flag; default space may NOT be hidden. Emits
+   *   `space.hide` or `space.unhide` on transition.
+   * Returns the updated space so the client can refresh without a second GET.
+   */
   app.patch("/spaces/:spaceId", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) {
@@ -134,18 +176,92 @@ export function registerSpaceRoutes(
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const patch: Record<string, unknown> = {};
-    if (parsed.data.name) {
-      patch.name = parsed.data.name;
+    const before = ctx.space;
+    const $set: Record<string, unknown> = {};
+    const $unset: Record<string, unknown> = {};
+    let renamed: { oldName: string; newName: string } | null = null;
+    let hideTransition: "hide" | "unhide" | null = null;
+
+    if (parsed.data.name !== undefined && parsed.data.name !== before.name) {
+      // Enforce per-org name uniqueness.
+      const clash = await getSpacesCollection().findOne({
+        orgId: before.orgId,
+        name: parsed.data.name,
+        _id: { $ne: before._id },
+      });
+      if (clash) {
+        return reply
+          .status(409)
+          .send({ error: "A space with this name already exists", code: "name_conflict" });
+      }
+      $set.name = parsed.data.name;
+      renamed = { oldName: before.name, newName: parsed.data.name };
     }
-    if (Object.keys(patch).length === 0) {
-      return reply.status(400).send({ error: "No fields to update" });
+
+    if (parsed.data.hidden !== undefined) {
+      const currentHidden = before.hidden === true;
+      if (parsed.data.hidden !== currentHidden) {
+        if (parsed.data.hidden) {
+          const guard = assertNotDefault(before, "hide");
+          if (guard) {
+            return reply.status(guard.status).send(guard.body);
+          }
+          $set.hidden = true;
+          $set.hiddenAt = new Date();
+          $set.hiddenByUserId = auth.sub;
+          hideTransition = "hide";
+        } else {
+          $set.hidden = false;
+          $unset.hiddenAt = "";
+          $unset.hiddenByUserId = "";
+          hideTransition = "unhide";
+        }
+      }
     }
-    await getSpacesCollection().updateOne(
-      { _id: new ObjectId(spaceId) },
-      { $set: patch },
-    );
-    return reply.status(204).send();
+
+    if (
+      Object.keys($set).length === 0 &&
+      Object.keys($unset).length === 0
+    ) {
+      return reply
+        .status(400)
+        .send({ error: "No fields to update", code: "nothing_to_update" });
+    }
+
+    const update: Record<string, unknown> = {};
+    if (Object.keys($set).length > 0) update.$set = $set;
+    if (Object.keys($unset).length > 0) update.$unset = $unset;
+    const after = (await getSpacesCollection().findOneAndUpdate(
+      { _id: before._id },
+      update,
+      { returnDocument: "after" },
+    )) as SpaceDoc | null;
+    if (!after) {
+      return reply.status(404).send({ error: "Space not found" });
+    }
+
+    if (renamed) {
+      await recordAudit({
+        orgId: before.orgId,
+        actorUserId: auth.sub,
+        action: "space.rename",
+        targetType: "space",
+        targetId: spaceId,
+        metadata: renamed,
+      });
+    }
+    if (hideTransition) {
+      await recordAudit({
+        orgId: before.orgId,
+        actorUserId: auth.sub,
+        action: hideTransition === "hide" ? "space.hide" : "space.unhide",
+        targetType: "space",
+        targetId: spaceId,
+        metadata: null,
+      });
+    }
+
+    return reply.send(serializeSpace(after, ctx.role));
   });
 
   /**

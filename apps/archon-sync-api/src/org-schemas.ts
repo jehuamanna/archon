@@ -13,6 +13,9 @@ export type SpaceDoc = {
   kind: SpaceKind;
   createdByUserId: string;
   createdAt: Date;
+  hidden?: boolean;
+  hiddenAt?: Date;
+  hiddenByUserId?: string;
 };
 
 export type SpaceMembershipDoc = {
@@ -32,6 +35,7 @@ export const createSpaceBody = z.object({
 
 export const updateSpaceBody = z.object({
   name: z.string().trim().min(1).max(120).optional(),
+  hidden: z.boolean().optional(),
 });
 
 export const addSpaceMemberBody = z.object({
@@ -204,6 +208,8 @@ export type AuditAction =
   | "space.create"
   | "space.delete"
   | "space.rename"
+  | "space.hide"
+  | "space.unhide"
   | "space.member.add"
   | "space.member.role_change"
   | "space.member.remove"
