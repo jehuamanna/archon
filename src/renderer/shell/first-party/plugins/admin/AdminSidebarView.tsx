@@ -1,5 +1,5 @@
 import React from "react";
-import { useSelector } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import { getArchon } from "../../../../../shared/archon-host-access";
 import type {
   WpnProjectRow,
@@ -7,7 +7,8 @@ import type {
   WpnWorkspaceRow,
 } from "../../../../../shared/wpn-v2-types";
 import type { ResourceVisibility } from "../../../../auth/auth-client";
-import type { RootState } from "../../../../store";
+import type { AppDispatch, RootState } from "../../../../store";
+import { loadOrgSpacesThunk } from "../../../../store/spaceMembershipSlice";
 import type { ShellViewComponentProps } from "../../../views/ShellViewRegistry";
 import { adminSelectionStore, type AdminSelection } from "./adminSelectionStore";
 
@@ -29,6 +30,8 @@ function toResourceVisibility(v: WpnVisibility | undefined): ResourceVisibility 
 function sameSelection(a: AdminSelection, b: AdminSelection): boolean {
   if (a.kind !== b.kind) return false;
   switch (a.kind) {
+    case "space":
+      return b.kind === "space" && a.spaceId === b.spaceId;
     case "space-members":
       return b.kind === "space-members" && a.spaceId === b.spaceId;
     case "workspace-shares":
@@ -106,18 +109,31 @@ function TreeRow({
 export function AdminSidebarView(
   _props: ShellViewComponentProps,
 ): React.ReactElement {
+  const dispatch = useDispatch<AppDispatch>();
   const orgState = useSelector((s: RootState) => s.orgMembership);
   const spaceState = useSelector((s: RootState) => s.spaceMembership);
   const isMasterAdmin = useSelector(
     (s: RootState) => s.cloudAuth.isMasterAdmin,
   );
   const activeOrg = orgState.orgs.find((o) => o.orgId === orgState.activeOrgId);
+  const canManageOrg = activeOrg?.role === "admin";
   const selection = useAdminSelection();
 
   const [orgExpanded, setOrgExpanded] = React.useState(true);
+  const [showHidden, setShowHidden] = React.useState<boolean>(true);
   const [expandedSpaces, setExpandedSpaces] = React.useState<Set<string>>(
     () => new Set(spaceState.activeSpaceId ? [spaceState.activeSpaceId] : []),
   );
+
+  // Admins need the full hidden-included view so they can unhide. Non-admins
+  // keep the default filtered fetch driven elsewhere.
+  React.useEffect(() => {
+    if (canManageOrg && orgState.activeOrgId) {
+      void dispatch(
+        loadOrgSpacesThunk({ orgId: orgState.activeOrgId, includeHidden: true }),
+      );
+    }
+  }, [dispatch, canManageOrg, orgState.activeOrgId]);
   const [expandedWorkspaces, setExpandedWorkspaces] = React.useState<
     Set<string>
   >(() => new Set());
@@ -232,8 +248,6 @@ export function AdminSidebarView(
   const isActive = (candidate: AdminSelection): boolean =>
     sameSelection(selection, candidate);
 
-  const canManageOrg = activeOrg?.role === "admin";
-
   return (
     <div className="flex h-full min-h-0 flex-col">
       <header className="border-b border-border/60 px-3 py-2">
@@ -291,16 +305,39 @@ export function AdminSidebarView(
                   onClick={() => select({ kind: "org-activity" })}
                 />
                 {spaceState.spaces.length > 0 ? (
-                  <div className={groupHeader}>Spaces</div>
+                  <div
+                    className={`${groupHeader} flex items-center justify-between`}
+                  >
+                    <span>Spaces</span>
+                    {canManageOrg &&
+                    spaceState.spaces.some((s) => s.hidden === true) ? (
+                      <button
+                        type="button"
+                        className="text-[10px] font-normal text-muted-foreground hover:text-foreground"
+                        onClick={() => setShowHidden((v) => !v)}
+                        data-testid="sidebar-show-hidden-toggle"
+                      >
+                        {showHidden ? "Hide hidden" : "Show hidden"}
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
-                {spaceState.spaces.map((sp) => {
+                {spaceState.spaces
+                  .filter((sp) => showHidden || sp.hidden !== true)
+                  .map((sp) => {
                   const spaceExpanded = expandedSpaces.has(sp.spaceId);
                   const isActiveSpace = sp.spaceId === activeSpaceId;
+                  const isHidden = sp.hidden === true;
                   return (
                     <React.Fragment key={sp.spaceId}>
+                      <div
+                        data-testid={`space-row-${sp.spaceId}`}
+                        data-hidden={isHidden ? "true" : "false"}
+                        className={isHidden ? "opacity-60" : undefined}
+                      >
                       <TreeRow
                         depth={1}
-                        icon="📁"
+                        icon={isHidden ? "🙈" : "📁"}
                         label={
                           <span>
                             {sp.name}
@@ -309,12 +346,21 @@ export function AdminSidebarView(
                                 (active)
                               </span>
                             ) : null}
+                            {isHidden ? (
+                              <span className="ml-1 text-[10px] text-muted-foreground">
+                                (hidden)
+                              </span>
+                            ) : null}
                           </span>
                         }
                         expandable
                         expanded={spaceExpanded}
                         onToggle={() => toggleSpace(sp.spaceId)}
-                        onClick={() => toggleSpace(sp.spaceId)}
+                        active={isActive({ kind: "space", spaceId: sp.spaceId })}
+                        onClick={() => {
+                          select({ kind: "space", spaceId: sp.spaceId });
+                          if (!spaceExpanded) toggleSpace(sp.spaceId);
+                        }}
                       />
                       {spaceExpanded ? (
                         <>
@@ -476,6 +522,7 @@ export function AdminSidebarView(
                           )}
                         </>
                       ) : null}
+                      </div>
                     </React.Fragment>
                   );
                 })}
