@@ -14,6 +14,13 @@ import { effectiveRoleInSpace } from "../permission-resolver.js";
 import { acquireChannel } from "./listen-pool.js";
 import { channelForSpace, type RealtimeEvent } from "./events.js";
 import { canDeliverToSubscriber } from "./filter.js";
+import {
+  setPresence,
+  dropPresence,
+  onPresenceChange,
+  startPresenceReaper,
+  type PresenceState,
+} from "./presence.js";
 
 const REVERIFY_INTERVAL_MS = 10_000;
 const HEARTBEAT_MS = 20_000;
@@ -116,6 +123,42 @@ export function registerSpaceWsRoutes(
         })();
       });
 
+      startPresenceReaper();
+      const unsubscribePresence = onPresenceChange(spaceId, (snapshot) => {
+        try {
+          socket.send(
+            JSON.stringify({ type: "presence.update", subscribers: snapshot }),
+          );
+        } catch {
+          /* socket gone */
+        }
+      });
+
+      socket.on("message", (...args: unknown[]) => {
+        const raw = args[0];
+        let bufStr: string;
+        if (typeof raw === "string") bufStr = raw;
+        else if (Buffer.isBuffer(raw)) bufStr = raw.toString("utf8");
+        else return;
+        let msg: { type?: string; state?: unknown };
+        try {
+          msg = JSON.parse(bufStr);
+        } catch {
+          return;
+        }
+        if (
+          msg.type === "presence.set" &&
+          msg.state &&
+          typeof msg.state === "object"
+        ) {
+          setPresence(
+            spaceId,
+            payload.sub,
+            msg.state as Omit<PresenceState, "lastSeenAt">,
+          );
+        }
+      });
+
       const reverify = setInterval(() => {
         void (async () => {
           try {
@@ -137,6 +180,8 @@ export function registerSpaceWsRoutes(
       socket.on("close", () => {
         clearInterval(reverify);
         clearInterval(heartbeat);
+        unsubscribePresence();
+        dropPresence(spaceId, payload.sub);
         void release();
       });
     },

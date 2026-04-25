@@ -13,3 +13,12 @@ export { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";
 export { registerRealtimeDiagnosticsRoute } from "./diagnostics.js";
 export { notifyRealtime, clientOpStore } from "./notify.js";
 export { channelForSpace, type RealtimeEvent } from "./events.js";
+export {
+  setPresence,
+  dropPresence,
+  snapshotPresence,
+  onPresenceChange,
+  startPresenceReaper,
+  stopPresenceReaper,
+  type PresenceState,
+} from "./presence.js";
