@@ -592,10 +592,19 @@ export function registerOrgRoutes(
         })),
         expiresAt: expiresAt.toISOString(),
       };
-      const notificationId = randomUUID();
-      await db()
-        .insert(notifications)
-        .values({
+      // Manual dedupe: ON CONFLICT can't target a partial unique index in
+      // PG (notifications_dedupe_key_unique is `WHERE dedupe_key IS NOT
+      // NULL`). Pre-check + insert is fine here because invites are admin-
+      // gated low-frequency.
+      const dedupeKey = inviteNotificationDedupeKey(inviteId);
+      const existingNotif = await db()
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(eq(notifications.dedupeKey, dedupeKey))
+        .limit(1);
+      if (existingNotif.length === 0) {
+        const notificationId = randomUUID();
+        await db().insert(notifications).values({
           id: notificationId,
           userId: existingUser.id,
           type: "org_invite",
@@ -603,9 +612,9 @@ export function registerOrgRoutes(
           link: `/invite/${plain}`,
           status: "unread",
           createdAt: now,
-          dedupeKey: inviteNotificationDedupeKey(inviteId),
-        })
-        .onConflictDoNothing({ target: notifications.dedupeKey });
+          dedupeKey,
+        });
+      }
     }
 
     return reply.send({

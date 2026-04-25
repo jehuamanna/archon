@@ -89,28 +89,55 @@ export interface TestPgSchemaContext {
   teardown: () => Promise<void>;
 }
 
-// The current test schema. Read by the (single) pool `connect` handler so
-// every newly-acquired connection lands on the active test's schema. Tests
-// run serially within a Node-test-runner file, so this is safe.
+// The current test schema. Read by the wrapped pool.connect so every
+// checkout — including reused idle connections — lands on the active test's
+// schema. Tests run serially within a Node-test-runner file, so this is
+// safe.
 let _currentTestSchema: string | null = null;
 let _connectHookInstalled = false;
 
 function ensureConnectHook(): void {
   if (_connectHookInstalled) return;
   const pool = getPool();
-  pool.on("connect", (client) => {
+  // The 'connect' event fires only on NEW connections, not on reused idle
+  // ones. We wrap pool.connect to force-set search_path on every checkout
+  // — that's the only way to guarantee correctness when tests share a pool
+  // and acquire connections that might have been bound to a previous test's
+  // (now-dropped) schema.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const origConnect = (pool.connect as any).bind(pool);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (pool as any).connect = async (...args: unknown[]) => {
+    const client = await origConnect(...args);
     if (_currentTestSchema) {
-      void client.query(
-        `SET search_path TO "${_currentTestSchema.replace(/"/g, '""')}", public`,
-      );
+      try {
+        await client.query(
+          `SET search_path TO "${_currentTestSchema.replace(/"/g, '""')}", public`,
+        );
+      } catch {
+        /* ignore — connection may already be released */
+      }
     }
-  });
+    return client;
+  };
   _connectHookInstalled = true;
 }
 
 /**
  * Set up a fresh per-test schema. Caller is responsible for calling
  * `teardown()` (recommended via `t.after(() => ctx.teardown())`).
+ *
+ * Strategy: per-test schema + a wrapped pool.connect that force-sets
+ * search_path on every checkout. drizzle's pool.query() path goes through
+ * pool.connect internally so this catches both transactional and
+ * single-statement queries. Tests run serially within a Node-test-runner
+ * file, so the module-level _currentTestSchema is safe.
+ *
+ * Note: drizzle's `db.transaction(fn)` definitely goes through pool.connect.
+ * If a test asserts on read-after-write through getDb().select() and gets a
+ * stale pool client, the assertion may see 0 rows. The mitigation is in
+ * ensureConnectHook(), which runs the SET search_path on every checkout
+ * (not just new connections).
  */
 export async function setupPgTestSchema(): Promise<TestPgSchemaContext> {
   await ensurePgConnected();
@@ -121,28 +148,9 @@ export async function setupPgTestSchema(): Promise<TestPgSchemaContext> {
   await db.execute(sql.raw(`CREATE SCHEMA "${schemaName}"`));
   _currentTestSchema = schemaName;
 
-  // Reset every existing pooled connection's search_path. The connect hook
-  // covers freshly-opened connections; existing idle ones keep whatever path
-  // they last had until used. Closing all idle clients via end+re-open isn't
-  // available, so we set the default at the database level for the duration.
-  const pool = getPool();
-  // Set the path on every currently-pooled connection by acquiring + setting.
-  // The pool's pg.Pool exposes `totalCount` but no iterator; instead we drain
-  // by acquiring up to `totalCount` clients sequentially, setting on each.
-  const drained: import("pg").PoolClient[] = [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const totalCount = (pool as any).totalCount ?? 0;
-  for (let i = 0; i < totalCount; i++) {
-    const client = await pool.connect();
-    drained.push(client);
-    await client.query(
-      `SET search_path TO "${schemaName.replace(/"/g, '""')}", public`,
-    );
-  }
-  for (const c of drained) c.release();
-
   await applyBaseline(schemaName);
 
+  const pool = getPool();
   return {
     schemaName,
     setSearchPath: async () => {
