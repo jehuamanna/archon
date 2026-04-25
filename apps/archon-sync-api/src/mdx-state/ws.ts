@@ -1,14 +1,15 @@
 import type { FastifyInstance } from "fastify";
-import type { ChangeStream, ResumeToken } from "mongodb";
 import type { JwtPayload } from "../auth.js";
 import { verifyAndTranslate } from "../auth-translate.js";
-import { getActiveDb } from "../db.js";
-import { getMdxStateHead, getMdxStateWsCursors } from "./schema.js";
+import { acquireDedicatedClient, getDb } from "../pg.js";
+import { eq } from "drizzle-orm";
+import { wpnProjects } from "../db/schema.js";
 import { userCanWriteProject } from "../permission-resolver.js";
-import { getWpnProjectsCollection } from "../db.js";
+import { MdxStateService } from "./service.js";
 
 const REVERIFY_INTERVAL_MS = 10_000;
 const HEARTBEAT_MS = 20_000;
+const IDLE_RELEASE_MS = 60_000;
 
 interface WsTokenPayload {
   sub: string;
@@ -22,23 +23,93 @@ async function hasProjectAccess(
   auth: JwtPayload,
   projectId: string,
 ): Promise<boolean> {
-  const project = await getWpnProjectsCollection().findOne({ id: projectId });
+  const projectRows = await getDb()
+    .select({ userId: wpnProjects.userId })
+    .from(wpnProjects)
+    .where(eq(wpnProjects.id, projectId))
+    .limit(1);
+  const project = projectRows[0];
   if (!project) return false;
   if (project.userId === auth.sub) return true;
   return userCanWriteProject(auth, projectId);
 }
 
 /**
- * Registers the mini-app state WebSocket endpoint.
- *
- * Only mounts if `@fastify/websocket` has been registered on this Fastify
- * instance (detected via the `websocketServer` property the plugin attaches).
- * Contexts that don't support upgrade (e.g. Next.js `app.inject()` used by
- * apps/archon-web) simply skip the route — the HTTP endpoints still work and
- * clients fall back to polling via GET until they hit a deployment that
- * exposes the raw Fastify server.
- *
- * Route: `GET /v1/ws/mdx-state?token=...&projectId=...`.
+ * Refcounted LISTEN/NOTIFY channel manager. One dedicated `pg.Client` per
+ * `mdx:<projectId>` channel; subscribers register a callback and get
+ * notification frames re-fetched from the head row. When the last subscriber
+ * disconnects the channel is released after a short idle window so a quick
+ * reconnect doesn't pay the LISTEN setup cost.
+ */
+type ChannelEntry = {
+  refcount: number;
+  client: import("pg").PoolClient;
+  subscribers: Set<(payload: string) => void>;
+  idleTimer: NodeJS.Timeout | null;
+};
+const channels = new Map<string, ChannelEntry>();
+
+async function acquireChannel(
+  projectId: string,
+  onNotify: (payload: string) => void,
+): Promise<() => Promise<void>> {
+  const channelName = `mdx:${projectId}`;
+  let entry = channels.get(channelName);
+  if (!entry) {
+    const client = await acquireDedicatedClient();
+    const subscribers = new Set<(p: string) => void>();
+    client.on("notification", (msg) => {
+      if (msg.channel !== channelName) return;
+      const payload = msg.payload ?? "";
+      for (const cb of subscribers) {
+        try {
+          cb(payload);
+        } catch {
+          /* ignore subscriber errors */
+        }
+      }
+    });
+    // Channel name needs SQL-quoting via identifier safe-chars; mdx:<uuid>
+    // contains a colon which needs double-quoting at the SQL layer.
+    await client.query(`LISTEN "${channelName.replace(/"/g, '""')}"`);
+    entry = { refcount: 0, client, subscribers, idleTimer: null };
+    channels.set(channelName, entry);
+  }
+  if (entry.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = null;
+  }
+  entry.refcount++;
+  entry.subscribers.add(onNotify);
+  return async () => {
+    if (!entry) return;
+    entry.subscribers.delete(onNotify);
+    entry.refcount--;
+    if (entry.refcount <= 0) {
+      // Schedule release after an idle window.
+      entry.idleTimer = setTimeout(() => {
+        const stillIdle = entry!.refcount <= 0;
+        if (!stillIdle) return;
+        channels.delete(channelName);
+        void (async () => {
+          try {
+            await entry!.client.query(
+              `UNLISTEN "${channelName.replace(/"/g, '""')}"`,
+            );
+          } catch {
+            /* ignore */
+          }
+          entry!.client.release();
+        })();
+      }, IDLE_RELEASE_MS);
+    }
+  };
+}
+
+/**
+ * Registers the mini-app state WebSocket endpoint at GET /v1/ws/mdx-state.
+ * Path matches the legacy Mongo Change Streams endpoint so the web client
+ * doesn't need to change.
  */
 export function registerMdxStateWsRoutes(
   app: FastifyInstance,
@@ -54,19 +125,20 @@ export function registerMdxStateWsRoutes(
     return;
   }
 
-  // v11 handler signature is `(socket, request)`. Using `any` so this file
-  // compiles even when the plugin's type augmentation isn't loaded.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (app as any).get(
     "/ws/mdx-state",
     { websocket: true },
-    async (socket: {
-      send: (data: string) => void;
-      close: (code?: number, reason?: string) => void;
-      on: (event: string, listener: (...args: unknown[]) => void) => void;
-      off?: (event: string, listener: (...args: unknown[]) => void) => void;
-      ping?: () => void;
-    }, request: { query: { token?: string; projectId?: string } }) => {
+    async (
+      socket: {
+        send: (data: string) => void;
+        close: (code?: number, reason?: string) => void;
+        on: (event: string, listener: (...args: unknown[]) => void) => void;
+        off?: (event: string, listener: (...args: unknown[]) => void) => void;
+        ping?: () => void;
+      },
+      request: { query: { token?: string; projectId?: string } },
+    ) => {
       const token = request.query.token ?? "";
       const projectId = request.query.projectId ?? "";
       let payload: WsTokenPayload;
@@ -80,42 +152,66 @@ export function registerMdxStateWsRoutes(
         socket.close(4401, "token/project mismatch");
         return;
       }
-      const userId = payload.sub;
       const auth: JwtPayload = { sub: payload.sub, email: payload.email };
 
-      // Initial access check.
       if (!(await hasProjectAccess(auth, projectId))) {
         socket.close(4403, "no access to project");
         return;
       }
 
-      const db = getActiveDb();
-      const head = getMdxStateHead(db);
-      const cursorsCol = getMdxStateWsCursors(db);
-      const connectionId = `${userId}:${projectId}:${Date.now()}:${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
+      const svc = new MdxStateService();
 
-      // Resume from last-stored token if present.
-      const cursorDoc = await cursorsCol.findOne({ connectionId });
-      let changeStream: ChangeStream | null = null;
-      const startAfter = cursorDoc?.resumeToken as ResumeToken | undefined;
+      const onNotify = (payloadJson: string): void => {
+        let parsed: { key?: string; version?: number };
+        try {
+          parsed = JSON.parse(payloadJson) as { key?: string; version?: number };
+        } catch {
+          return;
+        }
+        const key = parsed.key;
+        if (typeof key !== "string") return;
+        // Re-fetch the head row to deliver the value frame to clients.
+        void (async () => {
+          try {
+            const res = await svc.get(projectId, key);
+            const frame = {
+              projectId,
+              key,
+              version: res.version,
+              mode: res.mode,
+              ...(res.mode === "inline" ? { value: res.value } : {}),
+            };
+            try {
+              socket.send(JSON.stringify(frame));
+            } catch {
+              /* client gone */
+            }
+          } catch (err) {
+            try {
+              socket.send(
+                JSON.stringify({
+                  type: "error",
+                  message: `head-fetch-failed: ${(err as Error).message}`,
+                }),
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+        })();
+      };
+
+      let release: (() => Promise<void>) | null = null;
       try {
-        changeStream = head.watch(
-          [{ $match: { "fullDocument.projectId": projectId } }],
-          {
-            fullDocument: "updateLookup",
-            ...(startAfter ? { startAfter } : {}),
-          },
-        );
+        release = await acquireChannel(projectId, onNotify);
       } catch (err) {
         socket.send(
           JSON.stringify({
             type: "error",
-            message: `change-stream-open-failed: ${(err as Error).message}`,
+            message: `listen-open-failed: ${(err as Error).message}`,
           }),
         );
-        socket.close(4500, "change stream failed");
+        socket.close(4500, "listen failed");
         return;
       }
 
@@ -133,65 +229,10 @@ export function registerMdxStateWsRoutes(
         }
       }, HEARTBEAT_MS);
 
-      const onEvent = async (evt: unknown): Promise<void> => {
-        const e = evt as {
-          fullDocument?: {
-            projectId: string;
-            key: string;
-            mode: "inline" | "chunked";
-            version: number;
-            value?: unknown;
-            updatedAt: Date;
-            updatedBy: { userId: string; email: string };
-          };
-          _id?: ResumeToken;
-        };
-        const d = e.fullDocument;
-        if (!d || d.projectId !== projectId) return;
-        const frame: Record<string, unknown> = {
-          projectId: d.projectId,
-          key: d.key,
-          version: d.version,
-          mode: d.mode,
-          updatedAt: d.updatedAt.toISOString(),
-          updatedBy: d.updatedBy,
-        };
-        if (d.mode === "inline") {
-          frame.value = d.value;
-        }
-        try {
-          socket.send(JSON.stringify(frame));
-        } catch {
-          /* client gone */
-        }
-        if (e._id) {
-          await cursorsCol.updateOne(
-            { connectionId },
-            {
-              $set: {
-                connectionId,
-                projectId,
-                resumeToken: e._id,
-                updatedAt: new Date(),
-              },
-            },
-            { upsert: true },
-          );
-        }
-      };
-
-      changeStream.on("change", (evt) => {
-        void onEvent(evt);
-      });
-      changeStream.on("error", (err) => {
-        socket.send(JSON.stringify({ type: "error", message: String(err) }));
-        socket.close(4500, "change-stream-error");
-      });
-
       socket.on("close", () => {
         clearInterval(reverifyTimer);
         clearInterval(heartbeatTimer);
-        void changeStream?.close();
+        if (release) void release();
       });
     },
   );
