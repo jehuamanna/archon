@@ -19,6 +19,7 @@
 import { sql } from "drizzle-orm";
 import {
   bigint,
+  bigserial,
   boolean,
   customType,
   index,
@@ -31,6 +32,12 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+
+const bytea = customType<{ data: Buffer; driverData: Buffer }>({
+  dataType() {
+    return "bytea";
+  },
+});
 
 const inet = customType<{ data: string; driverData: string }>({
   dataType() {
@@ -538,11 +545,7 @@ export const mdxStateChunks = pgTable(
     key: text("key").notNull(),
     chunkIndex: integer("chunk_index").notNull(),
     headVersion: integer("head_version").notNull(),
-    data: customType<{ data: Buffer; driverData: Buffer }>({
-      dataType() {
-        return "bytea";
-      },
-    })("data").notNull(),
+    data: bytea("data").notNull(),
   },
   (t) => ({
     pk: primaryKey({ columns: [t.projectId, t.key, t.chunkIndex, t.headVersion] }),
@@ -564,6 +567,44 @@ export const mdxStateWsCursors = pgTable(
   },
   (t) => ({
     byUpdatedAt: index("mdx_state_ws_cursors_updated_at_idx").on(t.updatedAt),
+  }),
+);
+
+// ---------- realtime collab (yjs body state) ----------
+
+/**
+ * Snapshot per note: most recent compacted Y.Doc state. The Hocuspocus
+ * `onLoadDocument` reads `docBytes` and replays any `yjsStateUpdates` whose
+ * `sequence > version` to recover the live document. `version` advances on
+ * snapshot rewrites.
+ */
+export const yjsState = pgTable("yjs_state", {
+  noteId: uuid("note_id").primaryKey().notNull(),
+  docBytes: bytea("doc_bytes").notNull(),
+  version: bigint("version", { mode: "number" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true })
+    .notNull()
+    .defaultNow(),
+});
+
+/**
+ * Append-only log of Yjs updates between snapshots. The `sequence` is a
+ * monotonic per-note counter; the importer / writer is responsible for
+ * allocating it under a single transaction.
+ */
+export const yjsStateUpdates = pgTable(
+  "yjs_state_updates",
+  {
+    id: bigserial("id", { mode: "number" }).primaryKey(),
+    noteId: uuid("note_id").notNull(),
+    updateBytes: bytea("update_bytes").notNull(),
+    sequence: bigint("sequence", { mode: "number" }).notNull(),
+    appliedAt: timestamp("applied_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => ({
+    byNoteSeq: index("yjs_state_updates_note_seq_idx").on(t.noteId, t.sequence),
   }),
 );
 
@@ -599,4 +640,8 @@ export type WpnNote = typeof wpnNotes.$inferSelect;
 export type NoteEdge = typeof noteEdges.$inferSelect;
 export type AuditEvent = typeof auditEvents.$inferSelect;
 export type Notification = typeof notifications.$inferSelect;
+export type YjsState = typeof yjsState.$inferSelect;
+export type NewYjsState = typeof yjsState.$inferInsert;
+export type YjsStateUpdate = typeof yjsStateUpdates.$inferSelect;
+export type NewYjsStateUpdate = typeof yjsStateUpdates.$inferInsert;
 export type LegacyObjectIdMapRow = typeof legacyObjectIdMap.$inferSelect;
