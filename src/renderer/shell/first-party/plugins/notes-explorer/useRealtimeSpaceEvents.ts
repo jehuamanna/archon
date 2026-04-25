@@ -56,6 +56,57 @@ function syncBaseToWsBase(syncBase: string): string {
   return syncBase.replace(/^http(s?):/, "ws$1:");
 }
 
+function isLoopbackBrowserPage(): boolean {
+  if (typeof window === "undefined") return true;
+  const h = window.location.hostname;
+  return h === "localhost" || h === "127.0.0.1" || h === "::1";
+}
+
+/**
+ * Decide which host serves the WebSocket. WS is HTTP-different in two ways
+ * the rest of the sync-api isn't: the route handler in Next.js dev uses
+ * `app.inject()`, which can't return `101 Switching Protocols`. So when
+ * `NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN=1` (HTTP routed through Next on
+ * :3000), the WS upgrade has to be redirected to a process that can speak
+ * the protocol — the standalone Fastify sync-api on :4010, which has
+ * `@fastify/websocket` registered.
+ *
+ * Precedence:
+ * 1. `NEXT_PUBLIC_ARCHON_REALTIME_WS_URL` (explicit override).
+ * 2. Same-origin + loopback page → hard-wire to `ws://127.0.0.1:4010/api/v1`.
+ * 3. Otherwise convert the resolved sync-api base by swapping the scheme.
+ *    Works for direct-loopback dev, and for nginx in prod where the
+ *    upstream is configured to proxy WS upgrades.
+ */
+function resolveRealtimeWsBase(syncBase: string): string {
+  try {
+    const explicit =
+      typeof process !== "undefined" &&
+      typeof process.env?.NEXT_PUBLIC_ARCHON_REALTIME_WS_URL === "string"
+        ? process.env.NEXT_PUBLIC_ARCHON_REALTIME_WS_URL.trim()
+        : "";
+    if (explicit) {
+      return explicit.replace(/\/$/, "").replace(/^http(s?):/, "ws$1:");
+    }
+  } catch {
+    /* ignore — process may be unavailable */
+  }
+  try {
+    const sameOrigin =
+      typeof process !== "undefined" &&
+      (process.env?.NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN === "1" ||
+        process.env?.NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN === "true");
+    if (sameOrigin && isLoopbackBrowserPage()) {
+      // Dev fallback: same-origin can't carry WS through Next.js dev. Point
+      // at the standalone Fastify sync-api (default port from server-env.ts).
+      return "ws://127.0.0.1:4010/api/v1";
+    }
+  } catch {
+    /* ignore */
+  }
+  return syncBaseToWsBase(syncBase);
+}
+
 async function mintSpaceWsToken(
   syncBase: string,
   spaceId: string,
@@ -138,7 +189,7 @@ export function useRealtimeSpaceEvents(
       }
       if (cancelled) return;
 
-      const wsBase = syncBaseToWsBase(syncBase);
+      const wsBase = resolveRealtimeWsBase(syncBase);
       const url = `${wsBase}/ws/space/${encodeURIComponent(spaceId)}?token=${encodeURIComponent(token)}`;
       try {
         socket = new WebSocket(url);
