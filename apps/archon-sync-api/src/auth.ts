@@ -1,5 +1,6 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { verifyAndTranslateAccess } from "./auth-translate.js";
 
 const ACCESS_EXPIRES =
   (typeof process.env.ARCHON_JWT_ACCESS_EXPIRES === "string" &&
@@ -140,7 +141,7 @@ export async function requireAuth(
     return null;
   }
   try {
-    return verifyAccessToken(jwtSecret, token);
+    return await verifyAndTranslateAccess(jwtSecret, token);
   } catch {
     await reply.status(401).send({ error: "Invalid or expired token" });
     return null;

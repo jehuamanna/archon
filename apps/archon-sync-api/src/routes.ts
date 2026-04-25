@@ -7,8 +7,8 @@ import {
   requireAuth,
   signAccessToken,
   signRefreshToken,
-  verifyRefreshToken,
 } from "./auth.js";
+import { verifyAndTranslateRefresh } from "./auth-translate.js";
 import type { SyncNoteDoc, UserDoc } from "./db.js";
 import {
   ensureDefaultSpaceForOrg,
@@ -269,7 +269,7 @@ export function registerRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     try {
-      const p = verifyRefreshToken(jwtSecret, parsed.data.refreshToken);
+      const p = await verifyAndTranslateRefresh(jwtSecret, parsed.data.refreshToken);
       const users = getUsersCollection();
       let userId: ObjectId;
       try {

@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ChangeStream, ResumeToken } from "mongodb";
 import type { JwtPayload } from "../auth.js";
-import { verifyToken } from "../auth.js";
+import { verifyAndTranslate } from "../auth-translate.js";
 import { getActiveDb } from "../db.js";
 import { getMdxStateHead, getMdxStateWsCursors } from "./schema.js";
 import { userCanWriteProject } from "../permission-resolver.js";
@@ -71,7 +71,7 @@ export function registerMdxStateWsRoutes(
       const projectId = request.query.projectId ?? "";
       let payload: WsTokenPayload;
       try {
-        payload = verifyToken(jwtSecret, token) as unknown as WsTokenPayload;
+        payload = (await verifyAndTranslate(jwtSecret, token)) as unknown as WsTokenPayload;
       } catch {
         socket.close(4401, "invalid token");
         return;
