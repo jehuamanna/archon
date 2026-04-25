@@ -34,6 +34,10 @@ import { registerWpnImportExportRoutes } from "./wpn-import-export-routes.js";
 import { registerMasterAdminRoutes } from "./master-admin-routes.js";
 import { registerMdxStateRoutes } from "./mdx-state/routes.js";
 import { registerMdxStateWsRoutes } from "./mdx-state/ws.js";
+import {
+  registerRealtimeRoutes,
+  registerSpaceWsRoutes,
+} from "./realtime/index.js";
 import { maybePromoteMasterAdmin } from "./admin-auth.js";
 import {
   buildSessionsAfterAppend,
@@ -134,6 +138,8 @@ export function registerRoutes(
   registerNotificationsRoutes(app, { jwtSecret });
   registerMdxStateRoutes(app, { jwtSecret });
   registerMdxStateWsRoutes(app, { jwtSecret });
+  registerRealtimeRoutes(app, { jwtSecret });
+  registerSpaceWsRoutes(app, { jwtSecret });
   app.register(
     async (scoped) => registerWpnImportExportRoutes(scoped, { jwtSecret }),
   );
