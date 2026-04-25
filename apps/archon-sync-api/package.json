@@ -28,11 +28,14 @@
     "@fastify/multipart": "^10.0.0",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.2",
+    "bson": "^6.10.1",
     "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.36.4",
     "fastify": "^5.2.1",
     "jsonwebtoken": "^9.0.2",
     "marked": "^15.0.12",
     "mongodb": "^6.12.0",
+    "pg": "^8.13.1",
     "unzipper": "^0.12.3",
     "zod": "^3.24.1",
     "@fastify/websocket": "^11.0.2"
@@ -41,7 +44,9 @@
     "@types/archiver": "^7.0.0",
     "@types/bcryptjs": "^2.4.6",
     "@types/jsonwebtoken": "^9.0.7",
+    "@types/pg": "^8.11.10",
     "@types/unzipper": "^0.10.11",
+    "drizzle-kit": "^0.28.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }
