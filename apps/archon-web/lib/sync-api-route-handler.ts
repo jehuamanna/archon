@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   buildSyncApiApp,
-  ensureMongoConnected,
+  ensurePgConnected,
   envString,
   requireJwtSecret,
 } from "@archon/sync-api";
@@ -70,7 +70,7 @@ function injectHeadersFromRequest(request: Request): Record<string, string> {
  * Forward a Web `Request` to the Fastify sync-api app (same routes as `apps/archon-sync-api` Docker service).
  */
 export async function handleSyncApiRequest(request: Request): Promise<Response> {
-  await ensureMongoConnected();
+  await ensurePgConnected();
   const app = await getSyncApiApp();
 
   const u = new URL(request.url);
