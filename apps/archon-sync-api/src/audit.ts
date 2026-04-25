@@ -10,6 +10,12 @@ export type RecordAuditInput = {
   targetType: string;
   targetId: string;
   metadata?: Record<string, unknown> | null;
+  /**
+   * Optional principal block. When supplied, the principal merges into
+   * `metadata.principal` so downstream readers can distinguish user vs MCP
+   * authorship without joining other tables.
+   */
+  principal?: { type: "user" | "mcp"; metadata?: Record<string, unknown> };
 };
 
 /**
@@ -18,6 +24,12 @@ export type RecordAuditInput = {
  * succeeds so we never log phantom events.
  */
 export async function recordAudit(input: RecordAuditInput): Promise<void> {
+  const merged: Record<string, unknown> | null = (() => {
+    if (!input.metadata && !input.principal) return null;
+    const base: Record<string, unknown> = { ...(input.metadata ?? {}) };
+    if (input.principal) base.principal = input.principal;
+    return base;
+  })();
   try {
     await getDb().insert(auditEvents).values({
       id: crypto.randomUUID(),
@@ -26,7 +38,7 @@ export async function recordAudit(input: RecordAuditInput): Promise<void> {
       action: input.action,
       targetType: input.targetType,
       targetId: input.targetId,
-      metadata: input.metadata ?? null,
+      metadata: merged,
       ts: new Date(),
     });
   } catch (err) {
