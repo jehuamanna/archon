@@ -1,7 +1,9 @@
 /**
- * Hocuspocus mount at `GET /v1/ws/yjs/:noteId`. Each note id maps to its own
- * Y.Doc; the Postgres adapter from `yjs-pg-adapter.ts` provides the snapshot
- * + incremental log persistence.
+ * Hocuspocus mount at `GET /v1/ws/yjs`. The Y.Doc selector ("documentName")
+ * arrives in the Hocuspocus auth protocol message — the client does NOT
+ * carry the noteId in the URL. Each documentName maps to its own Y.Doc;
+ * the Postgres adapter from `yjs-pg-adapter.ts` provides the snapshot +
+ * incremental log persistence.
  *
  * Auth: short-TTL `typ: "spaceWs"` JWT token in the WS query string. We
  * resolve the note's space (directly from `wpn_notes.spaceId`, falling back
@@ -26,6 +28,22 @@ let _sharedAdapter: YjsPgAdapter | null = null;
 export function getYjsAdapter(): YjsPgAdapter {
   if (!_sharedAdapter) _sharedAdapter = createYjsPgAdapter();
   return _sharedAdapter;
+}
+
+let _sharedServer: ReturnType<typeof Server.configure> | null = null;
+/**
+ * Test helper: tear down the shared Hocuspocus server so its internal
+ * timers stop and the test process can exit cleanly.
+ */
+export async function _shutdownYjsServerForTests(): Promise<void> {
+  if (_sharedServer) {
+    try {
+      await _sharedServer.destroy();
+    } catch {
+      /* ignore */
+    }
+    _sharedServer = null;
+  }
 }
 
 async function resolveSpaceForNote(noteId: string): Promise<string | null> {
@@ -70,7 +88,7 @@ export function registerYjsWsRoutes(
   const adapter = getYjsAdapter();
   const debounceMs = Number(process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS ?? 2000);
 
-  const server = Server.configure({
+  _sharedServer = Server.configure({
     debounce: debounceMs,
     async onAuthenticate({ token, documentName }) {
       const payload = await verifyAndTranslate(jwtSecret, token);
@@ -111,23 +129,17 @@ export function registerYjsWsRoutes(
     },
   });
 
+  const server = _sharedServer;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (app as any).get(
-    "/ws/yjs/:noteId",
+    "/ws/yjs",
     { websocket: true },
-    (
-      socket: unknown,
-      request: { params: { noteId?: string }; raw: unknown },
-    ) => {
-      const noteId = request.params.noteId ?? "";
-      if (!noteId) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (socket as any).close?.(4400, "missing noteId");
-        return;
-      }
-      // Hocuspocus expects a `ws.WebSocket`-shaped socket and the raw IncomingMessage.
+    (socket: unknown, request: { raw: unknown }) => {
+      // Hocuspocus reads the document name + token from the protocol auth
+      // message; we just hand it the raw socket + request.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      server.handleConnection(socket as any, request.raw as any, noteId);
+      server.handleConnection(socket as any, request.raw as any);
     },
   );
 }

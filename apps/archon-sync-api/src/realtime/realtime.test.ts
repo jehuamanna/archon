@@ -350,8 +350,8 @@ test("AC4.2 — concurrent moves: each successful op emits exactly one note.move
     try {
       // Two concurrent moves: B becomes a child of A; C becomes a child of A.
       const results = await Promise.allSettled([
-        pgWpnMoveNote(userId, projectId, b.id, a.id, "child"),
-        pgWpnMoveNote(userId, projectId, c.id, a.id, "child"),
+        pgWpnMoveNote(userId, projectId, b.id, a.id, "into"),
+        pgWpnMoveNote(userId, projectId, c.id, a.id, "into"),
       ]);
       // Give NOTIFY a tick to land.
       await new Promise((r) => setTimeout(r, 250));

@@ -107,18 +107,41 @@ function ensureConnectHook(): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const origConnect = (pool.connect as any).bind(pool);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (pool as any).connect = async (...args: unknown[]) => {
-    const client = await origConnect(...args);
-    if (_currentTestSchema) {
+  // node-postgres pool.connect supports both callback-form and Promise-form.
+  // node-postgres's own pool.query() uses callback-form internally, and so
+  // does drizzle when its session calls `this.client.query(...)` against a
+  // Pool. The wrapper has to handle both forms — otherwise non-await
+  // checkouts get a fresh client without search_path applied, and the
+  // queries land in `public` instead of the per-test schema.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (pool as any).connect = function (cb?: unknown): any {
+    const setPath = async (client: any): Promise<void> => {
+      if (!_currentTestSchema) return;
       try {
         await client.query(
           `SET search_path TO "${_currentTestSchema.replace(/"/g, '""')}", public`,
         );
       } catch {
-        /* ignore — connection may already be released */
+        /* ignore */
       }
+    };
+    if (typeof cb === "function") {
+      // callback form: callback receives (err, client, done).
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return origConnect((err: any, client: any, done: any) => {
+        if (err || !client) {
+          (cb as any)(err, client, done);
+          return;
+        }
+        void setPath(client).then(() => (cb as any)(err, client, done));
+      });
     }
-    return client;
+    // Promise form
+    return (async () => {
+      const client = await origConnect();
+      await setPath(client);
+      return client;
+    })();
   };
   _connectHookInstalled = true;
 }
