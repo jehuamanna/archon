@@ -310,6 +310,9 @@ export const projectShares = pgTable(
 
 // ---------- WPN (workspace / project / note tree + cross-link edges) ----------
 
+// Note: WPN-tree TS field names match the existing Mongo doc shape
+// (snake_case for indexes / timestamps / structural fields) so route
+// handlers and permission-resolver consumers don't need a mapper.
 export const wpnWorkspaces = pgTable(
   "wpn_workspaces",
   {
@@ -320,19 +323,19 @@ export const wpnWorkspaces = pgTable(
     visibility: text("visibility"), // 'public' | 'private' | 'shared'
     creatorUserId: uuid("creator_user_id"),
     name: text("name").notNull(),
-    sortIndex: integer("sort_index").notNull(),
-    colorToken: text("color_token"),
-    createdAtMs: bigint("created_at_ms", { mode: "number" }).notNull(),
-    updatedAtMs: bigint("updated_at_ms", { mode: "number" }).notNull(),
+    sort_index: integer("sort_index").notNull(),
+    color_token: text("color_token"),
+    created_at_ms: bigint("created_at_ms", { mode: "number" }).notNull(),
+    updated_at_ms: bigint("updated_at_ms", { mode: "number" }).notNull(),
     settings: jsonb("settings"),
   },
   (t) => ({
     idUserUnique: uniqueIndex("wpn_workspaces_id_user_unique").on(t.id, t.userId),
-    byUserSort: index("wpn_workspaces_user_sort_idx").on(t.userId, t.sortIndex),
+    byUserSort: index("wpn_workspaces_user_sort_idx").on(t.userId, t.sort_index),
     byOrgSpaceSort: index("wpn_workspaces_org_space_sort_idx").on(
       t.orgId,
       t.spaceId,
-      t.sortIndex,
+      t.sort_index,
     ),
   }),
 );
@@ -344,28 +347,28 @@ export const wpnProjects = pgTable(
     userId: uuid("user_id").notNull(),
     orgId: uuid("org_id"),
     spaceId: uuid("space_id"),
-    workspaceId: uuid("workspace_id").notNull(),
+    workspace_id: uuid("workspace_id").notNull(),
     visibility: text("visibility"), // 'public' | 'private' | 'shared'
     creatorUserId: uuid("creator_user_id"),
     name: text("name").notNull(),
-    sortIndex: integer("sort_index").notNull(),
-    colorToken: text("color_token"),
-    createdAtMs: bigint("created_at_ms", { mode: "number" }).notNull(),
-    updatedAtMs: bigint("updated_at_ms", { mode: "number" }).notNull(),
+    sort_index: integer("sort_index").notNull(),
+    color_token: text("color_token"),
+    created_at_ms: bigint("created_at_ms", { mode: "number" }).notNull(),
+    updated_at_ms: bigint("updated_at_ms", { mode: "number" }).notNull(),
     settings: jsonb("settings"),
   },
   (t) => ({
     idUserUnique: uniqueIndex("wpn_projects_id_user_unique").on(t.id, t.userId),
     byUserWorkspace: index("wpn_projects_user_workspace_sort_idx").on(
       t.userId,
-      t.workspaceId,
-      t.sortIndex,
+      t.workspace_id,
+      t.sort_index,
     ),
     byOrgSpaceWorkspace: index("wpn_projects_org_space_workspace_sort_idx").on(
       t.orgId,
       t.spaceId,
-      t.workspaceId,
-      t.sortIndex,
+      t.workspace_id,
+      t.sort_index,
     ),
   }),
 );
@@ -377,33 +380,33 @@ export const wpnNotes = pgTable(
     userId: uuid("user_id").notNull(),
     orgId: uuid("org_id"),
     spaceId: uuid("space_id"),
-    createdByUserId: uuid("created_by_user_id"),
-    updatedByUserId: uuid("updated_by_user_id"),
-    projectId: uuid("project_id").notNull(),
-    parentId: uuid("parent_id"),
+    created_by_user_id: uuid("created_by_user_id"),
+    updated_by_user_id: uuid("updated_by_user_id"),
+    project_id: uuid("project_id").notNull(),
+    parent_id: uuid("parent_id"),
     type: text("type").notNull(),
     title: text("title").notNull(),
     content: text("content").notNull(),
     metadata: jsonb("metadata"),
-    siblingIndex: integer("sibling_index").notNull(),
-    createdAtMs: bigint("created_at_ms", { mode: "number" }).notNull(),
-    updatedAtMs: bigint("updated_at_ms", { mode: "number" }).notNull(),
+    sibling_index: integer("sibling_index").notNull(),
+    created_at_ms: bigint("created_at_ms", { mode: "number" }).notNull(),
+    updated_at_ms: bigint("updated_at_ms", { mode: "number" }).notNull(),
     deleted: boolean("deleted"),
   },
   (t) => ({
     idUserUnique: uniqueIndex("wpn_notes_id_user_unique").on(t.id, t.userId),
     byProjectParentSibling: index("wpn_notes_project_parent_sibling_idx").on(
       t.userId,
-      t.projectId,
-      t.parentId,
-      t.siblingIndex,
+      t.project_id,
+      t.parent_id,
+      t.sibling_index,
     ),
     byOrgSpaceProject: index("wpn_notes_org_space_project_idx").on(
       t.orgId,
       t.spaceId,
-      t.projectId,
-      t.parentId,
-      t.siblingIndex,
+      t.project_id,
+      t.parent_id,
+      t.sibling_index,
     ),
   }),
 );
@@ -414,15 +417,15 @@ export const wpnExplorerState = pgTable(
     userId: uuid("user_id").notNull(),
     orgId: uuid("org_id"),
     spaceId: uuid("space_id"),
-    projectId: uuid("project_id").notNull(),
-    expandedIds: jsonb("expanded_ids").$type<string[]>().notNull(),
+    project_id: uuid("project_id").notNull(),
+    expanded_ids: jsonb("expanded_ids").$type<string[]>().notNull(),
   },
   (t) => ({
-    pk: primaryKey({ columns: [t.userId, t.projectId] }),
+    pk: primaryKey({ columns: [t.userId, t.project_id] }),
     byOrgSpaceProject: index("wpn_explorer_state_org_space_project_idx").on(
       t.orgId,
       t.spaceId,
-      t.projectId,
+      t.project_id,
     ),
   }),
 );
