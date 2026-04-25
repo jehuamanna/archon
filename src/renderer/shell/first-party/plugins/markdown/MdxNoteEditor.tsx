@@ -1,10 +1,11 @@
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
-import type { AppDispatch } from "../../../../store";
+import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
+import { useYjsBodyShadow } from "./useYjsBodyShadow";
 import { MdxRenderer } from "../../../../components/renderers/MdxRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -439,12 +440,25 @@ export function MdxNoteEditor({
     };
   }, [wikiRows, note.id]);
 
+  // When the realtime body-collab WS is open for this note, flushes ride
+  // the Yjs binary diff frame instead of a full-content HTTP PATCH. The
+  // server's `onStoreDocument` bridges Y.Text → `wpn_notes.content` so
+  // legacy HTTP read endpoints stay in sync. Falls back to the HTTP path
+  // when the standalone sync-api isn't reachable.
+  const activeSpaceId = useSelector(
+    (s: RootState) => s.spaceMembership.activeSpaceId,
+  );
+  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  const yjsBodyRef = useRef(yjsBody);
+  yjsBodyRef.current = yjsBody;
+
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
     if (!persistRef.current) return;
+    if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
     void dispatch(
       saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
     );
@@ -459,6 +473,7 @@ export function MdxNoteEditor({
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       if (!persistRef.current) return;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -472,11 +487,13 @@ export function MdxNoteEditor({
         window.clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
-      if (persistRef.current) {
-        void dispatch(
-          saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
-        );
-      }
+      if (!persistRef.current) return;
+      // On unmount the Yjs provider is about to be destroyed too; push
+      // synchronously and only fall back to HTTP if the WS isn't open.
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      void dispatch(
+        saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
+      );
     };
   }, [note.id, dispatch]);
 

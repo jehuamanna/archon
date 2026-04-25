@@ -122,10 +122,36 @@ export function registerYjsWsRoutes(
       }
       return document;
     },
-    async onStoreDocument({ documentName, document }) {
+    async onStoreDocument({ documentName, document, context }) {
       const noteId = documentName;
       const fullState = Buffer.from(Y.encodeStateAsUpdate(document));
       await adapter.storeDoc(noteId, fullState);
+      // Bridge Yjs body state → `wpn_notes.content` so the legacy HTTP
+      // detail / list / export endpoints (which read from `wpn_notes`,
+      // not `yjs_state`) stay in sync. Without this, switching the
+      // editor to push edits over Yjs would freeze `wpn_notes.content`
+      // at the seed value forever.
+      const text = document.getText("content").toString();
+      try {
+        const editorUserId =
+          (context as { user?: { id?: string } } | undefined)?.user?.id;
+        const t = Date.now();
+        const setFields: Record<string, unknown> = {
+          content: text,
+          updated_at_ms: t,
+        };
+        if (editorUserId) setFields.updated_by_user_id = editorUserId;
+        await getDb()
+          .update(wpnNotes)
+          .set(setFields)
+          .where(eq(wpnNotes.id, noteId));
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[yjs-ws] bridge wpn_notes.content failed:",
+          (err as Error).message,
+        );
+      }
     },
   });
 
