@@ -29,6 +29,7 @@ import {
   type WpnNoteRowLite,
   wpnComputeChildMapAfterMove,
 } from "./wpn-tree.js";
+import { notifyRealtime } from "./realtime/notify.js";
 
 // ---------- public surface (kept identical to wpn-mongo-writes.ts) ----------
 
@@ -545,7 +546,7 @@ export async function pgWpnCreateNote(
   },
   authorship?: { editorUserId?: string },
 ): Promise<{ id: string }> {
-  return withTx(async (tx) => {
+  const result = await withTx(async (tx) => {
     const projRows = await tx
       .select()
       .from(wpnProjects)
@@ -637,6 +638,40 @@ export async function pgWpnCreateNote(
     await reconcileNoteEdges(tx, id, content);
     return { id };
   });
+  // Best-effort fanout — failures are logged inside notifyRealtime, never thrown.
+  try {
+    const after = await getDb()
+      .select({
+        id: wpnNotes.id,
+        spaceId: wpnNotes.spaceId,
+        parentId: wpnNotes.parent_id,
+        title: wpnNotes.title,
+        type: wpnNotes.type,
+        siblingIndex: wpnNotes.sibling_index,
+        createdByUserId: wpnNotes.created_by_user_id,
+        projectId: wpnNotes.project_id,
+      })
+      .from(wpnNotes)
+      .where(eq(wpnNotes.id, result.id))
+      .limit(1);
+    const row = after[0];
+    if (row?.spaceId) {
+      await notifyRealtime(row.spaceId, {
+        type: "note.created",
+        noteId: row.id,
+        projectId: row.projectId,
+        parentId: row.parentId,
+        title: row.title,
+        noteType: row.type,
+        siblingIndex: row.siblingIndex,
+        createdByUserId: row.createdByUserId ?? userId,
+        emittedAt: new Date().toISOString(),
+      });
+    }
+  } catch {
+    /* fanout failures must not surface to the writer */
+  }
+  return result;
 }
 
 export async function pgWpnUpdateNote(
@@ -661,7 +696,8 @@ export async function pgWpnUpdateNote(
   created_at_ms: number;
   updated_at_ms: number;
 } | null> {
-  return withTx(async (tx) => {
+  let renamed: { spaceId: string | null; oldTitle: string; newTitle: string; projectId: string } | null = null;
+  const result = await withTx(async (tx) => {
     const nRows = await tx
       .select()
       .from(wpnNotes)
@@ -734,6 +770,15 @@ export async function pgWpnUpdateNote(
       await reconcileNoteEdges(tx, noteId, content);
     }
 
+    if (patch.title !== undefined && title !== n.title) {
+      renamed = {
+        spaceId: n.spaceId,
+        oldTitle: n.title,
+        newTitle: title,
+        projectId: n.project_id,
+      };
+    }
+
     return {
       id: n.id,
       project_id: n.project_id,
@@ -747,17 +792,57 @@ export async function pgWpnUpdateNote(
       updated_at_ms: updated_at_ms,
     };
   });
+  if (renamed && (renamed as { spaceId: string | null }).spaceId) {
+    try {
+      await notifyRealtime((renamed as { spaceId: string }).spaceId, {
+        type: "note.renamed",
+        noteId,
+        projectId: (renamed as { projectId: string }).projectId,
+        oldTitle: (renamed as { oldTitle: string }).oldTitle,
+        newTitle: (renamed as { newTitle: string }).newTitle,
+        byUserId: userId,
+        emittedAt: new Date().toISOString(),
+      });
+    } catch {
+      /* fanout failures must not surface to the writer */
+    }
+  }
+  return result;
 }
 
 export async function pgWpnDeleteNotes(userId: string, ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const unique = [...new Set(ids)];
+  // Capture pre-delete metadata for the fanout — once the rows are gone we
+  // can't reconstruct projectId/spaceId.
+  const preDelete = await getDb()
+    .select({
+      id: wpnNotes.id,
+      spaceId: wpnNotes.spaceId,
+      projectId: wpnNotes.project_id,
+    })
+    .from(wpnNotes)
+    .where(and(eq(wpnNotes.userId, userId), inArray(wpnNotes.id, unique)));
   await withTx(async (tx) => {
     // FK ON DELETE CASCADE on note_edges handles edge cleanup automatically.
     await tx.delete(wpnNotes).where(
       and(eq(wpnNotes.userId, userId), inArray(wpnNotes.id, unique)),
     );
   });
+  for (const row of preDelete) {
+    if (!row.spaceId) continue;
+    try {
+      await notifyRealtime(row.spaceId, {
+        type: "note.deleted",
+        noteId: row.id,
+        projectId: row.projectId,
+        byUserId: userId,
+        emittedAt: new Date().toISOString(),
+      });
+    } catch {
+      /* fanout failures must not surface to the writer */
+    }
+  }
 }
 
 export async function pgWpnMoveNote(
@@ -767,7 +852,19 @@ export async function pgWpnMoveNote(
   targetId: string,
   placement: NoteMovePlacement,
 ): Promise<void> {
+  let beforeState: { fromParentId: string | null; fromSiblingIndex: number } | null = null;
   await withTx(async (tx) => {
+    const beforeRows = await tx
+      .select({ pid: wpnNotes.parent_id, si: wpnNotes.sibling_index })
+      .from(wpnNotes)
+      .where(and(eq(wpnNotes.id, draggedId), eq(wpnNotes.userId, userId)))
+      .limit(1);
+    if (beforeRows[0]) {
+      beforeState = {
+        fromParentId: beforeRows[0].pid,
+        fromSiblingIndex: beforeRows[0].si,
+      };
+    }
     const projRows = await tx
       .select({ id: wpnProjects.id })
       .from(wpnProjects)
@@ -801,6 +898,35 @@ export async function pgWpnMoveNote(
     };
     await walk(null, childMap.get(null) ?? []);
   });
+  if (beforeState) {
+    try {
+      const after = await getDb()
+        .select({
+          pid: wpnNotes.parent_id,
+          si: wpnNotes.sibling_index,
+          spaceId: wpnNotes.spaceId,
+        })
+        .from(wpnNotes)
+        .where(eq(wpnNotes.id, draggedId))
+        .limit(1);
+      const a = after[0];
+      if (a?.spaceId) {
+        await notifyRealtime(a.spaceId, {
+          type: "note.moved",
+          noteId: draggedId,
+          projectId: project_id,
+          fromParentId: (beforeState as { fromParentId: string | null }).fromParentId,
+          toParentId: a.pid,
+          fromSiblingIndex: (beforeState as { fromSiblingIndex: number }).fromSiblingIndex,
+          toSiblingIndex: a.si,
+          byUserId: userId,
+          emittedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* fanout failures must not surface to the writer */
+    }
+  }
 }
 
 export async function pgWpnMoveNoteToProject(
@@ -809,6 +935,11 @@ export async function pgWpnMoveNoteToProject(
   targetProjectId: string,
   targetParentId: string | null,
 ): Promise<void> {
+  let moveBefore: {
+    fromParentId: string | null;
+    fromSiblingIndex: number;
+    fromProjectId: string;
+  } | null = null;
   await withTx(async (tx) => {
     const srcRows = await tx
       .select()
@@ -818,6 +949,11 @@ export async function pgWpnMoveNoteToProject(
     const source = srcRows[0] as NoteRow | undefined;
     if (!source || source.deleted === true) throw new Error("Note not found");
     const sourceProjectId = source.project_id;
+    moveBefore = {
+      fromParentId: source.parent_id,
+      fromSiblingIndex: source.sibling_index,
+      fromProjectId: sourceProjectId,
+    };
     if (
       sourceProjectId === targetProjectId &&
       (source.parent_id ?? null) === (targetParentId ?? null)
@@ -929,6 +1065,36 @@ export async function pgWpnMoveNoteToProject(
       }
     }
   });
+  if (moveBefore) {
+    try {
+      const after = await getDb()
+        .select({
+          pid: wpnNotes.parent_id,
+          si: wpnNotes.sibling_index,
+          spaceId: wpnNotes.spaceId,
+          projectId: wpnNotes.project_id,
+        })
+        .from(wpnNotes)
+        .where(eq(wpnNotes.id, sourceNoteId))
+        .limit(1);
+      const a = after[0];
+      if (a?.spaceId) {
+        await notifyRealtime(a.spaceId, {
+          type: "note.moved",
+          noteId: sourceNoteId,
+          projectId: a.projectId,
+          fromParentId: (moveBefore as { fromParentId: string | null }).fromParentId,
+          toParentId: a.pid,
+          fromSiblingIndex: (moveBefore as { fromSiblingIndex: number }).fromSiblingIndex,
+          toSiblingIndex: a.si,
+          byUserId: userId,
+          emittedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      /* fanout failures must not surface to the writer */
+    }
+  }
 }
 
 export async function pgWpnDuplicateSubtree(
