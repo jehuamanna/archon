@@ -3,17 +3,10 @@ import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import archiver from "archiver";
 import unzipper from "unzipper";
+import { and, asc, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import { requireAuth } from "./auth.js";
-import {
-  getWpnWorkspacesCollection,
-  getWpnProjectsCollection,
-  getWpnNotesCollection,
-} from "./db.js";
-import type {
-  WpnWorkspaceDoc,
-  WpnProjectDoc,
-  WpnNoteDoc,
-} from "./db.js";
+import { getDb } from "./pg.js";
+import { wpnNotes, wpnProjects, wpnWorkspaces } from "./db/schema.js";
 import {
   buildExportManifest,
   clearImageMetadataKeys,
@@ -25,7 +18,10 @@ import {
   type WpnExportMetadata,
   type WpnImportConflictPolicy,
 } from "./export-import-helpers.js";
-import { exportMaxAssetBytes, isImageNotesFeatureEnabled } from "./server-env.js";
+import {
+  exportMaxAssetBytes,
+  isImageNotesFeatureEnabled,
+} from "./server-env.js";
 import { getR2Client, type R2ClientLike } from "./r2-client.js";
 import { buildImageAssetKey, isAllowedImageMime } from "./image-asset-path.js";
 import { rewriteVfsCanonicalLinksInMarkdown } from "./wpn-vfs-rewrite.js";
@@ -35,6 +31,8 @@ type WpnImportResult = {
   projects: number;
   notes: number;
 };
+
+type NoteRow = typeof wpnNotes.$inferSelect;
 
 function sendErr(reply: FastifyReply, status: number, msg: string) {
   return reply.status(status).send({ error: msg });
@@ -46,13 +44,17 @@ function nowMs(): number {
 
 function parseConflictPolicy(raw: unknown): WpnImportConflictPolicy {
   if (raw === "skip" || raw === "overwrite" || raw === "rename") return raw;
-  // Default matches the PLAN-06 design note: never destroy existing data.
   return "rename";
 }
 
 async function reuploadImageAsset(args: {
   r2: R2ClientLike;
-  asset: { zipPath: string; mimeType: string; sizeBytes: number; originalFilename?: string };
+  asset: {
+    zipPath: string;
+    mimeType: string;
+    sizeBytes: number;
+    originalFilename?: string;
+  };
   assetBytes: Map<string, Buffer>;
   sourceMetadata: Record<string, unknown> | null;
   orgId: string;
@@ -104,6 +106,7 @@ export async function registerWpnImportExportRoutes(
   opts: RegisterWpnImportExportRoutesOptions,
 ): Promise<void> {
   const { jwtSecret } = opts;
+  const db = (): ReturnType<typeof getDb> => getDb();
 
   await app.register(import("@fastify/multipart"), {
     limits: { fileSize: 200 * 1024 * 1024 },
@@ -121,32 +124,55 @@ export async function registerWpnImportExportRoutes(
         ? body!.workspaceIds.filter((x): x is string => typeof x === "string")
         : null;
 
-    const wsCol = getWpnWorkspacesCollection();
-    const projCol = getWpnProjectsCollection();
-    const noteCol = getWpnNotesCollection();
-
-    const wsQuery: Record<string, unknown> = { userId };
-    if (filterIds) wsQuery.id = { $in: filterIds };
-
-    const wsDocs = await wsCol.find(wsQuery).sort({ sort_index: 1, name: 1 }).toArray();
+    const wsDocs = await (filterIds
+      ? db()
+          .select()
+          .from(wpnWorkspaces)
+          .where(
+            and(
+              eq(wpnWorkspaces.userId, userId),
+              inArray(wpnWorkspaces.id, filterIds),
+            ),
+          )
+          .orderBy(asc(wpnWorkspaces.sort_index), asc(wpnWorkspaces.name))
+      : db()
+          .select()
+          .from(wpnWorkspaces)
+          .where(eq(wpnWorkspaces.userId, userId))
+          .orderBy(asc(wpnWorkspaces.sort_index), asc(wpnWorkspaces.name)));
     if (wsDocs.length === 0) {
       return sendErr(reply, 404, "No workspaces found to export");
     }
 
     const wsIds = wsDocs.map((w) => w.id);
-    const projDocs = await projCol
-      .find({ userId, workspace_id: { $in: wsIds } })
-      .sort({ sort_index: 1, name: 1 })
-      .toArray();
+    const projDocs = await db()
+      .select()
+      .from(wpnProjects)
+      .where(
+        and(
+          eq(wpnProjects.userId, userId),
+          inArray(wpnProjects.workspace_id, wsIds),
+        ),
+      )
+      .orderBy(asc(wpnProjects.sort_index), asc(wpnProjects.name));
     const projIds = projDocs.map((p) => p.id);
-    const noteDocs = await noteCol
-      .find({ userId, project_id: { $in: projIds }, deleted: { $ne: true } })
-      .toArray();
+    const noteDocs = projIds.length
+      ? await db()
+          .select()
+          .from(wpnNotes)
+          .where(
+            and(
+              eq(wpnNotes.userId, userId),
+              inArray(wpnNotes.project_id, projIds),
+              ne(wpnNotes.deleted, true),
+            ),
+          )
+      : ([] as NoteRow[]);
 
-    const notesByProject = new Map<string, WpnNoteDoc[]>();
+    const notesByProject = new Map<string, NoteRow[]>();
     for (const n of noteDocs) {
       const arr = notesByProject.get(n.project_id) ?? [];
-      arr.push(n as WpnNoteDoc);
+      arr.push(n);
       notesByProject.set(n.project_id, arr);
     }
 
@@ -168,7 +194,10 @@ export async function registerWpnImportExportRoutes(
             type: n.type,
             title: n.title,
             sibling_index: n.sibling_index,
-            metadata: n.metadata,
+            metadata:
+              n.metadata && typeof n.metadata === "object" && !Array.isArray(n.metadata)
+                ? (n.metadata as Record<string, unknown>)
+                : null,
           })),
         })),
       };
@@ -188,10 +217,6 @@ export async function registerWpnImportExportRoutes(
       throw e;
     }
 
-    // Streaming binaries requires the image-notes feature + R2 creds.
-    // When the flag is off, v2 is still emitted but every image note's
-    // metadata lacks `r2Key`, so `manifest.assets` is empty and no R2
-    // fetches are attempted.
     let r2: R2ClientLike | null = null;
     if (manifest.assets.length > 0) {
       if (!isImageNotesFeatureEnabled()) {
@@ -235,10 +260,6 @@ export async function registerWpnImportExportRoutes(
       'attachment; filename="archon-export.zip"',
     );
 
-    // Kick off the reply before we start fetching R2 bytes so clients see
-    // data immediately. Asset streaming fails closed: on any R2 error we
-    // destroy both the archive and the passthrough so the client receives
-    // a truncated download instead of a silently-incomplete ZIP.
     const response = reply.send(passthrough);
 
     void (async () => {
@@ -286,9 +307,6 @@ export async function registerWpnImportExportRoutes(
 
     let metadataJson: WpnExportMetadata | null = null;
     const noteContents = new Map<string, string>();
-    // Assets arrive at `assets/<noteId>/<filename>` (PLAN-06 slice 4b).
-    // Key the map by the full zipPath so duplicates are surfaced as later wins,
-    // matching Archiver's last-write-wins semantics on the export side.
     const assetBytes = new Map<string, Buffer>();
 
     const directory = await unzipper.Open.buffer(await file.toBuffer());
@@ -317,8 +335,6 @@ export async function registerWpnImportExportRoutes(
       );
     }
 
-    // Gather any image-asset entries up front so we can fail fast if the
-    // feature flag is off (better than silently importing broken image notes).
     const hasAssetEntries = metadataJson.workspaces.some((ws) =>
       ws.projects.some((proj) =>
         proj.notes.some((note) => (note.assets?.length ?? 0) > 0),
@@ -344,37 +360,38 @@ export async function registerWpnImportExportRoutes(
       }
     }
 
-    const wsCol = getWpnWorkspacesCollection();
-    const projCol = getWpnProjectsCollection();
-    const noteCol = getWpnNotesCollection();
-
-    // Collision scope = workspaces owned by this user in the destination space.
-    // Mirrors the stamp logic a few lines down (auth.activeSpaceId), so importing
-    // `Foo` into Space B never falsely collides with a `Foo` the user owns in
-    // Space A. Legacy workspaces (predating the space rollout, no `spaceId`
-    // field) are still included so they continue to participate in the check.
-    const wsScopeFilter = auth.activeSpaceId
-      ? {
-          userId,
-          $or: [
-            { spaceId: auth.activeSpaceId },
-            { spaceId: { $exists: false } },
-          ],
-        }
-      : { userId };
-    const existingWs = await wsCol.find(wsScopeFilter).toArray();
+    // Collision scope: caller's workspaces in the destination space (or all
+    // legacy/no-space ones) — same as Mongo path.
+    const existingWs = await (auth.activeSpaceId
+      ? db()
+          .select()
+          .from(wpnWorkspaces)
+          .where(
+            and(
+              eq(wpnWorkspaces.userId, userId),
+              or(
+                eq(wpnWorkspaces.spaceId, auth.activeSpaceId),
+                isNull(wpnWorkspaces.spaceId),
+              ),
+            ),
+          )
+      : db()
+          .select()
+          .from(wpnWorkspaces)
+          .where(eq(wpnWorkspaces.userId, userId)));
     const plan = planImportWorkspaces({
       bundle: metadataJson,
       existingWorkspaces: existingWs.map((w) => ({ id: w.id, name: w.name })),
       policy,
     });
 
-    const lastWs = await wsCol
-      .find({ userId })
-      .sort({ sort_index: -1 })
-      .limit(1)
-      .toArray();
-    let nextWsSortIndex = (lastWs[0]?.sort_index ?? -1) + 1;
+    const lastWsRows = await db()
+      .select({ s: wpnWorkspaces.sort_index })
+      .from(wpnWorkspaces)
+      .where(eq(wpnWorkspaces.userId, userId))
+      .orderBy(desc(wpnWorkspaces.sort_index))
+      .limit(1);
+    let nextWsSortIndex = (lastWsRows[0]?.s ?? -1) + 1;
 
     const t = nowMs();
     let importedWs = 0;
@@ -397,54 +414,59 @@ export async function registerWpnImportExportRoutes(
         );
         if (!existing) continue;
         targetWsId = existing.id;
-        targetOrgId = existing.orgId;
-        targetSpaceId = existing.spaceId;
+        targetOrgId = existing.orgId ?? undefined;
+        targetSpaceId = existing.spaceId ?? undefined;
       } else {
         targetWsId = randomUUID();
         targetOrgId = auth.activeOrgId;
         targetSpaceId = auth.activeSpaceId;
-        const wsDoc: WpnWorkspaceDoc = {
+        await db().insert(wpnWorkspaces).values({
           id: targetWsId,
           userId,
-          ...(targetOrgId ? { orgId: targetOrgId } : {}),
-          ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+          orgId: targetOrgId ?? null,
+          spaceId: targetSpaceId ?? null,
           name: action.chosenName,
           sort_index: nextWsSortIndex++,
-          color_token: wsEntry.color_token,
+          color_token: wsEntry.color_token ?? null,
           created_at_ms: t,
           updated_at_ms: t,
-          settings: {},
-        };
-        await wsCol.insertOne(wsDoc);
+          settings: {} as unknown,
+        });
         importedWs++;
       }
 
-      let nextProjSortIndex = action.kind === "reuse"
-        ? ((
-            await projCol
-              .find({ userId, workspace_id: targetWsId })
-              .sort({ sort_index: -1 })
-              .limit(1)
-              .toArray()
-          )[0]?.sort_index ?? -1) + 1
-        : 0;
+      let nextProjSortIndex =
+        action.kind === "reuse"
+          ? ((
+              await db()
+                .select({ s: wpnProjects.sort_index })
+                .from(wpnProjects)
+                .where(
+                  and(
+                    eq(wpnProjects.userId, userId),
+                    eq(wpnProjects.workspace_id, targetWsId),
+                  ),
+                )
+                .orderBy(desc(wpnProjects.sort_index))
+                .limit(1)
+            )[0]?.s ?? -1) + 1
+          : 0;
 
       for (const projEntry of wsEntry.projects) {
         const newProjId = randomUUID();
-        const projDoc: WpnProjectDoc = {
+        await db().insert(wpnProjects).values({
           id: newProjId,
           userId,
-          ...(targetOrgId ? { orgId: targetOrgId } : {}),
-          ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+          orgId: targetOrgId ?? null,
+          spaceId: targetSpaceId ?? null,
           workspace_id: targetWsId,
           name: projEntry.name,
           sort_index: nextProjSortIndex++,
-          color_token: projEntry.color_token,
+          color_token: projEntry.color_token ?? null,
           created_at_ms: t,
           updated_at_ms: t,
-          settings: {},
-        };
-        await projCol.insertOne(projDoc);
+          settings: {} as unknown,
+        });
         importedProj++;
 
         const idMap = new Map<string, string>();
@@ -498,27 +520,24 @@ export async function registerWpnImportExportRoutes(
             noteEntry.type === "image" &&
             (noteEntry.assets?.length ?? 0) > 0
           ) {
-            // v2 bundle but we can't re-upload (missing org/space context).
-            // Strip the old R2 keys so the note renders as "empty" not broken.
             metadata = clearImageMetadataKeys(noteEntry.metadata);
           }
 
-          const noteDoc: WpnNoteDoc = {
+          await db().insert(wpnNotes).values({
             id: newNoteId,
             userId,
-            ...(targetOrgId ? { orgId: targetOrgId } : {}),
-            ...(targetSpaceId ? { spaceId: targetSpaceId } : {}),
+            orgId: targetOrgId ?? null,
+            spaceId: targetSpaceId ?? null,
             project_id: newProjId,
             parent_id: newParentId,
             type: noteEntry.type,
             title: noteEntry.title,
             content,
-            metadata,
+            metadata: metadata as unknown,
             sibling_index: noteEntry.sibling_index,
             created_at_ms: t,
             updated_at_ms: t,
-          };
-          await noteCol.insertOne(noteDoc);
+          });
           importedNotes++;
         }
       }
