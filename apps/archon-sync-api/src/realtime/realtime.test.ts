@@ -299,6 +299,83 @@ test("AC-edge-diff — pgWpnUpdateNote emits edge.added / edge.removed when cont
   }
 });
 
+test("AC4.2 — concurrent moves: each successful op emits exactly one note.moved event", async (t) => {
+  let ctx: TestPgSchemaContext | undefined;
+  try {
+    ctx = await setupPgTestSchema();
+  } catch (err) {
+    t.skip(`Postgres not reachable: ${String(err)}`);
+    return;
+  }
+  try {
+    const userId = await factoryUser({ email: `cm-${Date.now()}@p4.test` });
+    const orgId = await factoryOrg({ ownerUserId: userId });
+    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
+    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
+    const projectId = await factoryProject({
+      userId,
+      workspaceId,
+      orgId,
+      spaceId,
+    });
+
+    const { pgWpnCreateNote, pgWpnMoveNote } = await import(
+      "../wpn-pg-writes.js"
+    );
+    // Tree shape: root  → A, B, C   (3 siblings).
+    const a = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "A",
+    });
+    const b = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "B",
+    });
+    const c = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "C",
+    });
+
+    const events: Array<{ type: string; noteId?: string }> = [];
+    const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
+      try {
+        events.push(JSON.parse(raw) as { type: string; noteId?: string });
+      } catch {
+        /* ignore */
+      }
+    });
+    try {
+      // Two concurrent moves: B becomes a child of A; C becomes a child of A.
+      const results = await Promise.allSettled([
+        pgWpnMoveNote(userId, projectId, b.id, a.id, "child"),
+        pgWpnMoveNote(userId, projectId, c.id, a.id, "child"),
+      ]);
+      // Give NOTIFY a tick to land.
+      await new Promise((r) => setTimeout(r, 250));
+      const fulfilled = results.filter((r) => r.status === "fulfilled").length;
+      // Both moves operate on different draggedIds so both should commit
+      // even under concurrent execution.
+      assert.strictEqual(fulfilled, 2);
+
+      const moves = events.filter((e) => e.type === "note.moved");
+      // Exactly one event per successful op — no duplicates, no phantom
+      // events from rolled-back txs.
+      assert.strictEqual(moves.length, 2);
+      const movedIds = new Set(moves.map((m) => m.noteId));
+      assert.ok(movedIds.has(b.id));
+      assert.ok(movedIds.has(c.id));
+    } finally {
+      await release();
+      await _resetChannelsForTests();
+    }
+  } finally {
+    await ctx.teardown();
+  }
+});
+
 // keep factories alive in tree-shaking-aware bundlers
 void factorySpace;
 void factoryWorkspace;
