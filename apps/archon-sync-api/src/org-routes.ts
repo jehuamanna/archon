@@ -270,6 +270,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.update",
       targetType: "org",
       targetId: orgId,
@@ -369,6 +370,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.delete",
       targetType: "org",
       targetId: orgId,
@@ -547,6 +549,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.invite.create",
       targetType: "org_invite",
       targetId: inviteId,
@@ -660,6 +663,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.invite.revoke",
       targetType: "org_invite",
       targetId: inviteId,
@@ -998,6 +1002,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.member.role_change",
       targetType: "org_membership",
       targetId: userId,
@@ -1086,6 +1091,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.member.remove",
       targetType: "org_membership",
       targetId: userId,
@@ -1133,6 +1139,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "org.member.create_with_password",
       targetType: "org_membership",
       targetId: userId,
@@ -1192,6 +1199,7 @@ export function registerOrgRoutes(
       await recordAudit({
         orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "org.member.password_reset",
         targetType: "org_membership",
         targetId: userId,

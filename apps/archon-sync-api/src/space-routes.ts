@@ -152,6 +152,7 @@ export function registerSpaceRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "space.create",
       targetType: "space",
       targetId: spaceId,
@@ -244,6 +245,7 @@ export function registerSpaceRoutes(
       await recordAudit({
         orgId: before.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "space.rename",
         targetType: "space",
         targetId: spaceId,
@@ -254,6 +256,7 @@ export function registerSpaceRoutes(
       await recordAudit({
         orgId: before.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: hideTransition === "hide" ? "space.hide" : "space.unhide",
         targetType: "space",
         targetId: spaceId,
@@ -306,6 +309,7 @@ export function registerSpaceRoutes(
     await recordAudit({
       orgId: ctx.space.orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "space.delete",
       targetType: "space",
       targetId: ctx.space.id,
@@ -392,6 +396,7 @@ export function registerSpaceRoutes(
     await recordAudit({
       orgId: ctx.space.orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "space.member.add",
       targetType: "space_membership",
       targetId: parsed.data.userId,

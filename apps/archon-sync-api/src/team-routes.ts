@@ -130,6 +130,7 @@ export function registerTeamRoutes(
     await recordAudit({
       orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "team.create",
       targetType: "team",
       targetId: teamId,
@@ -416,6 +417,7 @@ export function registerTeamRoutes(
     await recordAudit({
       orgId: r.team.orgId,
       actorUserId: auth.sub,
+      principal: auth.principal ?? { type: "user" },
       action: "team.grant.set",
       targetType: "team_space_grant",
       targetId: `${teamId}:${parsed.data.spaceId}`,

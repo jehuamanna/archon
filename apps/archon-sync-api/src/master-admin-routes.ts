@@ -315,6 +315,7 @@ export function registerMasterAdminRoutes(
     await recordAudit({
       orgId,
       actorUserId: ctx.auth.sub,
+      principal: ctx.auth.principal ?? { type: "user" },
       action: createdUser
         ? "master.org_admin.create_with_password"
         : "master.org_admin.promote",
@@ -363,6 +364,7 @@ export function registerMasterAdminRoutes(
       await recordAudit({
         orgId,
         actorUserId: ctx.auth.sub,
+        principal: ctx.auth.principal ?? { type: "user" },
         action: "master.org_admin.demote",
         targetType: "org_membership",
         targetId: userId,

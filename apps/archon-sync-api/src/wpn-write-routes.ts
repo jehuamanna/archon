@@ -341,6 +341,7 @@ export function registerWpnWriteRoutes(
       await recordAudit({
         orgId: ws.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "workspace.visibility.set",
         targetType: "workspace",
         targetId: id,
@@ -382,6 +383,7 @@ export function registerWpnWriteRoutes(
       await recordAudit({
         orgId: ws.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "workspace.move_to_space",
         targetType: "workspace",
         targetId: id,
@@ -497,6 +499,7 @@ export function registerWpnWriteRoutes(
       await recordAudit({
         orgId: ws.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "workspace.share.add",
         targetType: "workspace",
         targetId: id,
@@ -536,6 +539,7 @@ export function registerWpnWriteRoutes(
         await recordAudit({
           orgId: ws.orgId,
           actorUserId: auth.sub,
+          principal: auth.principal ?? { type: "user" },
           action: "workspace.share.update",
           targetType: "workspace",
           targetId: id,
@@ -571,6 +575,7 @@ export function registerWpnWriteRoutes(
         await recordAudit({
           orgId: ws.orgId,
           actorUserId: auth.sub,
+          principal: auth.principal ?? { type: "user" },
           action: "workspace.share.remove",
           targetType: "workspace",
           targetId: id,
@@ -608,6 +613,7 @@ export function registerWpnWriteRoutes(
       await recordAudit({
         orgId: ws.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "project.visibility.set",
         targetType: "project",
         targetId: id,
@@ -699,6 +705,7 @@ export function registerWpnWriteRoutes(
       await recordAudit({
         orgId: ws.orgId,
         actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
         action: "project.share.add",
         targetType: "project",
         targetId: id,
@@ -739,6 +746,7 @@ export function registerWpnWriteRoutes(
         await recordAudit({
           orgId: ws.orgId,
           actorUserId: auth.sub,
+          principal: auth.principal ?? { type: "user" },
           action: "project.share.update",
           targetType: "project",
           targetId: id,
@@ -775,6 +783,7 @@ export function registerWpnWriteRoutes(
         await recordAudit({
           orgId: ws.orgId,
           actorUserId: auth.sub,
+          principal: auth.principal ?? { type: "user" },
           action: "project.share.remove",
           targetType: "project",
           targetId: id,
