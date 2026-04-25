@@ -1,4 +1,3 @@
-import type { ObjectId } from "mongodb";
 import { z } from "zod";
 
 export type OrgRole = "admin" | "member";
@@ -7,7 +6,7 @@ export type SpaceRole = "owner" | "member" | "viewer";
 export type SpaceKind = "default" | "normal";
 
 export type SpaceDoc = {
-  _id: ObjectId;
+  _id: string;
   orgId: string;
   name: string;
   kind: SpaceKind;
@@ -19,7 +18,7 @@ export type SpaceDoc = {
 };
 
 export type SpaceMembershipDoc = {
-  _id: ObjectId;
+  _id: string;
   spaceId: string;
   userId: string;
   role: SpaceRole;
@@ -54,7 +53,7 @@ export const setActiveSpaceBody = z.object({
 // ----- Phase 3: Teams -----
 
 export type TeamDoc = {
-  _id: ObjectId;
+  _id: string;
   orgId: string;
   name: string;
   /** Free-form color identifier (e.g. "amber", "#A45A52") for chips. */
@@ -64,7 +63,7 @@ export type TeamDoc = {
 };
 
 export type TeamMembershipDoc = {
-  _id: ObjectId;
+  _id: string;
   teamId: string;
   userId: string;
   addedByUserId: string;
@@ -73,7 +72,7 @@ export type TeamMembershipDoc = {
 
 /** Grants a Team a role in a Space; merged with direct memberships at read. */
 export type TeamSpaceGrantDoc = {
-  _id: ObjectId;
+  _id: string;
   teamId: string;
   spaceId: string;
   role: SpaceRole;
@@ -110,7 +109,7 @@ export type ShareRole = "reader" | "writer";
 export const shareRoleSchema = z.enum(["reader", "writer"]);
 
 export type WorkspaceShareDoc = {
-  _id: ObjectId;
+  _id: string;
   workspaceId: string;
   userId: string;
   /** Phase 8: reader (default) grants read-only; writer grants write. Backfilled by m_007 to "reader". */
@@ -143,7 +142,7 @@ export const updateWorkspaceShareBody = z.object({
 export type ProjectVisibility = "public" | "private" | "shared";
 
 export type ProjectShareDoc = {
-  _id: ObjectId;
+  _id: string;
   projectId: string;
   userId: string;
   role: ShareRole;
@@ -169,7 +168,7 @@ export const updateProjectShareBody = z.object({
 // ----- Phase 5: Announcements -----
 
 export type SpaceAnnouncementDoc = {
-  _id: ObjectId;
+  _id: string;
   spaceId: string;
   authorUserId: string;
   title: string;
@@ -237,7 +236,7 @@ export type AuditAction =
   | "master.org_admin.demote";
 
 export type AuditEventDoc = {
-  _id: ObjectId;
+  _id: string;
   orgId: string;
   actorUserId: string;
   action: AuditAction;
@@ -248,7 +247,7 @@ export type AuditEventDoc = {
 };
 
 export type OrgDoc = {
-  _id: ObjectId;
+  _id: string;
   name: string;
   slug: string;
   ownerUserId: string;
@@ -256,7 +255,7 @@ export type OrgDoc = {
 };
 
 export type OrgMembershipDoc = {
-  _id: ObjectId;
+  _id: string;
   orgId: string;
   userId: string;
   role: OrgRole;
@@ -276,7 +275,7 @@ export type InviteSpaceGrant = {
 };
 
 export type OrgInviteDoc = {
-  _id: ObjectId;
+  _id: string;
   orgId: string;
   email: string;
   role: OrgRole;
@@ -294,7 +293,7 @@ export type OrgInviteDoc = {
 };
 
 export type MigrationDoc = {
-  _id: ObjectId;
+  _id: string;
   key: string;
   ranAt: Date;
 };
