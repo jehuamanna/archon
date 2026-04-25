@@ -781,6 +781,7 @@ export function registerOrgRoutes(
         await recordAudit({
           orgId: invite.orgId,
           actorUserId: userRow.id,
+          principal: { type: "user" },
           action: "space.member.add",
           targetType: "space_membership",
           targetId: grant.spaceId,
@@ -796,6 +797,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId: invite.orgId,
       actorUserId: userRow.id,
+      principal: { type: "user" },
       action: "org.invite.accept",
       targetType: "org_invite",
       targetId: invite.id,
@@ -898,6 +900,7 @@ export function registerOrgRoutes(
     await recordAudit({
       orgId: invite.orgId,
       actorUserId: invite.invitedByUserId,
+      principal: { type: "user" },
       action: "org.invite.decline",
       targetType: "org_invite",
       targetId: invite.id,
