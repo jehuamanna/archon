@@ -234,12 +234,14 @@ test(
       assert.strictEqual(deleteDefault.statusCode, 400);
 
       // ----- Engineering still has a workspace, so admin's delete attempt is refused.
+      // The route returns 409 (Conflict) for "space still has workspaces" — see
+      // space-routes.ts: `Space still has workspaces; move or delete them first`.
       const tryDeleteEng = await app.inject({
         method: "DELETE",
         url: `${ARCHON_SYNC_API_V1_PREFIX}/spaces/${newSpaceJson.spaceId}`,
         headers: adminAuth,
       });
-      assert.strictEqual(tryDeleteEng.statusCode, 400);
+      assert.strictEqual(tryDeleteEng.statusCode, 409);
 
       // ----- Legacy /wpn/workspaces still works for the admin.
       const legacy = await app.inject({

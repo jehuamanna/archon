@@ -177,13 +177,17 @@ test(
       assert.strictEqual(regrant.statusCode, 204);
 
       // Invitee can now PATCH the space (owner-only) via team-mediated owner role.
+      // The route returns 200 with the updated space body (REST convention),
+      // not 204 No Content.
       const renameAttempt = await app.inject({
         method: "PATCH",
         url: `${ARCHON_SYNC_API_V1_PREFIX}/spaces/${engJson.spaceId}`,
         headers: { ...inviteeAuth, "content-type": "application/json" },
         payload: JSON.stringify({ name: "Engineering Renamed" }),
       });
-      assert.strictEqual(renameAttempt.statusCode, 204, renameAttempt.body);
+      assert.strictEqual(renameAttempt.statusCode, 200, renameAttempt.body);
+      const renameBody = JSON.parse(renameAttempt.body) as { name: string };
+      assert.strictEqual(renameBody.name, "Engineering Renamed");
 
       // ----- Cross-org grant is rejected.
       const otherEmail = `other-${Date.now()}@p3.test`;

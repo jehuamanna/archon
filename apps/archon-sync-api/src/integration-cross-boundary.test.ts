@@ -152,16 +152,16 @@ test(
       });
       assert.strictEqual(dupSelf.statusCode, 201, dupSelf.body);
       const dupSelfJson = JSON.parse(dupSelf.body) as {
-        projectId: string;
+        project_id: string;
         name: string;
       };
-      assert.notStrictEqual(dupSelfJson.projectId, projId);
+      assert.notStrictEqual(dupSelfJson.project_id, projId);
       assert.strictEqual(dupSelfJson.name, "Proj Copy");
       // Two fresh notes in the new project, with preserved parent linkage.
       const dupNotes = await getDb()
         .select()
         .from(wpnNotes)
-        .where(eq(wpnNotes.project_id, dupSelfJson.projectId));
+        .where(eq(wpnNotes.project_id, dupSelfJson.project_id));
       assert.strictEqual(dupNotes.length, 2);
       const dupRoot = dupNotes.find((n) => n.parent_id === null);
       assert.ok(dupRoot, "duplicated root present");
@@ -178,12 +178,12 @@ test(
         payload: JSON.stringify({ targetWorkspaceId: wsDst }),
       });
       assert.strictEqual(dupDst.statusCode, 201, dupDst.body);
-      const dupDstJson = JSON.parse(dupDst.body) as { projectId: string };
+      const dupDstJson = JSON.parse(dupDst.body) as { project_id: string };
       const dupDstProj = (
         await getDb()
           .select()
           .from(wpnProjects)
-          .where(eq(wpnProjects.id, dupDstJson.projectId))
+          .where(eq(wpnProjects.id, dupDstJson.project_id))
           .limit(1)
       )[0];
       assert.ok(dupDstProj);
@@ -306,24 +306,24 @@ test(
       });
       assert.strictEqual(dupRes.statusCode, 201, dupRes.body);
       const dupJson = JSON.parse(dupRes.body) as {
-        workspaceId: string;
+        workspace_id: string;
         name: string;
-        projects: { projectId: string; name: string; sourceProjectId: string }[];
+        projects: { project_id: string; name: string; sourceProjectId: string }[];
       };
-      assert.notStrictEqual(dupJson.workspaceId, wsId);
+      assert.notStrictEqual(dupJson.workspace_id, wsId);
       assert.strictEqual(dupJson.name, "Root WS Copy");
       assert.strictEqual(dupJson.projects.length, 2);
 
       // Every project id is new; every note id is new; note counts match.
       const srcProjIds = new Set([p1, p2]);
-      const newProjIds = dupJson.projects.map((p) => p.projectId);
+      const newProjIds = dupJson.projects.map((p) => p.project_id);
       for (const pid of newProjIds) {
         assert.ok(!srcProjIds.has(pid), "new project ids distinct");
       }
       const newWsProjects = await getDb()
         .select()
         .from(wpnProjects)
-        .where(eq(wpnProjects.workspace_id, dupJson.workspaceId));
+        .where(eq(wpnProjects.workspace_id, dupJson.workspace_id));
       assert.strictEqual(newWsProjects.length, 2);
       const { inArray } = await import("drizzle-orm");
       const newNotes = await getDb()
@@ -345,7 +345,7 @@ test(
         await getDb()
           .select()
           .from(wpnWorkspaces)
-          .where(eq(wpnWorkspaces.id, dupJson.workspaceId))
+          .where(eq(wpnWorkspaces.id, dupJson.workspace_id))
           .limit(1)
       )[0];
       assert.ok(newWsDoc);
