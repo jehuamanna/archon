@@ -9,6 +9,7 @@ import {
   requireImageNotesEnv,
   requireJwtSecret,
 } from "./server-env.js";
+import { getYjsAdapter } from "./realtime/yjs-ws.js";
 
 const port = Number(envString("PORT", "4010")) || 4010;
 const host = envString("HOST", "0.0.0.0");
@@ -39,7 +40,35 @@ try {
   process.exit(1);
 }
 
+// Compaction loop for the per-note Yjs update log. `setInterval(...).unref()`
+// so the timer doesn't keep the process alive on shutdown. Defaults: every
+// 5 minutes, keep the most recent 200 update rows per note. Compaction also
+// skips notes with active edits in the past 10 minutes (`sinceMinutes: 10`)
+// so we don't fight a live editing session.
+const compactInterval = Number(
+  process.env.ARCHON_YJS_COMPACT_INTERVAL_MS ?? 5 * 60_000,
+);
+const compactKeep = Number(process.env.ARCHON_YJS_COMPACT_KEEP ?? 200);
+const yjsAdapter = getYjsAdapter();
+const compactTimer = setInterval(() => {
+  void (async () => {
+    try {
+      const result = await yjsAdapter.compactUpdates({
+        keepCount: compactKeep,
+        sinceMinutes: 10,
+      });
+      if (result.notesCompacted > 0) {
+        app.log.info({ result }, "yjs compaction");
+      }
+    } catch (err) {
+      app.log.warn({ err }, "yjs compaction failed");
+    }
+  })();
+}, compactInterval);
+compactTimer.unref();
+
 const close = async (): Promise<void> => {
+  clearInterval(compactTimer);
   await app.close();
   await disconnectPg();
 };
