@@ -1,18 +1,13 @@
 import "./load-root-env.js";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import { test } from "node:test";
 import type { FastifyInstance } from "fastify";
+import { eq } from "drizzle-orm";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import {
-  closeMongo,
-  connectMongo,
-  getWpnNotesCollection,
-  getWpnProjectsCollection,
-  getWpnWorkspacesCollection,
-} from "./db.js";
-import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
+import { getDb } from "./pg.js";
+import { wpnNotes, wpnProjects, wpnWorkspaces } from "./db/schema.js";
+import { setupPgTestSchema, type TestPgSchemaContext } from "./test-pg-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
@@ -110,13 +105,12 @@ test(
   "Cross-boundary: project duplicate + move within same space, cross-space refused on PATCH",
   { timeout: 30_000 },
   async (t) => {
-    const dbName = `archon_sync_xb_proj_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -164,9 +158,10 @@ test(
       assert.notStrictEqual(dupSelfJson.projectId, projId);
       assert.strictEqual(dupSelfJson.name, "Proj Copy");
       // Two fresh notes in the new project, with preserved parent linkage.
-      const dupNotes = await getWpnNotesCollection()
-        .find({ project_id: dupSelfJson.projectId })
-        .toArray();
+      const dupNotes = await getDb()
+        .select()
+        .from(wpnNotes)
+        .where(eq(wpnNotes.project_id, dupSelfJson.projectId));
       assert.strictEqual(dupNotes.length, 2);
       const dupRoot = dupNotes.find((n) => n.parent_id === null);
       assert.ok(dupRoot, "duplicated root present");
@@ -184,9 +179,13 @@ test(
       });
       assert.strictEqual(dupDst.statusCode, 201, dupDst.body);
       const dupDstJson = JSON.parse(dupDst.body) as { projectId: string };
-      const dupDstProj = await getWpnProjectsCollection().findOne({
-        id: dupDstJson.projectId,
-      });
+      const dupDstProj = (
+        await getDb()
+          .select()
+          .from(wpnProjects)
+          .where(eq(wpnProjects.id, dupDstJson.projectId))
+          .limit(1)
+      )[0];
       assert.ok(dupDstProj);
       assert.strictEqual(dupDstProj.workspace_id, wsDst);
 
@@ -198,7 +197,13 @@ test(
         payload: JSON.stringify({ workspace_id: wsDst }),
       });
       assert.strictEqual(moveProj.statusCode, 200, moveProj.body);
-      const movedProj = await getWpnProjectsCollection().findOne({ id: projId });
+      const movedProj = (
+        await getDb()
+          .select()
+          .from(wpnProjects)
+          .where(eq(wpnProjects.id, projId))
+          .limit(1)
+      )[0];
       assert.ok(movedProj);
       assert.strictEqual(movedProj.workspace_id, wsDst);
 
@@ -258,12 +263,7 @@ test(
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );
@@ -272,13 +272,12 @@ test(
   "Cross-boundary: duplicate workspace copies every project + note with fresh ids",
   { timeout: 30_000 },
   async (t) => {
-    const dbName = `archon_sync_xb_ws_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -321,38 +320,41 @@ test(
       for (const pid of newProjIds) {
         assert.ok(!srcProjIds.has(pid), "new project ids distinct");
       }
-      const newWsProjects = await getWpnProjectsCollection()
-        .find({ workspace_id: dupJson.workspaceId })
-        .toArray();
+      const newWsProjects = await getDb()
+        .select()
+        .from(wpnProjects)
+        .where(eq(wpnProjects.workspace_id, dupJson.workspaceId));
       assert.strictEqual(newWsProjects.length, 2);
-      const newNotes = await getWpnNotesCollection()
-        .find({ project_id: { $in: newProjIds } })
-        .toArray();
+      const { inArray } = await import("drizzle-orm");
+      const newNotes = await getDb()
+        .select()
+        .from(wpnNotes)
+        .where(inArray(wpnNotes.project_id, newProjIds));
       assert.strictEqual(newNotes.length, 3);
-      const origNotes = await getWpnNotesCollection()
-        .find({ project_id: { $in: [p1, p2] } })
-        .toArray();
+      const origNotes = await getDb()
+        .select()
+        .from(wpnNotes)
+        .where(inArray(wpnNotes.project_id, [p1, p2]));
       const origNoteIds = new Set(origNotes.map((n) => n.id));
       for (const n of newNotes) {
         assert.ok(!origNoteIds.has(n.id), "duplicated note id must be fresh");
       }
 
       // Workspace row carries a new id + creatorUserId = caller.
-      const newWsDoc = await getWpnWorkspacesCollection().findOne({
-        id: dupJson.workspaceId,
-      });
+      const newWsDoc = (
+        await getDb()
+          .select()
+          .from(wpnWorkspaces)
+          .where(eq(wpnWorkspaces.id, dupJson.workspaceId))
+          .limit(1)
+      )[0];
       assert.ok(newWsDoc);
       assert.strictEqual(newWsDoc.creatorUserId, admin.userId);
     } finally {
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );

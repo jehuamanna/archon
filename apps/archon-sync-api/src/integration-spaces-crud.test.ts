@@ -1,16 +1,13 @@
 import "./load-root-env.js";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import { test } from "node:test";
 import type { FastifyInstance } from "fastify";
+import { and, asc, eq } from "drizzle-orm";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import {
-  closeMongo,
-  connectMongo,
-  getAuditEventsCollection,
-} from "./db.js";
-import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
+import { getDb } from "./pg.js";
+import { auditEvents } from "./db/schema.js";
+import { setupPgTestSchema, type TestPgSchemaContext } from "./test-pg-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
@@ -55,13 +52,12 @@ test(
   "Admin Spaces CRUD: rename + hide + includeHidden + audit rows",
   { timeout: 30_000 },
   async (t) => {
-    const dbName = `archon_sync_spaces_crud_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -244,10 +240,16 @@ test(
       assert.strictEqual(del.statusCode, 204, del.body);
 
       // ----- Audit rows — verify every expected action landed.
-      const auditRows = await getAuditEventsCollection()
-        .find({ orgId: admin.defaultOrgId, targetId: engId })
-        .sort({ ts: 1 })
-        .toArray();
+      const auditRows = await getDb()
+        .select()
+        .from(auditEvents)
+        .where(
+          and(
+            eq(auditEvents.orgId, admin.defaultOrgId),
+            eq(auditEvents.targetId, engId),
+          ),
+        )
+        .orderBy(asc(auditEvents.ts));
       const actions = auditRows.map((r) => r.action);
       assert.ok(
         actions.includes("space.create"),
@@ -281,12 +283,7 @@ test(
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );

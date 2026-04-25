@@ -3,12 +3,11 @@ process.env.ARCHON_FEATURE_IMAGE_NOTES = "1";
 
 import "./load-root-env.js";
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import { closeMongo, connectMongo } from "./db.js";
 import {
   _resetRateBucketsForTesting,
 } from "./me-assets-routes.js";
@@ -16,7 +15,7 @@ import {
   _setR2ClientForTesting,
   type R2ClientLike,
 } from "./r2-client.js";
-import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
+import { setupPgTestSchema, type TestPgSchemaContext } from "./test-pg-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
@@ -59,7 +58,7 @@ function multipartBody(parts: {
   mimeType: string;
   fileBytes: Buffer;
 }): { body: Buffer; contentType: string } {
-  const boundary = `----archon-test-${randomBytes(8).toString("hex")}`;
+  const boundary = `----archon-test-${randomUUID().slice(0, 16)}`;
   const CRLF = "\r\n";
   const chunks: Buffer[] = [];
   const field = (name: string, value: string) => {
@@ -152,16 +151,16 @@ test(
   "Plan 01: image-notes upload + sign + ACL + rejection paths",
   { timeout: 30_000 },
   async (t) => {
-    const dbName = `archon_sync_assets_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
+    let ctx: TestPgSchemaContext | undefined;
     const { client: fakeR2, uploads } = makeFakeR2();
     _setR2ClientForTesting(fakeR2);
     _resetRateBucketsForTesting();
 
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       _setR2ClientForTesting(null);
       return;
     }
@@ -311,8 +310,7 @@ test(
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      await closeMongo();
+      await ctx?.teardown();
     }
   },
 );

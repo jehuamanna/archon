@@ -89,24 +89,57 @@ export interface TestPgSchemaContext {
   teardown: () => Promise<void>;
 }
 
+// The current test schema. Read by the (single) pool `connect` handler so
+// every newly-acquired connection lands on the active test's schema. Tests
+// run serially within a Node-test-runner file, so this is safe.
+let _currentTestSchema: string | null = null;
+let _connectHookInstalled = false;
+
+function ensureConnectHook(): void {
+  if (_connectHookInstalled) return;
+  const pool = getPool();
+  pool.on("connect", (client) => {
+    if (_currentTestSchema) {
+      void client.query(
+        `SET search_path TO "${_currentTestSchema.replace(/"/g, '""')}", public`,
+      );
+    }
+  });
+  _connectHookInstalled = true;
+}
+
 /**
  * Set up a fresh per-test schema. Caller is responsible for calling
  * `teardown()` (recommended via `t.after(() => ctx.teardown())`).
  */
 export async function setupPgTestSchema(): Promise<TestPgSchemaContext> {
   await ensurePgConnected();
-  const schemaName = `test_${randomUUID().slice(0, 8)}`;
+  ensureConnectHook();
 
+  const schemaName = `test_${randomUUID().slice(0, 8)}`;
   const db = getDb();
   await db.execute(sql.raw(`CREATE SCHEMA "${schemaName}"`));
+  _currentTestSchema = schemaName;
 
-  // Pin the pool's default search_path so every connection acquired afterward
-  // sees this schema first. Pools are per-process; this is best-effort and we
-  // also re-set on `setSearchPath()` for hot paths that need certainty.
+  // Reset every existing pooled connection's search_path. The connect hook
+  // covers freshly-opened connections; existing idle ones keep whatever path
+  // they last had until used. Closing all idle clients via end+re-open isn't
+  // available, so we set the default at the database level for the duration.
   const pool = getPool();
-  pool.on("connect", (client) => {
-    void client.query(`SET search_path TO "${schemaName}"`);
-  });
+  // Set the path on every currently-pooled connection by acquiring + setting.
+  // The pool's pg.Pool exposes `totalCount` but no iterator; instead we drain
+  // by acquiring up to `totalCount` clients sequentially, setting on each.
+  const drained: import("pg").PoolClient[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const totalCount = (pool as any).totalCount ?? 0;
+  for (let i = 0; i < totalCount; i++) {
+    const client = await pool.connect();
+    drained.push(client);
+    await client.query(
+      `SET search_path TO "${schemaName.replace(/"/g, '""')}", public`,
+    );
+  }
+  for (const c of drained) c.release();
 
   await applyBaseline(schemaName);
 
@@ -115,7 +148,9 @@ export async function setupPgTestSchema(): Promise<TestPgSchemaContext> {
     setSearchPath: async () => {
       const client = await pool.connect();
       try {
-        await client.query(`SET search_path TO "${schemaName}"`);
+        await client.query(
+          `SET search_path TO "${schemaName.replace(/"/g, '""')}", public`,
+        );
       } finally {
         client.release();
       }
@@ -128,6 +163,7 @@ export async function setupPgTestSchema(): Promise<TestPgSchemaContext> {
       } catch {
         /* schema may already be gone */
       }
+      if (_currentTestSchema === schemaName) _currentTestSchema = null;
     },
   };
 }
