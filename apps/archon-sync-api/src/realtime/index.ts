@@ -10,3 +10,6 @@ export {
 } from "./listen-pool.js";
 export { registerYjsWsRoutes, getYjsAdapter } from "./yjs-ws.js";
 export { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";
+export { registerRealtimeDiagnosticsRoute } from "./diagnostics.js";
+export { notifyRealtime, clientOpStore } from "./notify.js";
+export { channelForSpace, type RealtimeEvent } from "./events.js";

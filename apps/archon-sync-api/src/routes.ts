@@ -38,6 +38,7 @@ import {
   registerRealtimeRoutes,
   registerSpaceWsRoutes,
   registerYjsWsRoutes,
+  registerRealtimeDiagnosticsRoute,
 } from "./realtime/index.js";
 import { maybePromoteMasterAdmin } from "./admin-auth.js";
 import {
@@ -142,6 +143,7 @@ export function registerRoutes(
   registerRealtimeRoutes(app, { jwtSecret });
   registerSpaceWsRoutes(app, { jwtSecret });
   registerYjsWsRoutes(app, { jwtSecret });
+  registerRealtimeDiagnosticsRoute(app, { jwtSecret });
   app.register(
     async (scoped) => registerWpnImportExportRoutes(scoped, { jwtSecret }),
   );
