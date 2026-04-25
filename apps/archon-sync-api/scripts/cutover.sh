@@ -27,7 +27,7 @@
 
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../.. && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")"/../../.. && pwd)"
 SYNC_API_DIR="$ROOT/apps/archon-sync-api"
 DEFAULT_DUMP="$ROOT/mongodump-pre-cutover-20260425-162501/nodex_sync"
 

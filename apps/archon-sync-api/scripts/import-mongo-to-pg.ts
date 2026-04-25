@@ -356,7 +356,12 @@ const COLLECTIONS: CollectionMap[] = [
       id: newId!,
       userId: t("users", asString(d.userId) ?? ""),
       type: asString(d.type) ?? "",
-      payload: (d.payload ?? null) as Record<string, unknown> | null,
+      // payload is NOT NULL in the schema; coerce missing to {} to import
+      // legacy rows that predate the field.
+      payload:
+        (d.payload && typeof d.payload === "object"
+          ? (d.payload as Record<string, unknown>)
+          : {}) as Record<string, unknown>,
       link: asString(d.link) ?? "",
       status: asString(d.status) ?? "unread",
       createdAt: mapDate(d.createdAt) ?? new Date(0),
@@ -495,24 +500,28 @@ const COLLECTIONS: CollectionMap[] = [
     collection: "mdx_state_head",
     table: schema.mdxStateHead,
     keyMode: "skip",
-    toRow: (d) => ({
-      projectId: asString(d.projectId) ?? "",
-      key: asString(d.key) ?? "",
-      mode: asString(d.mode) ?? "inline",
-      value: d.value ?? null,
-      totalChunks: asNumber(d.totalChunks),
-      totalBytes: asNumber(d.totalBytes) ?? 0,
-      version: asNumber(d.version) ?? 0,
-      updatedAt: mapDate(d.updatedAt) ?? new Date(0),
-      updatedByUserId:
+    fks: {},
+    toRow: (d, t) => {
+      const updatedBy =
         d.updatedBy && typeof d.updatedBy === "object"
-          ? asString((d.updatedBy as Record<string, unknown>).userId) ?? ""
-          : "",
-      updatedByEmail:
-        d.updatedBy && typeof d.updatedBy === "object"
-          ? asString((d.updatedBy as Record<string, unknown>).email) ?? ""
-          : "",
-    }),
+          ? (d.updatedBy as Record<string, unknown>)
+          : null;
+      const legacyUserId = updatedBy ? asString(updatedBy.userId) : null;
+      return {
+        projectId: asString(d.projectId) ?? "",
+        key: asString(d.key) ?? "",
+        mode: asString(d.mode) ?? "inline",
+        value: d.value ?? null,
+        totalChunks: asNumber(d.totalChunks),
+        totalBytes: asNumber(d.totalBytes) ?? 0,
+        version: asNumber(d.version) ?? 0,
+        updatedAt: mapDate(d.updatedAt) ?? new Date(0),
+        // updatedByUserId in the Mongo doc is the user's ObjectId hex —
+        // translate to the new uuid like every other FK.
+        updatedByUserId: legacyUserId ? t("users", legacyUserId) : "",
+        updatedByEmail: updatedBy ? asString(updatedBy.email) ?? "" : "",
+      };
+    },
   },
   // Skipped collections — _migrations retires under drizzle ownership;
   // notes (legacy) has 0 rows in the dump; mdx_state_chunks/cursors are
@@ -652,6 +661,81 @@ export async function runImporter(
         .onConflictDoNothing();
     }
     log(`[importer]   minted ${mintRows.length} uuid for ${cfg.collection}`);
+  }
+
+  // Pass 1.5 — synthesize placeholder users for orphan references.
+  // The dump may carry dangling references to users that were deleted before
+  // cutover (rare but real: 9 rows in the production dump pointed at a
+  // missing user). Preserving those rows requires the FK to resolve, so we
+  // mint a placeholder user per orphan and add it to legacy_object_id_map +
+  // insert a minimal users row.
+  log("[importer] Pass 1.5 — orphan placeholder synthesis…");
+  const userOrphans = new Set<string>();
+  for (const cfg of COLLECTIONS) {
+    if (!cfg.fks) continue;
+    const userFkColumns = Object.entries(cfg.fks)
+      .filter(([, scope]) => scope === "users")
+      .map(([col]) => col);
+    if (userFkColumns.length === 0) continue;
+    const file = path.join(dumpDir, `${cfg.collection}.bson`);
+    let docs: Record<string, unknown>[] = [];
+    try {
+      docs = await readBsonDocs(file);
+    } catch {
+      continue;
+    }
+    for (const d of docs) {
+      for (const col of userFkColumns) {
+        const refs: unknown[] = [];
+        // Some FKs are nested (mdx_state_head.updatedBy.userId).
+        if (col === "userId" || col === "updated_by_user_id" || col === "created_by_user_id") {
+          refs.push(d[col]);
+        } else {
+          refs.push(d[col]);
+        }
+        for (const v of refs) {
+          const hex = asString(v);
+          if (!hex || !/^[0-9a-f]{24}$/.test(hex)) continue;
+          if (idMap.has(mapKey("users", hex))) continue;
+          userOrphans.add(hex);
+        }
+      }
+    }
+    // Special case: mdx_state_head.updatedBy.userId is nested.
+    if (cfg.collection === "mdx_state_head") {
+      for (const d of docs) {
+        const updatedBy =
+          d.updatedBy && typeof d.updatedBy === "object"
+            ? (d.updatedBy as Record<string, unknown>)
+            : null;
+        if (!updatedBy) continue;
+        const hex = asString(updatedBy.userId);
+        if (!hex || !/^[0-9a-f]{24}$/.test(hex)) continue;
+        if (idMap.has(mapKey("users", hex))) continue;
+        userOrphans.add(hex);
+      }
+    }
+  }
+  if (userOrphans.size > 0) {
+    log(`[importer]   synthesizing ${userOrphans.size} placeholder user(s)`);
+    const mintRows: { scope: string; legacyId: string; newId: string }[] = [];
+    const userInsertRows: { id: string; email: string; passwordHash: string }[] = [];
+    for (const hex of userOrphans) {
+      const newId = randomUUID();
+      idMap.set(mapKey("users", hex), newId);
+      mintRows.push({ scope: "users", legacyId: hex, newId });
+      userInsertRows.push({
+        id: newId,
+        email: `deleted-user-${hex}@archon.deleted`,
+        passwordHash: "$2a$10$placeholder-for-deleted-user-............",
+      });
+    }
+    await db.insert(schema.legacyObjectIdMap).values(mintRows).onConflictDoNothing();
+    await db.insert(schema.users).values(userInsertRows).onConflictDoNothing();
+    sourceCounts.set(
+      "users",
+      (sourceCounts.get("users") ?? 0) + userOrphans.size,
+    );
   }
 
   // Pass 2: translated insert per collection.
