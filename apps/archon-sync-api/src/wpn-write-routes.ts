@@ -77,6 +77,21 @@ import {
 } from "./wpn-pg-writes.js";
 import type { NoteMovePlacement } from "./wpn-tree.js";
 import { isUuid } from "./db/legacy-id-map.js";
+import { clientOpStore } from "./realtime/notify.js";
+
+/**
+ * Read the client-op id header and run `fn` inside an AsyncLocalStorage
+ * context so any downstream `notifyRealtime` call picks it up without
+ * threading the id through helper signatures.
+ */
+function withClientOp<T>(
+  request: import("fastify").FastifyRequest,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const raw = request.headers["x-archon-client-op-id"];
+  const clientOpId = Array.isArray(raw) ? raw[0] : raw;
+  return clientOpStore.run({ clientOpId }, fn);
+}
 
 function sendWpnError(reply: FastifyReply, e: unknown, fallbackStatus = 503) {
   const msg = e instanceof Error ? e.message : String(e);
@@ -1051,7 +1066,7 @@ export function registerWpnWriteRoutes(
     const anchorId =
       typeof body.anchorId === "string" ? body.anchorId : undefined;
     try {
-      const created = await pgWpnCreateNote(
+      const created = await withClientOp(request, () => pgWpnCreateNote(
         ws.userId,
         projectId,
         {
@@ -1068,7 +1083,7 @@ export function registerWpnWriteRoutes(
               : undefined,
         },
         { editorUserId: auth.sub },
-      );
+      ));
       return reply.status(201).send(created);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1275,9 +1290,9 @@ export function registerWpnWriteRoutes(
         }
       }
 
-      const note = await pgWpnUpdateNote(ownerId, id, patch, {
+      const note = await withClientOp(request, () => pgWpnUpdateNote(ownerId, id, patch, {
         editorUserId: auth.sub,
-      });
+      }));
       if (!note) {
         return reply.status(404).send({ error: "Note not found" });
       }
@@ -1351,7 +1366,7 @@ export function registerWpnWriteRoutes(
       byOwner.set(ownerId, arr);
     }
     for (const [ownerId, group] of byOwner) {
-      await pgWpnDeleteNotes(ownerId, group);
+      await withClientOp(request, () => pgWpnDeleteNotes(ownerId, group));
     }
     return reply.send({ ok: true as const });
   });
@@ -1374,13 +1389,13 @@ export function registerWpnWriteRoutes(
     if (!writeResult) return;
     const { workspace: ws } = writeResult;
     try {
-      await pgWpnMoveNote(
+      await withClientOp(request, () => pgWpnMoveNote(
         ws.userId,
         projectId,
         draggedId,
         targetId,
         p as NoteMovePlacement,
-      );
+      ));
       return reply.send({ ok: true as const });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -1429,12 +1444,12 @@ export function registerWpnWriteRoutes(
         .send({ error: "Cross-owner moves are not supported" });
     }
     try {
-      await pgWpnMoveNoteToProject(
+      await withClientOp(request, () => pgWpnMoveNoteToProject(
         srcWs.userId,
         noteId,
         targetProjectId,
         targetParentId,
-      );
+      ));
       return reply.send({ ok: true as const });
     } catch (e) {
       return sendWpnError(reply, e, 400);
