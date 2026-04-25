@@ -119,7 +119,20 @@ const executeNoteInput = z.object({
     .describe("Optional project name or UUID to narrow results before fetch."),
 });
 
-const listWpnOverride = {
+const listWpnInput = z.object({
+  scope: z
+    .enum(["workspaces", "projects", "notes", "full_tree"])
+    .describe(
+      "workspaces: list all workspaces. projects: list projects in a workspace (requires workspaceId). notes: flat note tree of a project (requires projectId). full_tree: all workspaces, projects, and notes in one payload.",
+    ),
+  workspaceId: z
+    .string()
+    .optional()
+    .describe("Required when scope=projects. Workspace UUID."),
+  projectId: z
+    .string()
+    .optional()
+    .describe("Required when scope=notes. Project UUID."),
   orgId: z
     .string()
     .optional()
@@ -130,22 +143,23 @@ const listWpnOverride = {
     .string()
     .optional()
     .describe("Optional: override active space for this single call."),
-};
+});
 
-const listWpnInput = z.discriminatedUnion("scope", [
-  z.object({ scope: z.literal("workspaces"), ...listWpnOverride }),
-  z.object({
-    scope: z.literal("projects"),
-    workspaceId: z.string().describe("Workspace id from scope=workspaces"),
-    ...listWpnOverride,
-  }),
-  z.object({
-    scope: z.literal("notes"),
-    projectId: z.string().describe("Project id from scope=projects"),
-    ...listWpnOverride,
-  }),
-  z.object({ scope: z.literal("full_tree"), ...listWpnOverride }),
-]);
+function validateListWpnArgs(
+  args: z.infer<typeof listWpnInput>,
+): { ok: true } | { ok: false; error: string } {
+  if (args.scope === "projects") {
+    if (!args.workspaceId || !args.workspaceId.trim()) {
+      return { ok: false, error: "scope=projects requires workspaceId." };
+    }
+  }
+  if (args.scope === "notes") {
+    if (!args.projectId || !args.projectId.trim()) {
+      return { ok: false, error: "scope=notes requires projectId." };
+    }
+  }
+  return { ok: true };
+}
 
 const setActiveOrgInput = z.object({
   orgId: z.string().min(1).describe("Target organization UUID (from archon_list_orgs)."),
@@ -166,99 +180,114 @@ const writeBackChildInput = z.object({
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 
-const createChildNoteInput = z
-  .object({
-    parentNoteId: z
-      .string()
-      .optional()
-      .describe("Parent note UUID. When set, workspace/project/path fields are ignored."),
-    workspaceName: z
-      .string()
-      .optional()
-      .describe("With projectName + parentPathTitles, names the workspace (trim, case-insensitive)."),
-    projectName: z.string().optional().describe("Project name (trim, case-insensitive)."),
-    parentPathTitles: z
-      .array(z.string())
-      .optional()
-      .describe("Titles from a project root note down to the parent; each step is among direct children."),
-    parentWpnPath: z
-      .string()
-      .optional()
-      .describe('Convenience: "Workspace / Project / Title1 / …" split on ` / ` (space-slash-space).'),
-    title: z.string().describe("Title for the new child note."),
-    content: z.string().describe("Body for the new child note."),
-    type: z.string().optional().describe("Note type; defaults to markdown when omitted."),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  })
-  .superRefine((data, ctx) => {
-    const idTrim = data.parentNoteId?.trim() ?? "";
-    const hasId = idTrim.length > 0;
-    const pathTrim = data.parentWpnPath?.trim() ?? "";
-    const hasWpnPath = pathTrim.length > 0;
-    const ws = data.workspaceName?.trim() ?? "";
-    const proj = data.projectName?.trim() ?? "";
-    const titles = data.parentPathTitles;
-    const hasStruct =
-      ws.length > 0 && proj.length > 0 && Array.isArray(titles) && titles.length > 0;
+const createChildNoteInput = z.object({
+  parentNoteId: z
+    .string()
+    .optional()
+    .describe("Parent note UUID. When set, workspace/project/path fields are ignored."),
+  workspaceName: z
+    .string()
+    .optional()
+    .describe("With projectName + parentPathTitles, names the workspace (trim, case-insensitive)."),
+  projectName: z.string().optional().describe("Project name (trim, case-insensitive)."),
+  parentPathTitles: z
+    .array(z.string())
+    .optional()
+    .describe("Titles from a project root note down to the parent; each step is among direct children."),
+  parentWpnPath: z
+    .string()
+    .optional()
+    .describe('Convenience: "Workspace / Project / Title1 / …" split on ` / ` (space-slash-space).'),
+  title: z.string().describe("Title for the new child note."),
+  content: z.string().describe("Body for the new child note."),
+  type: z.string().optional().describe("Note type; defaults to markdown when omitted."),
+  metadata: z.record(z.string(), z.unknown()).optional(),
+});
 
-    const modes = (hasId ? 1 : 0) + (hasWpnPath ? 1 : 0) + (hasStruct ? 1 : 0);
-    if (modes !== 1) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "Provide exactly one parent selector: parentNoteId, OR parentWpnPath, OR workspaceName + projectName + parentPathTitles (non-empty array).",
-      });
-      return;
-    }
-    if (hasStruct && titles) {
-      for (let i = 0; i < titles.length; i++) {
-        if (typeof titles[i] !== "string" || titles[i]!.trim() === "") {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            message: `parentPathTitles[${i}] must be a non-empty string.`,
-          });
-          return;
-        }
+function validateCreateChildNoteParent(
+  data: z.infer<typeof createChildNoteInput>,
+): { ok: true } | { ok: false; error: string } {
+  const idTrim = data.parentNoteId?.trim() ?? "";
+  const hasId = idTrim.length > 0;
+  const pathTrim = data.parentWpnPath?.trim() ?? "";
+  const hasWpnPath = pathTrim.length > 0;
+  const ws = data.workspaceName?.trim() ?? "";
+  const proj = data.projectName?.trim() ?? "";
+  const titles = data.parentPathTitles;
+  const hasStruct =
+    ws.length > 0 && proj.length > 0 && Array.isArray(titles) && titles.length > 0;
+
+  const modes = (hasId ? 1 : 0) + (hasWpnPath ? 1 : 0) + (hasStruct ? 1 : 0);
+  if (modes !== 1) {
+    return {
+      ok: false,
+      error:
+        "Provide exactly one parent selector: parentNoteId, OR parentWpnPath, OR workspaceName + projectName + parentPathTitles (non-empty array).",
+    };
+  }
+  if (hasStruct && titles) {
+    for (let i = 0; i < titles.length; i++) {
+      if (typeof titles[i] !== "string" || titles[i]!.trim() === "") {
+        return { ok: false, error: `parentPathTitles[${i}] must be a non-empty string.` };
       }
     }
-  });
+  }
+  return { ok: true };
+}
 
-const writeNoteInput = z.discriminatedUnion("mode", [
-  z.object({
-    mode: z.literal("patch_existing"),
-    noteId: z.string(),
-    title: z.string().optional(),
-    content: z.string().optional(),
-    type: z.string().optional(),
-    metadata: z.record(z.string(), z.unknown()).nullable().optional(),
-  }),
-  z.object({
-    mode: z.literal("create_root"),
-    projectId: z.string(),
-    type: z.string(),
-    title: z.string().optional(),
-    content: z.string().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }),
-  z.object({
-    mode: z.literal("create_child"),
-    projectId: z.string(),
-    anchorId: z.string(),
-    type: z.string(),
-    title: z.string().optional(),
-    content: z.string().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }),
-  z.object({
-    mode: z.literal("create_sibling"),
-    projectId: z.string(),
-    anchorId: z.string(),
-    type: z.string(),
-    title: z.string().optional(),
-    content: z.string().optional(),
-    metadata: z.record(z.string(), z.unknown()).optional(),
-  }),
-]);
+const writeNoteInput = z.object({
+  mode: z
+    .enum(["patch_existing", "create_root", "create_child", "create_sibling"])
+    .describe(
+      "patch_existing: PATCH an existing note (requires noteId). create_root: POST a new root note in a project (requires projectId, type). create_child / create_sibling: POST a new note relative to an anchor (requires projectId, anchorId, type).",
+    ),
+  noteId: z
+    .string()
+    .optional()
+    .describe("Required when mode=patch_existing. Note UUID to patch."),
+  projectId: z
+    .string()
+    .optional()
+    .describe("Required when mode is create_root | create_child | create_sibling. Project UUID."),
+  anchorId: z
+    .string()
+    .optional()
+    .describe("Required when mode is create_child | create_sibling. Anchor note UUID for the relation."),
+  type: z
+    .string()
+    .optional()
+    .describe("Note type. Required when mode is create_root | create_child | create_sibling. Optional patch when mode=patch_existing."),
+  title: z.string().optional().describe("Note title (optional patch when mode=patch_existing)."),
+  content: z.string().optional().describe("Note body (optional patch when mode=patch_existing)."),
+  metadata: z
+    .record(z.string(), z.unknown())
+    .nullable()
+    .optional()
+    .describe("Note metadata. null clears it on patch_existing; omit to leave unchanged."),
+});
+
+function validateWriteNoteArgs(
+  args: z.infer<typeof writeNoteInput>,
+): { ok: true } | { ok: false; error: string } {
+  if (args.mode === "patch_existing") {
+    if (!args.noteId || !args.noteId.trim()) {
+      return { ok: false, error: "mode=patch_existing requires noteId." };
+    }
+    return { ok: true };
+  }
+  if (!args.projectId || !args.projectId.trim()) {
+    return { ok: false, error: `mode=${args.mode} requires projectId.` };
+  }
+  if (!args.type || !args.type.trim()) {
+    return { ok: false, error: `mode=${args.mode} requires type.` };
+  }
+  if (args.mode === "create_child" || args.mode === "create_sibling") {
+    if (!args.anchorId || !args.anchorId.trim()) {
+      return { ok: false, error: `mode=${args.mode} requires anchorId.` };
+    }
+  }
+  return { ok: true };
+}
 
 const createWorkspaceInput = z.object({
   name: z.string().min(1).describe("Name for the new workspace."),
@@ -703,6 +732,10 @@ export function createArchonMcpServer(
       if (denied) {
         return denied;
       }
+      const validation = validateListWpnArgs(args);
+      if (!validation.ok) {
+        return errorResult(validation.error);
+      }
       const orgOverride = args.orgId?.trim() || null;
       const spaceOverride = args.spaceId?.trim() || null;
       const prevOrg = runtime.holder.activeOrgId;
@@ -719,7 +752,7 @@ export function createArchonMcpServer(
           return jsonResult({ scope: "workspaces", workspaces });
         }
         if (args.scope === "projects") {
-          const projects = await client.getProjects(args.workspaceId);
+          const projects = await client.getProjects(args.workspaceId!);
           return jsonResult({
             scope: "projects",
             workspaceId: args.workspaceId,
@@ -727,7 +760,7 @@ export function createArchonMcpServer(
           });
         }
         if (args.scope === "notes") {
-          const notes = await client.getNotesFlat(args.projectId);
+          const notes = await client.getNotesFlat(args.projectId!);
           return jsonResult({ scope: "notes", projectId: args.projectId, notes });
         }
         const workspaces = await client.getWorkspaces();
@@ -1914,6 +1947,10 @@ export function createArchonMcpServer(
       if (denied) {
         return denied;
       }
+      const parentCheck = validateCreateChildNoteParent(args);
+      if (!parentCheck.ok) {
+        return errorResult(parentCheck.error);
+      }
       try {
         const idTrim = args.parentNoteId?.trim() ?? "";
         if (idTrim.length > 0) {
@@ -2033,6 +2070,10 @@ export function createArchonMcpServer(
       if (denied) {
         return denied;
       }
+      const validation = validateWriteNoteArgs(args);
+      if (!validation.ok) {
+        return errorResult(validation.error);
+      }
       try {
         if (args.mode === "patch_existing") {
           const patch: {
@@ -2053,7 +2094,7 @@ export function createArchonMcpServer(
           if (args.metadata !== undefined) {
             patch.metadata = args.metadata;
           }
-          const note = await client.patchNote(args.noteId, patch);
+          const note = await client.patchNote(args.noteId!, patch);
           return jsonResult({ ok: true as const, note });
         }
         const relation =
@@ -2064,14 +2105,14 @@ export function createArchonMcpServer(
               : ("sibling" as const);
         const anchorId = args.mode === "create_root" ? undefined : args.anchorId;
         const body = {
-          type: args.type,
+          type: args.type!,
           relation,
           anchorId,
           title: args.title,
           content: args.content,
-          metadata: args.metadata,
+          metadata: args.metadata ?? undefined,
         };
-        const created = await client.createNote(args.projectId, body);
+        const created = await client.createNote(args.projectId!, body);
         return jsonResult({ ok: true as const, created });
       } catch (e) {
         return wpnCatch(e, runtime);
