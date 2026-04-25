@@ -540,20 +540,44 @@ async function readBsonDocs(filePath: string): Promise<Record<string, unknown>[]
   return docs;
 }
 
-// ---------- main ----------
+// ---------- runImporter (testable entry point) ----------
 
-async function main(): Promise<void> {
-  const args = process.argv.slice(2);
-  const dumpDir =
-    args.find((a) => !a.startsWith("--")) ??
-    path.resolve(
-      process.cwd(),
-      "mongodump-pre-cutover-20260425-162501/nodex_sync",
-    );
-  const reset = args.includes("--reset");
-  const force = args.includes("--force");
+export interface RunImporterOptions {
+  dumpDir: string;
+  reset?: boolean;
+  force?: boolean;
+  /** When false, suppresses the importer's stdout chatter. Defaults to true. */
+  verbose?: boolean;
+}
 
-  console.log(`[importer] source: ${dumpDir}`);
+export interface RunImporterResult {
+  /** Per-collection BSON-doc counts read from the dump. */
+  sourceCounts: Map<string, number>;
+  /** Per-collection parity diff (only present for collections with a PG table). */
+  parity: { collection: string; expected: number; actual: number; ok: boolean }[];
+  /** True iff every collection's parity check passed. */
+  parityOk: boolean;
+  /** Number of note_edges rows inserted in Pass 3. */
+  edgeCount: number;
+}
+
+/**
+ * Test/programmatic entry point. Mirrors the CLI but returns a structured
+ * result instead of calling process.exit, and never disconnects the pool —
+ * caller is responsible for that.
+ */
+export async function runImporter(
+  opts: RunImporterOptions,
+): Promise<RunImporterResult> {
+  const { dumpDir, reset = false, force = false, verbose = true } = opts;
+  const log = (msg: string): void => {
+    if (verbose) console.log(msg);
+  };
+  const warn = (msg: string): void => {
+    if (verbose) console.warn(msg);
+  };
+
+  log(`[importer] source: ${dumpDir}`);
   await ensurePgConnected();
   const db = getDb();
 
@@ -568,15 +592,13 @@ async function main(): Promise<void> {
     (userCountList as { n: string }[])[0]?.n ?? "0",
   );
   if (existing > 0 && !reset && !force) {
-    console.error(
-      `[importer] users table has ${existing} rows. Pass --reset to TRUNCATE or --force to overlay.`,
+    throw new Error(
+      `[importer] users table has ${existing} rows. Pass reset=true to TRUNCATE or force=true to overlay.`,
     );
-    await disconnectPg();
-    process.exit(1);
   }
 
   if (reset) {
-    console.log("[importer] reset: truncating all PG tables…");
+    log("[importer] reset: truncating all PG tables…");
     await db.execute(sql`TRUNCATE TABLE
       legacy_object_id_map,
       audit_events, notifications, user_prefs,
@@ -592,7 +614,7 @@ async function main(): Promise<void> {
   }
 
   // Pass 1: UUID minting + legacy_object_id_map.
-  console.log("[importer] Pass 1 — UUID minting…");
+  log("[importer] Pass 1 — UUID minting…");
   const idMap = new Map<string, string>(); // key=`scope:legacyHex` value=uuid
   function mapKey(scope: string, legacyId: string): string {
     return `${scope}:${legacyId}`;
@@ -605,7 +627,7 @@ async function main(): Promise<void> {
     try {
       docs = await readBsonDocs(file);
     } catch {
-      console.log(`[importer] skip ${cfg.collection} (no BSON file)`);
+      log(`[importer] skip ${cfg.collection} (no BSON file)`);
       sourceCounts.set(cfg.collection, 0);
       continue;
     }
@@ -629,11 +651,11 @@ async function main(): Promise<void> {
         .values(mintRows)
         .onConflictDoNothing();
     }
-    console.log(`[importer]   minted ${mintRows.length} uuid for ${cfg.collection}`);
+    log(`[importer]   minted ${mintRows.length} uuid for ${cfg.collection}`);
   }
 
   // Pass 2: translated insert per collection.
-  console.log("[importer] Pass 2 — translated inserts…");
+  log("[importer] Pass 2 — translated inserts…");
   function translate(scope: string, legacyId: string): string {
     if (!legacyId) return "";
     const hit = idMap.get(mapKey(scope, legacyId));
@@ -667,7 +689,7 @@ async function main(): Promise<void> {
         const row = cfg.toRow(d, translate, newRowId);
         if (row) rowsToInsert.push(row);
       } catch (err) {
-        console.warn(
+        warn(
           `[importer]   skipped row in ${cfg.collection}: ${(err as Error).message}`,
         );
       }
@@ -680,14 +702,14 @@ async function main(): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       await db.insert(cfg.table as any).values(slice as any);
     }
-    console.log(
+    log(
       `[importer]   inserted ${rowsToInsert.length}/${docs.length} into ${cfg.collection}`,
     );
   }
 
   // Resolve users.defaultOrgId / lockedOrgId / lastActiveOrgId / lastActiveSpaceId
   // (deferred from Pass 2 because the org/space rows had to land first).
-  console.log("[importer] Pass 2.5 — resolve user pointers…");
+  log("[importer] Pass 2.5 — resolve user pointers…");
   const userDocs = await readBsonDocs(path.join(dumpDir, "users.bson")).catch(
     () => [] as Record<string, unknown>[],
   );
@@ -764,7 +786,7 @@ async function main(): Promise<void> {
   }
 
   // Pass 3: note_edges backfill from wpn_notes.content markdown.
-  console.log("[importer] Pass 3 — note_edges backfill…");
+  log("[importer] Pass 3 — note_edges backfill…");
   const noteIds = new Set<string>();
   const wpnNotesDocs = await readBsonDocs(
     path.join(dumpDir, "wpn_notes.bson"),
@@ -804,11 +826,11 @@ async function main(): Promise<void> {
       edgeCount += rows.length;
     }
   }
-  console.log(`[importer]   inserted ${edgeCount} note_edges rows`);
+  log(`[importer]   inserted ${edgeCount} note_edges rows`);
 
   // Pass 4: parity check.
-  console.log("[importer] Pass 4 — parity check…");
-  let mismatch = false;
+  log("[importer] Pass 4 — parity check…");
+  const parity: RunImporterResult["parity"] = [];
   for (const cfg of COLLECTIONS) {
     if (!cfg.table) continue;
     const expected = sourceCounts.get(cfg.collection) ?? 0;
@@ -819,26 +841,55 @@ async function main(): Promise<void> {
     const list = (result as any).rows ?? result;
     const actual = Number((list as { n: string }[])[0]?.n ?? "0");
     const ok = expected === actual;
-    if (!ok) mismatch = true;
-    console.log(
+    parity.push({ collection: cfg.collection, expected, actual, ok });
+    log(
       `[importer]   ${cfg.collection.padEnd(28)} expected=${expected.toString().padStart(5)} actual=${actual.toString().padStart(5)} ${ok ? "✓" : "✗"}`,
     );
   }
+  const parityOk = parity.every((p) => p.ok);
 
-  await disconnectPg();
-  if (mismatch) {
+  if (!parityOk && verbose) {
     console.error("[importer] parity check FAILED.");
+  }
+
+  return { sourceCounts, parity, parityOk, edgeCount };
+}
+
+// ---------- CLI driver ----------
+
+async function cli(): Promise<void> {
+  const args = process.argv.slice(2);
+  const dumpDir =
+    args.find((a) => !a.startsWith("--")) ??
+    path.resolve(
+      process.cwd(),
+      "mongodump-pre-cutover-20260425-162501/nodex_sync",
+    );
+  const reset = args.includes("--reset");
+  const force = args.includes("--force");
+  let result: RunImporterResult | null = null;
+  try {
+    result = await runImporter({ dumpDir, reset, force, verbose: true });
+  } catch (err) {
+    console.error("[importer] fatal:", err);
+    try {
+      await disconnectPg();
+    } catch {
+      /* ignore */
+    }
     process.exit(1);
   }
+  await disconnectPg();
+  if (!result.parityOk) process.exit(1);
   console.log("[importer] done.");
 }
 
-void main().catch(async (err) => {
-  console.error("[importer] fatal:", err);
-  try {
-    await disconnectPg();
-  } catch {
-    /* ignore */
-  }
-  process.exit(1);
-});
+// Only run as a CLI when invoked directly (skip when imported by tests).
+const isCli =
+  typeof process !== "undefined" &&
+  Array.isArray(process.argv) &&
+  process.argv[1] !== undefined &&
+  /\bimport-mongo-to-pg\.[mc]?[jt]s$/.test(process.argv[1]);
+if (isCli) {
+  void cli();
+}
