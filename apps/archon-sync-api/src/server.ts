@@ -1,6 +1,9 @@
 import "./load-root-env.js";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { buildSyncApiApp } from "./build-app.js";
-import { closeMongo, connectMongo } from "./db.js";
+import { ensurePgConnected, disconnectPg, getDb } from "./pg.js";
 import {
   envString,
   requireImageNotesEnv,
@@ -9,8 +12,6 @@ import {
 
 const port = Number(envString("PORT", "4010")) || 4010;
 const host = envString("HOST", "0.0.0.0");
-const mongoUri = envString("MONGODB_URI", "mongodb://127.0.0.1:27017");
-const mongoDb = envString("MONGODB_DB", "archon_sync");
 const corsOrigin = envString("CORS_ORIGIN", "true");
 
 const jwtSecret = requireJwtSecret();
@@ -22,11 +23,25 @@ const app = await buildSyncApiApp({
   logger: true,
 });
 
-await connectMongo(mongoUri, mongoDb);
+await ensurePgConnected();
+
+// Run drizzle migrations at boot. The migrations folder lives next to the
+// schema (src/db/migrations) — relative to this file at runtime.
+const migrationsFolder = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "db/migrations",
+);
+try {
+  await migrate(getDb(), { migrationsFolder });
+  app.log.info({ migrationsFolder }, "drizzle migrations applied");
+} catch (err) {
+  app.log.error({ err }, "drizzle migrate failed at boot");
+  process.exit(1);
+}
 
 const close = async (): Promise<void> => {
   await app.close();
-  await closeMongo();
+  await disconnectPg();
 };
 
 process.on("SIGINT", () => {
@@ -39,8 +54,8 @@ process.on("SIGTERM", () => {
 try {
   await app.listen({ port, host });
   app.log.info(
-    { port, host, mongoDb },
-    "Archon sync API listening (Fastify + MongoDB)",
+    { port, host },
+    "Archon sync API listening (Fastify + Postgres)",
   );
 } catch (err) {
   app.log.error(err);
