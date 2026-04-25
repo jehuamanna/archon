@@ -8,3 +8,5 @@ export {
   acquireChannel,
   getChannelDiagnostics,
 } from "./listen-pool.js";
+export { registerYjsWsRoutes, getYjsAdapter } from "./yjs-ws.js";
+export { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";

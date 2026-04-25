@@ -37,6 +37,7 @@ import { registerMdxStateWsRoutes } from "./mdx-state/ws.js";
 import {
   registerRealtimeRoutes,
   registerSpaceWsRoutes,
+  registerYjsWsRoutes,
 } from "./realtime/index.js";
 import { maybePromoteMasterAdmin } from "./admin-auth.js";
 import {
@@ -140,6 +141,7 @@ export function registerRoutes(
   registerMdxStateWsRoutes(app, { jwtSecret });
   registerRealtimeRoutes(app, { jwtSecret });
   registerSpaceWsRoutes(app, { jwtSecret });
+  registerYjsWsRoutes(app, { jwtSecret });
   app.register(
     async (scoped) => registerWpnImportExportRoutes(scoped, { jwtSecret }),
   );
