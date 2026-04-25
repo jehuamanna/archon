@@ -8,8 +8,12 @@
  * accepts the handshake and idles.
  */
 import type { FastifyInstance } from "fastify";
+import type { JwtPayload } from "../auth.js";
 import { verifyAndTranslate } from "../auth-translate.js";
 import { effectiveRoleInSpace } from "../permission-resolver.js";
+import { acquireChannel } from "./listen-pool.js";
+import { channelForSpace, type RealtimeEvent } from "./events.js";
+import { canDeliverToSubscriber } from "./filter.js";
 
 const REVERIFY_INTERVAL_MS = 10_000;
 const HEARTBEAT_MS = 20_000;
@@ -86,6 +90,32 @@ export function registerSpaceWsRoutes(
         "realtime: ws/space opened",
       );
 
+      // Subscribe to the space channel; route delivered events through the
+      // ACL filter and onto the socket. Held until the close handler runs.
+      const authPayload: JwtPayload = {
+        sub: payload.sub,
+        email: payload.email,
+        typ: payload.typ,
+        activeOrgId: payload.activeSpaceId,
+        activeSpaceId: payload.activeSpaceId,
+      };
+      const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
+        let evt: RealtimeEvent;
+        try {
+          evt = JSON.parse(raw) as RealtimeEvent;
+        } catch {
+          return;
+        }
+        void (async () => {
+          try {
+            if (!(await canDeliverToSubscriber(authPayload, evt))) return;
+            socket.send(JSON.stringify({ type: "event", payload: evt }));
+          } catch {
+            /* socket gone or filter failure — drop silently */
+          }
+        })();
+      });
+
       const reverify = setInterval(() => {
         void (async () => {
           try {
@@ -107,7 +137,7 @@ export function registerSpaceWsRoutes(
       socket.on("close", () => {
         clearInterval(reverify);
         clearInterval(heartbeat);
-        // Phase 3 will release the listen-pool subscription here.
+        void release();
       });
     },
   );
