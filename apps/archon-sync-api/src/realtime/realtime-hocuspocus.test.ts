@@ -151,3 +151,150 @@ test(
     }
   },
 );
+
+test(
+  "AC4.5 — offline edits made while disconnected merge in on reconnect",
+  { timeout: 30_000 },
+  async (t) => {
+    let ctx: TestPgSchemaContext | undefined;
+    try {
+      ctx = await setupPgTestSchema();
+    } catch (err) {
+      t.skip(`Postgres not reachable: ${String(err)}`);
+      return;
+    }
+
+    const prevDebounce = process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS;
+    process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS = "100";
+
+    const userId = await factoryUser({ email: `rc-${Date.now()}@p4.test` });
+    const orgId = await factoryOrg({ ownerUserId: userId });
+    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
+    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
+    const projectId = await factoryProject({
+      userId,
+      workspaceId,
+      orgId,
+      spaceId,
+    });
+    const noteId = randomUUID();
+    const t0 = Date.now();
+    await getDb().insert(wpnNotes).values({
+      id: noteId,
+      userId,
+      orgId,
+      spaceId,
+      project_id: projectId,
+      parent_id: null,
+      type: "page",
+      title: "Reconnect recovery test",
+      content: "",
+      sibling_index: 0,
+      created_at_ms: t0,
+      updated_at_ms: t0,
+      deleted: false,
+    });
+
+    const app = await buildSyncApiApp({
+      jwtSecret,
+      corsOrigin: "true",
+      logger: false,
+    });
+    await app.listen({ port: 0, host: "127.0.0.1" });
+    const addr = app.server.address() as AddressInfo;
+    const wsBase = `ws://127.0.0.1:${addr.port}/api/v1/ws/yjs`;
+
+    const wsToken = signToken(
+      jwtSecret,
+      {
+        sub: userId,
+        email: `rc-test@example.test`,
+        typ: "spaceWs",
+        principal: { type: "user" },
+        activeOrgId: orgId,
+        activeSpaceId: spaceId,
+      },
+      "5m",
+    );
+
+    const docA = new Y.Doc();
+    const docB = new Y.Doc();
+    const provA = new HocuspocusProvider({
+      url: wsBase,
+      name: noteId,
+      document: docA,
+      token: wsToken,
+    });
+    const provB = new HocuspocusProvider({
+      url: wsBase,
+      name: noteId,
+      document: docB,
+      token: wsToken,
+    });
+
+    try {
+      await waitFor(() => provA.synced && provB.synced, 8000);
+
+      // Initial online edit on A; B sees it.
+      docA.getText("content").insert(0, "online ");
+      await waitFor(
+        () => docB.getText("content").toString() === "online ",
+        4000,
+      );
+
+      // Tab A goes offline. While offline, the local Y.Doc still accepts
+      // mutations — those updates are buffered in the provider and will be
+      // flushed on reconnect.
+      provA.disconnect();
+      // Wait briefly to make sure A is fully disconnected.
+      await waitFor(() => !provA.isConnected, 2000);
+      docA.getText("content").insert(
+        docA.getText("content").length,
+        "offline-edit ",
+      );
+
+      // Tab B keeps editing while A is offline.
+      docB.getText("content").insert(
+        docB.getText("content").length,
+        "B-edit ",
+      );
+      // Give B's edit time to land in the snapshot.
+      await new Promise((r) => setTimeout(r, 250));
+
+      // Reconnect A.
+      provA.connect();
+      await waitFor(() => provA.synced && provA.isConnected, 8000);
+
+      // Both A and B converge to the same merged state. CRDT semantics
+      // guarantee no edits are lost; ordering depends on the merge but the
+      // two strings must be equal.
+      await waitFor(
+        () =>
+          docA.getText("content").toString() ===
+          docB.getText("content").toString(),
+        5000,
+      );
+      const merged = docA.getText("content").toString();
+      // All three substrings present.
+      assert.ok(merged.includes("online "), `merged missing online: "${merged}"`);
+      assert.ok(
+        merged.includes("offline-edit "),
+        `merged missing offline-edit: "${merged}"`,
+      );
+      assert.ok(merged.includes("B-edit "), `merged missing B-edit: "${merged}"`);
+    } finally {
+      provA.disconnect();
+      provA.destroy();
+      provB.disconnect();
+      provB.destroy();
+      await _shutdownYjsServerForTests();
+      await app.close();
+      if (prevDebounce === undefined) {
+        delete process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS;
+      } else {
+        process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS = prevDebounce;
+      }
+      await ctx.teardown();
+    }
+  },
+);
