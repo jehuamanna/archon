@@ -21,6 +21,16 @@ const MCP_REFRESH_EXPIRES =
     process.env.ARCHON_JWT_MCP_REFRESH_EXPIRES.trim()) ||
   "7d";
 
+/**
+ * Realtime principal block. Every post-cutover access token carries one;
+ * pre-cutover tokens leave it absent and the verifier falls back to
+ * `mcp?: boolean`.
+ */
+export type Principal = {
+  type: "user" | "mcp";
+  metadata?: Record<string, unknown>;
+};
+
 export type JwtPayload = {
   sub: string;
   email: string;
@@ -29,6 +39,8 @@ export type JwtPayload = {
   jti?: string;
   /** MCP-issued tokens carry this so /auth/refresh keeps MCP access + refresh TTLs. */
   mcp?: boolean;
+  /** Canonical realtime identity. Optional for backward compatibility. */
+  principal?: Principal;
   /** Active organization context (Phase 1). May be absent on legacy tokens. */
   activeOrgId?: string;
   /** Active space context (Phase 2). May be absent on legacy tokens. */
