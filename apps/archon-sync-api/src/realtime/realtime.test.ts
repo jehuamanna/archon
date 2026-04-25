@@ -216,6 +216,89 @@ test("AC4.3 — notifyRealtime + listen-pool fanout round-trip", async (t) => {
   }
 });
 
+test("AC-edge-diff — pgWpnUpdateNote emits edge.added / edge.removed when content changes", async (t) => {
+  let ctx: TestPgSchemaContext | undefined;
+  try {
+    ctx = await setupPgTestSchema();
+  } catch (err) {
+    t.skip(`Postgres not reachable: ${String(err)}`);
+    return;
+  }
+  try {
+    const userId = await factoryUser({ email: `edge-${Date.now()}@p4.test` });
+    const orgId = await factoryOrg({ ownerUserId: userId });
+    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
+    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
+    const projectId = await factoryProject({
+      userId,
+      workspaceId,
+      orgId,
+      spaceId,
+    });
+
+    const { pgWpnCreateNote, pgWpnUpdateNote } = await import(
+      "../wpn-pg-writes.js"
+    );
+    // Three notes; n0 will reference n1 then swap to n2.
+    const n0 = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "n0",
+    });
+    const n1 = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "n1",
+    });
+    const n2 = await pgWpnCreateNote(userId, projectId, {
+      relation: "root",
+      type: "page",
+      title: "n2",
+    });
+
+    const events: string[] = [];
+    const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
+      events.push(raw);
+    });
+    try {
+      // First update: add reference to n1.
+      await pgWpnUpdateNote(userId, n0.id, {
+        content: `link to [n1](#/n/${n1.id})`,
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      // Second update: replace n1 reference with n2.
+      await pgWpnUpdateNote(userId, n0.id, {
+        content: `link to [n2](#/n/${n2.id})`,
+      });
+      await new Promise((r) => setTimeout(r, 200));
+    } finally {
+      await release();
+      await _resetChannelsForTests();
+    }
+
+    const parsed = events.map(
+      (s) =>
+        JSON.parse(s) as {
+          type: string;
+          src?: string;
+          dst?: string;
+          kind?: string;
+        },
+    );
+    const adds = parsed.filter((e) => e.type === "edge.added");
+    const removes = parsed.filter((e) => e.type === "edge.removed");
+    // First update added n1; second update removed n1 + added n2.
+    assert.strictEqual(adds.length, 2);
+    assert.strictEqual(removes.length, 1);
+    const addedTargets = new Set(adds.map((a) => a.dst));
+    assert.ok(addedTargets.has(n1.id));
+    assert.ok(addedTargets.has(n2.id));
+    assert.strictEqual(removes[0]!.dst, n1.id);
+  } finally {
+    await ctx.teardown();
+  }
+});
+
 // keep factories alive in tree-shaking-aware bundlers
 void factorySpace;
 void factoryWorkspace;

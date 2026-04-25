@@ -193,7 +193,7 @@ async function reconcileNoteEdges(
   tx: ReturnType<typeof getDb>,
   srcNoteId: string,
   content: string,
-): Promise<void> {
+): Promise<{ added: string[]; removed: string[] }> {
   const lib = await loadMarkdownLib();
   const ids = lib.collectReferencedNoteIdsFromMarkdown(content);
   // Defensive: drop self-references and non-uuid noise.
@@ -204,16 +204,75 @@ async function reconcileNoteEdges(
     if (!UUID_RE.test(id)) continue;
     dstSet.add(id);
   }
+  // Capture the existing edges so the post-commit emitter knows what
+  // disappeared. Without this, the fanout treats every edit as a "burn it
+  // down + rebuild" which would emit `edge.removed` for every edge even
+  // when content is unchanged.
+  const existing = await tx
+    .select({ dst: noteEdges.dst })
+    .from(noteEdges)
+    .where(eq(noteEdges.src, srcNoteId));
+  const before = new Set(existing.map((r) => r.dst));
   await tx.delete(noteEdges).where(eq(noteEdges.src, srcNoteId));
-  if (dstSet.size === 0) return;
-  await tx.insert(noteEdges).values(
-    Array.from(dstSet).map((dst) => ({
-      src: srcNoteId,
-      dst,
-      kind: "link",
-      meta: null as unknown,
-    })),
-  );
+  if (dstSet.size > 0) {
+    await tx.insert(noteEdges).values(
+      Array.from(dstSet).map((dst) => ({
+        src: srcNoteId,
+        dst,
+        kind: "link",
+        meta: null as unknown,
+      })),
+    );
+  }
+  const added: string[] = [];
+  const removed: string[] = [];
+  for (const dst of dstSet) if (!before.has(dst)) added.push(dst);
+  for (const dst of before) if (!dstSet.has(dst)) removed.push(dst);
+  return { added, removed };
+}
+
+/**
+ * Best-effort emission of `edge.added` / `edge.removed` events. Called from
+ * the post-commit phase of writers that ran `reconcileNoteEdges`. Failures
+ * are swallowed — fanout cannot block the user-facing op.
+ */
+async function emitEdgeDiff(
+  spaceId: string | null,
+  srcNoteId: string,
+  byUserId: string,
+  diff: { added: string[]; removed: string[] },
+): Promise<void> {
+  if (!spaceId) return;
+  if (diff.added.length === 0 && diff.removed.length === 0) return;
+  const stamp = new Date().toISOString();
+  for (const dst of diff.added) {
+    try {
+      await notifyRealtime(spaceId, {
+        type: "edge.added",
+        src: srcNoteId,
+        dst,
+        kind: "link",
+        byUserId,
+        emittedAt: stamp,
+      });
+    } catch {
+      /* swallow */
+    }
+  }
+  for (const dst of diff.removed) {
+    try {
+      await notifyRealtime(spaceId, {
+        type: "edge.removed",
+        src: srcNoteId,
+        dst,
+        kind: "link",
+        byUserId,
+        emittedAt: stamp,
+      });
+    } catch {
+      /* swallow */
+    }
+  }
 }
 
 // ---------- workspaces ----------
@@ -697,6 +756,7 @@ export async function pgWpnUpdateNote(
   updated_at_ms: number;
 } | null> {
   let renamed: { spaceId: string | null; oldTitle: string; newTitle: string; projectId: string } | null = null;
+  let edgeDiff: { spaceId: string | null; diff: { added: string[]; removed: string[] } } | null = null;
   const result = await withTx(async (tx) => {
     const nRows = await tx
       .select()
@@ -767,7 +827,8 @@ export async function pgWpnUpdateNote(
       .where(and(eq(wpnNotes.id, noteId), eq(wpnNotes.userId, userId)));
 
     if (patch.content !== undefined) {
-      await reconcileNoteEdges(tx, noteId, content);
+      const diff = await reconcileNoteEdges(tx, noteId, content);
+      edgeDiff = { spaceId: n.spaceId, diff };
     }
 
     if (patch.title !== undefined && title !== n.title) {
@@ -806,6 +867,14 @@ export async function pgWpnUpdateNote(
     } catch {
       /* fanout failures must not surface to the writer */
     }
+  }
+  if (edgeDiff) {
+    await emitEdgeDiff(
+      (edgeDiff as { spaceId: string | null }).spaceId,
+      noteId,
+      userId,
+      (edgeDiff as { diff: { added: string[]; removed: string[] } }).diff,
+    );
   }
   return result;
 }
