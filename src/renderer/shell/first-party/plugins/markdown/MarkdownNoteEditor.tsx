@@ -1,10 +1,11 @@
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
-import type { AppDispatch } from "../../../../store";
+import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
+import { useYjsBodyShadow } from "./useYjsBodyShadow";
 import MarkdownRenderer from "../../../../components/renderers/MarkdownRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -449,12 +450,23 @@ export function MarkdownNoteEditor({
     };
   }, [wikiRows, note.id]);
 
+  // Push debounced saves over the Hocuspocus body-collab WS when it's
+  // connected; fall back to HTTP PATCH when it isn't. See
+  // `useYjsBodyShadow.ts` for the protocol detail.
+  const activeSpaceId = useSelector(
+    (s: RootState) => s.spaceMembership.activeSpaceId,
+  );
+  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  const yjsBodyRef = useRef(yjsBody);
+  yjsBodyRef.current = yjsBody;
+
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
     if (!persistRef.current) return;
+    if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
     void dispatch(
       saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
     );
@@ -469,6 +481,7 @@ export function MarkdownNoteEditor({
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
       if (!persistRef.current) return;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -483,11 +496,11 @@ export function MarkdownNoteEditor({
         window.clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
-      if (persistRef.current) {
-        void dispatch(
-          saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
-        );
-      }
+      if (!persistRef.current) return;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      void dispatch(
+        saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
+      );
     };
   }, [note.id, dispatch]);
 
