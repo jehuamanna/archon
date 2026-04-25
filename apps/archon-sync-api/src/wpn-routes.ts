@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { requireAuth, type JwtPayload } from "./auth.js";
 import { getDb } from "./pg.js";
 import {
@@ -331,7 +331,7 @@ export function registerWpnReadRoutes(
             .where(
               and(
                 inArray(wpnNotes.project_id, projectIds),
-                ne(wpnNotes.deleted, true),
+                sql`${wpnNotes.deleted} IS NOT TRUE`,
               ),
             )
         : Promise.resolve([] as NoteRow[]),
@@ -482,7 +482,7 @@ export function registerWpnReadRoutes(
           .where(
             and(
               inArray(wpnNotes.project_id, projectIds),
-              ne(wpnNotes.deleted, true),
+              sql`${wpnNotes.deleted} IS NOT TRUE`,
             ),
           )
       : [];
@@ -538,7 +538,7 @@ export function registerWpnReadRoutes(
       .where(
         and(
           inArray(wpnNotes.project_id, projectIds),
-          ne(wpnNotes.deleted, true),
+          sql`${wpnNotes.deleted} IS NOT TRUE`,
         ),
       );
     const targetNote = candidates.find((n) => n.id === noteId);
@@ -608,7 +608,7 @@ export function registerWpnReadRoutes(
     const noteRows = await db()
       .select()
       .from(wpnNotes)
-      .where(and(eq(wpnNotes.id, id), ne(wpnNotes.deleted, true)))
+      .where(and(eq(wpnNotes.id, id), sql`${wpnNotes.deleted} IS NOT TRUE`))
       .limit(1);
     const n = noteRows[0];
     if (!n) {
@@ -671,7 +671,7 @@ export function registerWpnReadRoutes(
     const noteRows = await db()
       .select({ project_id: wpnNotes.project_id })
       .from(wpnNotes)
-      .where(and(eq(wpnNotes.id, id), ne(wpnNotes.deleted, true)))
+      .where(and(eq(wpnNotes.id, id), sql`${wpnNotes.deleted} IS NOT TRUE`))
       .limit(1);
     const note = noteRows[0];
     if (!note) {

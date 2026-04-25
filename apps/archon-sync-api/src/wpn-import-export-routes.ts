@@ -3,7 +3,7 @@ import { PassThrough } from "node:stream";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import archiver from "archiver";
 import unzipper from "unzipper";
-import { and, asc, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { requireAuth } from "./auth.js";
 import { getDb } from "./pg.js";
 import { wpnNotes, wpnProjects, wpnWorkspaces } from "./db/schema.js";
@@ -164,7 +164,7 @@ export async function registerWpnImportExportRoutes(
             and(
               eq(wpnNotes.userId, userId),
               inArray(wpnNotes.project_id, projIds),
-              ne(wpnNotes.deleted, true),
+              sql`${wpnNotes.deleted} IS NOT TRUE`,
             ),
           )
       : ([] as NoteRow[]);

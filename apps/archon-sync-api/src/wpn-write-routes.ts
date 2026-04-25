@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { and, eq, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { requireAuth } from "./auth.js";
 import { getDb } from "./pg.js";
 import {
@@ -1116,7 +1116,7 @@ export function registerWpnWriteRoutes(
         and(
           eq(wpnNotes.id, noteId),
           eq(wpnNotes.userId, userId),
-          ne(wpnNotes.deleted, true),
+          sql`${wpnNotes.deleted} IS NOT TRUE`,
         ),
       )
       .limit(1);
@@ -1153,7 +1153,7 @@ export function registerWpnWriteRoutes(
     const allNotes = await db()
       .select()
       .from(wpnNotes)
-      .where(and(eq(wpnNotes.userId, userId), ne(wpnNotes.deleted, true)));
+      .where(and(eq(wpnNotes.userId, userId), sql`${wpnNotes.deleted} IS NOT TRUE`));
     const dependentNoteIds: string[] = [];
     for (const n of allNotes) {
       const c0 = n.content ?? "";
@@ -1191,7 +1191,7 @@ export function registerWpnWriteRoutes(
     const allNotes = await db()
       .select()
       .from(wpnNotes)
-      .where(and(eq(wpnNotes.userId, userId), ne(wpnNotes.deleted, true)));
+      .where(and(eq(wpnNotes.userId, userId), sql`${wpnNotes.deleted} IS NOT TRUE`));
     let updatedCount = 0;
     const now = Date.now();
     for (const n of allNotes) {
@@ -1263,7 +1263,7 @@ export function registerWpnWriteRoutes(
             and(
               eq(wpnNotes.id, id),
               eq(wpnNotes.userId, ownerId),
-              ne(wpnNotes.deleted, true),
+              sql`${wpnNotes.deleted} IS NOT TRUE`,
             ),
           )
           .limit(1);
