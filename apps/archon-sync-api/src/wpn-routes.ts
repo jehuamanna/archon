@@ -1,38 +1,47 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { ObjectId } from "mongodb";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { requireAuth, type JwtPayload } from "./auth.js";
-import type { WpnNoteDoc, WpnProjectDoc, WpnWorkspaceDoc } from "./db.js";
+import { getDb } from "./pg.js";
 import {
-  ensureDefaultSpaceForOrg,
-  getActiveDb,
-  getDefaultSpaceIdForOrg,
-  getOrgMembershipsCollection,
-  getProjectSharesCollection,
-  getSpacesCollection,
-  getUsersCollection,
-  getWorkspaceSharesCollection,
-  getWpnExplorerStateCollection,
-  getWpnNotesCollection,
-  getWpnProjectsCollection,
-  getWpnWorkspacesCollection,
-  type UserDoc,
-} from "./db.js";
+  orgMemberships,
+  projectShares,
+  spaces,
+  users,
+  workspaceShares,
+  wpnExplorerState,
+  wpnNotes,
+  wpnProjects,
+  wpnWorkspaces,
+} from "./db/schema.js";
 import {
   assertCanReadProject,
   assertCanReadWorkspace,
   assertCanReadWorkspaceForNote,
   effectiveRoleInSpace,
   userCanWriteProject,
+  type WorkspaceRow,
+  type ProjectRow,
 } from "./permission-resolver.js";
 import { resolveActiveSpaceId } from "./space-auth.js";
+import {
+  ensureDefaultSpaceForOrg,
+  getDefaultSpaceIdForOrg,
+} from "./org-defaults.js";
 import type { SpaceRole } from "./org-schemas.js";
-import { buildNoteSearchHints, type NoteSearchHints } from "./note-search-hints.js";
+import {
+  buildNoteSearchHints,
+  type NoteSearchHints,
+} from "./note-search-hints.js";
 import {
   buildVfsBacklinkTarget,
   contentReferencesTargetViaVfs,
 } from "./note-backlinks-vfs.js";
+import { isUuid } from "./db/legacy-id-map.js";
 
-/** Minimal markdown link → note id extraction (mirrors repo `collectReferencedNoteIdsFromMarkdown` for P1 backlinks). */
+type NoteRow = typeof wpnNotes.$inferSelect;
+type UserRow = typeof users.$inferSelect;
+
+/** Minimal markdown link → note id extraction for backlink scanning. */
 function collectReferencedNoteIdsFromMarkdown(text: string): Set<string> {
   const out = new Set<string>();
   const re = /\[([^\]]*)\]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)/g;
@@ -40,44 +49,36 @@ function collectReferencedNoteIdsFromMarkdown(text: string): Set<string> {
   while ((m = re.exec(text)) !== null) {
     const href = (m[2] ?? "").trim();
     const id = parseNoteIdFromInternalMarkdownHref(href);
-    if (id) {
-      out.add(id);
-    }
+    if (id) out.add(id);
   }
   return out;
 }
 
 function parseNoteIdFromInternalMarkdownHref(href: string): string | null {
   const raw = href.trim();
-  if (!raw) {
-    return null;
-  }
+  if (!raw) return null;
   let path = raw;
   const hashIdx = path.indexOf("#");
-  if (hashIdx >= 0) {
-    path = path.slice(hashIdx + 1);
-  }
+  if (hashIdx >= 0) path = path.slice(hashIdx + 1);
   path = path.replace(/^\/+/, "");
-  if (!path.startsWith("n/")) {
-    return null;
-  }
+  if (!path.startsWith("n/")) return null;
   const rest = path.slice("n/".length);
-  const parts = rest
-    .split("/")
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-  const noteId = parts[0];
-  return noteId ?? null;
+  const parts = rest.split("/").map((p) => p.trim()).filter((p) => p.length > 0);
+  return parts[0] ?? null;
 }
 
-/** Public row shape (no `settings` — use `/wpn/.../settings` like headless API). */
-function workspaceRow(doc: WpnWorkspaceDoc): Omit<WpnWorkspaceDoc, "userId" | "settings"> {
-  const { userId: _u, settings: _s, ...rest } = doc;
+/** Public row shape (drops userId + settings — same conventions as Mongo path). */
+function workspaceRow(d: WorkspaceRow): Omit<WorkspaceRow, "userId" | "settings"> {
+  const { userId: _u, settings: _s, ...rest } = d;
+  void _u;
+  void _s;
   return rest;
 }
 
-function projectRow(doc: WpnProjectDoc): Omit<WpnProjectDoc, "userId" | "settings"> {
-  const { userId: _u, settings: _s, ...rest } = doc;
+function projectRow(d: ProjectRow): Omit<ProjectRow, "userId" | "settings"> {
+  const { userId: _u, settings: _s, ...rest } = d;
+  void _u;
+  void _s;
   return rest;
 }
 
@@ -89,17 +90,12 @@ type WpnNoteListItemOut = {
   title: string;
   depth: number;
   sibling_index: number;
-  /**
-   * PLAN-06 slice 2: compact metadata slice for client-side search.
-   * Present only on image notes that set altText or caption. Absent
-   * (not empty object) when no hints apply, to keep list payloads tight.
-   */
   search_hints?: NoteSearchHints;
 };
 
-function listNotesFlatPreorder(rows: WpnNoteDoc[]): WpnNoteListItemOut[] {
+function listNotesFlatPreorder(rows: NoteRow[]): WpnNoteListItemOut[] {
   const active = rows.filter((r) => r.deleted !== true);
-  const cm = new Map<string | null, WpnNoteDoc[]>();
+  const cm = new Map<string | null, NoteRow[]>();
   for (const r of active) {
     const k = r.parent_id;
     const arr = cm.get(k) ?? [];
@@ -122,7 +118,10 @@ function listNotesFlatPreorder(rows: WpnNoteDoc[]): WpnNoteListItemOut[] {
         depth,
         sibling_index: r.sibling_index,
       };
-      const hints = buildNoteSearchHints({ type: r.type, metadata: r.metadata });
+      const hints = buildNoteSearchHints({
+        type: r.type,
+        metadata: (r.metadata ?? null) as Record<string, unknown> | null,
+      });
       if (hints) row.search_hints = hints;
       out.push(row);
       visit(r.id, depth + 1);
@@ -134,186 +133,153 @@ function listNotesFlatPreorder(rows: WpnNoteDoc[]): WpnNoteListItemOut[] {
 
 /**
  * Resolve the active-space scope for a read request. Honors `X-Archon-Space`
- * header then the JWT `activeSpaceId` claim. Grants access when the caller is:
- *   - a direct or team-granted member of the space, OR
- *   - an `admin` of the space's parent org (org-admin override).
- * Returns `null` otherwise — callers should respond with an empty tree so
- * stale data from another space can't leak.
+ * header then the JWT `activeSpaceId` claim. Falls back to default-space for
+ * master admins or active-org members. Returns null when no readable space.
  */
 async function resolveReadScope(
   request: FastifyRequest,
   auth: JwtPayload,
 ): Promise<{ spaceId: string; role: SpaceRole } | null> {
+  const db = getDb();
   let spaceId = resolveActiveSpaceId(request, auth);
-  let user: UserDoc | null = null;
-  try {
-    user = (await getUsersCollection().findOne({
-      _id: new ObjectId(auth.sub),
-    })) as UserDoc | null;
-  } catch {
-    user = null;
+  let user: UserRow | null = null;
+  if (isUuid(auth.sub)) {
+    const rows = await db
+      .select()
+      .from(users)
+      .where(eq(users.id, auth.sub))
+      .limit(1);
+    user = rows[0] ?? null;
   }
-  // Master admin with no active space in the request falls back to the
-  // default space of their default org so their own tree is always reachable.
   if (
     !spaceId &&
     user?.isMasterAdmin === true &&
     typeof user.defaultOrgId === "string" &&
     user.defaultOrgId.length > 0
   ) {
-    const { spaceId: fallback } = await ensureDefaultSpaceForOrg(
-      getActiveDb(),
-      user.defaultOrgId,
-      auth.sub,
-    );
-    spaceId = fallback;
+    const fallback = await ensureDefaultSpaceForOrg(user.defaultOrgId, auth.sub);
+    spaceId = fallback.spaceId;
   }
-  // Phase 8 safety net: if the caller has an `activeOrgId` claim but no
-  // `activeSpaceId` (e.g. a token minted before this fix shipped, or a future
-  // flow that forgets to set the claim), fall back to the org's default space
-  // as long as the caller is actually a member of that org. Without this the
-  // /wpn/* endpoints silently return an empty tree and the user is stuck.
-  // Read-only lookup — the access-check below (`effectiveRoleInSpace` / org-
-  // admin override) decides whether the caller can actually read that space.
-  if (!spaceId && typeof auth.activeOrgId === "string" && auth.activeOrgId.length > 0) {
-    const orgMembership = await getOrgMembershipsCollection().findOne({
-      orgId: auth.activeOrgId,
-      userId: auth.sub,
-    });
-    if (orgMembership) {
-      spaceId = await getDefaultSpaceIdForOrg(auth.activeOrgId);
+  if (
+    !spaceId &&
+    typeof auth.activeOrgId === "string" &&
+    auth.activeOrgId.length > 0
+  ) {
+    const orgRows = await db
+      .select({ id: orgMemberships.userId })
+      .from(orgMemberships)
+      .where(
+        and(
+          eq(orgMemberships.orgId, auth.activeOrgId),
+          eq(orgMemberships.userId, auth.sub),
+        ),
+      )
+      .limit(1);
+    if (orgRows.length > 0) {
+      spaceId = (await getDefaultSpaceIdForOrg(auth.activeOrgId)) ?? null;
     }
   }
-  if (!spaceId) {
-    return null;
-  }
+  if (!spaceId) return null;
   const directRole = await effectiveRoleInSpace(auth.sub, spaceId);
-  if (directRole) {
-    return { spaceId, role: directRole };
-  }
-  if (!/^[a-f0-9]{24}$/i.test(spaceId)) {
-    return null;
-  }
-  const space = await getSpacesCollection().findOne({ _id: new ObjectId(spaceId) });
-  if (!space) {
-    return null;
-  }
-  // Master admins see every existing space as owner — matches the intent of
-  // the Master Console (platform-wide read) without requiring them to be
-  // enrolled as a direct member of every space.
-  if (user?.isMasterAdmin === true) {
-    return { spaceId, role: "owner" };
-  }
-  const orgMembership = await getOrgMembershipsCollection().findOne({
-    orgId: space.orgId,
-    userId: auth.sub,
-  });
-  if (orgMembership?.role === "admin") {
+  if (directRole) return { spaceId, role: directRole };
+  if (!isUuid(spaceId)) return null;
+  const spaceRows = await db
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, spaceId))
+    .limit(1);
+  const space = spaceRows[0];
+  if (!space) return null;
+  if (user?.isMasterAdmin === true) return { spaceId, role: "owner" };
+  const orgMembershipRows = await db
+    .select({ role: orgMemberships.role })
+    .from(orgMemberships)
+    .where(
+      and(
+        eq(orgMemberships.orgId, space.orgId),
+        eq(orgMemberships.userId, auth.sub),
+      ),
+    )
+    .limit(1);
+  if (orgMembershipRows[0]?.role === "admin") {
     return { spaceId, role: "owner" };
   }
   return null;
 }
 
-/**
- * Workspaces the caller can see in `spaceId`, mirroring the single-id read
- * rules in `assertCanReadWorkspace`:
- *   - owner (userId or creator matches caller): always visible
- *   - public: any space member
- *   - private: creator + space-owners
- *   - shared: creator + space-owners + explicit `workspace_shares` allow-list
- * Sort stays in stored `sort_index` order so co-space-members see a stable
- * shared ordering.
- */
+/** Workspace ACL filter — same rules as assertCanReadWorkspace. */
 async function visibleWorkspacesInScope(
   userId: string,
   spaceId: string,
   spaceRole: SpaceRole,
-): Promise<WpnWorkspaceDoc[]> {
-  // The `$or` legacy clause catches workspaces that pre-date the space
-  // rollout (no `spaceId` set). They remain visible to their original
-  // owner, matching `assertCanReadWorkspace`'s legacy handling.
-  const candidates = await getWpnWorkspacesCollection()
-    .find({
-      $or: [{ spaceId }, { userId, spaceId: { $exists: false } }],
-    })
-    .sort({ sort_index: 1, name: 1 })
-    .toArray();
-  const sharedIds = new Set(
-    (await getWorkspaceSharesCollection().find({ userId }).toArray()).map(
-      (r) => r.workspaceId,
-    ),
-  );
+): Promise<WorkspaceRow[]> {
+  const db = getDb();
+  const candidates = await db
+    .select()
+    .from(wpnWorkspaces)
+    .where(
+      or(
+        eq(wpnWorkspaces.spaceId, spaceId),
+        and(eq(wpnWorkspaces.userId, userId), isNull(wpnWorkspaces.spaceId)),
+      ),
+    )
+    .orderBy(asc(wpnWorkspaces.sort_index), asc(wpnWorkspaces.name));
+  const sharedRows = await db
+    .select({ workspaceId: workspaceShares.workspaceId })
+    .from(workspaceShares)
+    .where(eq(workspaceShares.userId, userId));
+  const sharedIds = new Set(sharedRows.map((r) => r.workspaceId));
   return candidates.filter((ws) => {
     const creator = ws.creatorUserId ?? ws.userId;
-    if (ws.userId === userId || creator === userId) {
-      return true;
-    }
+    if (ws.userId === userId || creator === userId) return true;
     const visibility = ws.visibility ?? "public";
-    if (visibility === "public") {
-      return true;
-    }
-    if (spaceRole === "owner") {
-      return true;
-    }
-    if (visibility === "shared" && sharedIds.has(ws.id)) {
-      return true;
-    }
+    if (visibility === "public") return true;
+    if (spaceRole === "owner") return true;
+    if (visibility === "shared" && sharedIds.has(ws.id)) return true;
     return false;
   });
 }
 
-/**
- * Phase 8 — filter project docs by the new per-project ACL. Mirrors
- * {@link assertCanReadProject}:
- *   - space-owner (includes master-admin / org-admin override via resolveReadScope) → all
- *   - creator → always visible
- *   - public → visible
- *   - private → hidden (unless creator or override)
- *   - shared → visible iff row in `project_shares`
- */
 async function visibleProjectsInWorkspace(
   userId: string,
   spaceId: string,
   spaceRole: SpaceRole,
   wsIds: string[],
-): Promise<WpnProjectDoc[]> {
-  if (wsIds.length === 0) {
-    return [];
-  }
-  const projCol = getWpnProjectsCollection();
-  const candidates = await projCol
-    .find({
-      workspace_id: { $in: wsIds },
-      $or: [{ spaceId }, { userId, spaceId: { $exists: false } }],
-    })
-    .sort({ sort_index: 1, name: 1 })
-    .toArray();
-  if (candidates.length === 0) {
-    return [];
-  }
+): Promise<ProjectRow[]> {
+  if (wsIds.length === 0) return [];
+  const db = getDb();
+  const candidates = await db
+    .select()
+    .from(wpnProjects)
+    .where(
+      and(
+        inArray(wpnProjects.workspace_id, wsIds),
+        or(
+          eq(wpnProjects.spaceId, spaceId),
+          and(eq(wpnProjects.userId, userId), isNull(wpnProjects.spaceId)),
+        ),
+      ),
+    )
+    .orderBy(asc(wpnProjects.sort_index), asc(wpnProjects.name));
+  if (candidates.length === 0) return [];
   const candidateIds = candidates.map((p) => p.id);
-  const sharedIds = new Set(
-    (
-      await getProjectSharesCollection()
-        .find({ userId, projectId: { $in: candidateIds } })
-        .toArray()
-    ).map((r) => r.projectId),
-  );
+  const sharedRows = await db
+    .select({ projectId: projectShares.projectId })
+    .from(projectShares)
+    .where(
+      and(
+        eq(projectShares.userId, userId),
+        inArray(projectShares.projectId, candidateIds),
+      ),
+    );
+  const sharedIds = new Set(sharedRows.map((r) => r.projectId));
   return candidates.filter((p) => {
     const creator = p.creatorUserId ?? p.userId;
-    if (p.userId === userId || creator === userId) {
-      return true;
-    }
-    if (spaceRole === "owner") {
-      return true;
-    }
+    if (p.userId === userId || creator === userId) return true;
+    if (spaceRole === "owner") return true;
     const visibility = p.visibility ?? "public";
-    if (visibility === "public") {
-      return true;
-    }
-    if (visibility === "shared" && sharedIds.has(p.id)) {
-      return true;
-    }
+    if (visibility === "public") return true;
+    if (visibility === "shared" && sharedIds.has(p.id)) return true;
     return false;
   });
 }
@@ -323,27 +289,21 @@ export function registerWpnReadRoutes(
   opts: { jwtSecret: string },
 ): void {
   const { jwtSecret } = opts;
+  const db = (): ReturnType<typeof getDb> => getDb();
 
   app.get("/wpn/workspaces", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const scope = await resolveReadScope(request, auth);
-    if (!scope) {
-      return reply.send({ workspaces: [] });
-    }
+    if (!scope) return reply.send({ workspaces: [] });
     const docs = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
-    const workspaces = docs.map((d) => workspaceRow(d));
-    return reply.send({ workspaces });
+    return reply.send({ workspaces: docs.map((d) => workspaceRow(d)) });
   });
 
-  /** Single round-trip: returns full explorer tree — workspaces, projects, all note titles, all explorer states. */
+  /** Single round-trip explorer tree. */
   app.get("/wpn/full-tree", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const scope = await resolveReadScope(request, auth);
     if (!scope) {
       return reply.send({
@@ -354,8 +314,6 @@ export function registerWpnReadRoutes(
       });
     }
     const userId = auth.sub;
-    const noteCol = getWpnNotesCollection();
-    const exCol = getWpnExplorerStateCollection();
     const wsDocs = await visibleWorkspacesInScope(userId, scope.spaceId, scope.role);
     const wsIds = wsDocs.map((w) => w.id);
     const projDocs = await visibleProjectsInWorkspace(
@@ -367,21 +325,32 @@ export function registerWpnReadRoutes(
     const projectIds = projDocs.map((p) => p.id);
     const [noteDocs, exDocs] = await Promise.all([
       projectIds.length
-        ? noteCol
-            .find(
-              { project_id: { $in: projectIds }, deleted: { $ne: true } },
-              { projection: { content: 0, metadata: 0 } },
+        ? db()
+            .select()
+            .from(wpnNotes)
+            .where(
+              and(
+                inArray(wpnNotes.project_id, projectIds),
+                ne(wpnNotes.deleted, true),
+              ),
             )
-            .toArray()
-        : Promise.resolve([] as WpnNoteDoc[]),
+        : Promise.resolve([] as NoteRow[]),
       projectIds.length
-        ? exCol.find({ userId, project_id: { $in: projectIds } }).toArray()
-        : Promise.resolve([]),
+        ? db()
+            .select()
+            .from(wpnExplorerState)
+            .where(
+              and(
+                eq(wpnExplorerState.userId, userId),
+                inArray(wpnExplorerState.project_id, projectIds),
+              ),
+            )
+        : Promise.resolve([] as (typeof wpnExplorerState.$inferSelect)[]),
     ]);
-    const noteGroups = new Map<string, WpnNoteDoc[]>();
+    const noteGroups = new Map<string, NoteRow[]>();
     for (const n of noteDocs) {
       const arr = noteGroups.get(n.project_id) ?? [];
-      arr.push(n as WpnNoteDoc);
+      arr.push(n);
       noteGroups.set(n.project_id, arr);
     }
     const notesByProjectId: Record<string, WpnNoteListItemOut[]> = {};
@@ -402,16 +371,11 @@ export function registerWpnReadRoutes(
     });
   });
 
-  /** Single round-trip: returns all workspaces and all their projects with 2 parallel DB queries. */
   app.get("/wpn/workspaces-and-projects", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const scope = await resolveReadScope(request, auth);
-    if (!scope) {
-      return reply.send({ workspaces: [], projects: [] });
-    }
+    if (!scope) return reply.send({ workspaces: [], projects: [] });
     const wsDocs = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
     const wsIds = wsDocs.map((w) => w.id);
     const projDocs = await visibleProjectsInWorkspace(
@@ -428,20 +392,21 @@ export function registerWpnReadRoutes(
 
   app.get("/wpn/workspaces/:workspaceId/projects", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { workspaceId } = request.params as { workspaceId: string };
     const ws = await assertCanReadWorkspace(reply, auth, workspaceId);
-    if (!ws) {
-      return;
-    }
-    // Phase 8: apply per-project ACL. Use the workspace's space + caller's effective role.
+    if (!ws) return;
     if (!ws.spaceId) {
-      const docs = await getWpnProjectsCollection()
-        .find({ userId: ws.userId, workspace_id: workspaceId })
-        .sort({ sort_index: 1, name: 1 })
-        .toArray();
+      const docs = await db()
+        .select()
+        .from(wpnProjects)
+        .where(
+          and(
+            eq(wpnProjects.userId, ws.userId),
+            eq(wpnProjects.workspace_id, workspaceId),
+          ),
+        )
+        .orderBy(asc(wpnProjects.sort_index), asc(wpnProjects.name));
       return reply.send({ projects: docs.map((d) => projectRow(d)) });
     }
     const role = (await effectiveRoleInSpace(auth.sub, ws.spaceId)) ?? "owner";
@@ -456,37 +421,28 @@ export function registerWpnReadRoutes(
 
   app.get("/wpn/projects/:projectId/notes", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { projectId } = request.params as { projectId: string };
     const readResult = await assertCanReadProject(reply, auth, projectId);
-    if (!readResult) {
-      return;
-    }
+    if (!readResult) return;
     const { workspace: ws } = readResult;
-    const noteCol = getWpnNotesCollection();
-    const rows = await noteCol.find({ userId: ws.userId, project_id: projectId }).toArray();
-    const notes = listNotesFlatPreorder(rows);
-    return reply.send({ notes });
+    const rows = await db()
+      .select()
+      .from(wpnNotes)
+      .where(
+        and(eq(wpnNotes.userId, ws.userId), eq(wpnNotes.project_id, projectId)),
+      );
+    return reply.send({ notes: listNotesFlatPreorder(rows) });
   });
 
-  /** Single round-trip flat list for all projects (same row shape as `GET /wpn/projects/:id/notes`). */
   app.get("/wpn/all-notes-list", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const scope = await resolveReadScope(request, auth);
-    if (!scope) {
-      return reply.send({ notes: [] });
-    }
-    const noteCol = getWpnNotesCollection();
-    const workspaces = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
-    const wsIds = workspaces.map((w) => w.id);
-    if (wsIds.length === 0) {
-      return reply.send({ notes: [] });
-    }
+    if (!scope) return reply.send({ notes: [] });
+    const wsDocs = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
+    const wsIds = wsDocs.map((w) => w.id);
+    if (wsIds.length === 0) return reply.send({ notes: [] });
     const projects = await visibleProjectsInWorkspace(
       auth.sub,
       scope.spaceId,
@@ -495,7 +451,10 @@ export function registerWpnReadRoutes(
     );
     const out: WpnNoteListItemOut[] = [];
     for (const p of projects) {
-      const rows = await noteCol.find({ project_id: p.id }).toArray();
+      const rows = await db()
+        .select()
+        .from(wpnNotes)
+        .where(eq(wpnNotes.project_id, p.id));
       out.push(...listNotesFlatPreorder(rows));
     }
     return reply.send({ notes: out });
@@ -503,19 +462,12 @@ export function registerWpnReadRoutes(
 
   app.get("/wpn/notes-with-context", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const scope = await resolveReadScope(request, auth);
-    if (!scope) {
-      return reply.send({ notes: [] });
-    }
-    const noteCol = getWpnNotesCollection();
-    const workspaces = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
-    const wsIds = workspaces.map((w) => w.id);
-    if (wsIds.length === 0) {
-      return reply.send({ notes: [] });
-    }
+    if (!scope) return reply.send({ notes: [] });
+    const wsDocs = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
+    const wsIds = wsDocs.map((w) => w.id);
+    if (wsIds.length === 0) return reply.send({ notes: [] });
     const projects = await visibleProjectsInWorkspace(
       auth.sub,
       scope.spaceId,
@@ -523,13 +475,19 @@ export function registerWpnReadRoutes(
       wsIds,
     );
     const projectIds = projects.map((p) => p.id);
-    const notes = projectIds.length
-      ? await noteCol
-          .find({ project_id: { $in: projectIds }, deleted: { $ne: true } })
-          .toArray()
+    const noteRows = projectIds.length
+      ? await db()
+          .select()
+          .from(wpnNotes)
+          .where(
+            and(
+              inArray(wpnNotes.project_id, projectIds),
+              ne(wpnNotes.deleted, true),
+            ),
+          )
       : [];
     const projMap = new Map(projects.map((p) => [p.id, p]));
-    const wsMap = new Map(workspaces.map((w) => [w.id, w]));
+    const wsMap = new Map(wsDocs.map((w) => [w.id, w]));
     const out: {
       id: string;
       title: string;
@@ -539,15 +497,11 @@ export function registerWpnReadRoutes(
       workspace_id: string;
       workspace_name: string;
     }[] = [];
-    for (const n of notes) {
+    for (const n of noteRows) {
       const p = projMap.get(n.project_id);
-      if (!p) {
-        continue;
-      }
+      if (!p) continue;
       const w = wsMap.get(p.workspace_id);
-      if (!w) {
-        continue;
-      }
+      if (!w) continue;
       out.push({
         id: n.id,
         type: n.type,
@@ -563,35 +517,32 @@ export function registerWpnReadRoutes(
 
   app.get("/wpn/backlinks/:noteId", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { noteId } = request.params as { noteId: string };
     const scope = await resolveReadScope(request, auth);
-    if (!scope) {
-      return reply.send({ sources: [] });
-    }
-    const noteCol = getWpnNotesCollection();
-    const workspaces = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
-    const wsIds = workspaces.map((w) => w.id);
-    if (wsIds.length === 0) {
-      return reply.send({ sources: [] });
-    }
+    if (!scope) return reply.send({ sources: [] });
+    const wsDocs = await visibleWorkspacesInScope(auth.sub, scope.spaceId, scope.role);
+    const wsIds = wsDocs.map((w) => w.id);
+    if (wsIds.length === 0) return reply.send({ sources: [] });
     const projects = await visibleProjectsInWorkspace(
       auth.sub,
       scope.spaceId,
       scope.role,
       wsIds,
     );
-    const projectIds = new Set(projects.map((p) => p.id));
-    const candidates = await noteCol
-      .find({
-        project_id: { $in: [...projectIds] },
-        deleted: { $ne: true },
-      })
-      .toArray();
+    const projectIds = projects.map((p) => p.id);
+    if (projectIds.length === 0) return reply.send({ sources: [] });
+    const candidates = await db()
+      .select()
+      .from(wpnNotes)
+      .where(
+        and(
+          inArray(wpnNotes.project_id, projectIds),
+          ne(wpnNotes.deleted, true),
+        ),
+      );
     const targetNote = candidates.find((n) => n.id === noteId);
-    const wsById = new Map(workspaces.map((w) => [w.id, w]));
+    const wsById = new Map(wsDocs.map((w) => [w.id, w]));
     const projById = new Map(projects.map((p) => [p.id, p]));
     const vfsTarget = (() => {
       if (!targetNote) return null;
@@ -608,9 +559,7 @@ export function registerWpnReadRoutes(
     })();
     const sources: { id: string; title: string; project_id: string }[] = [];
     for (const n of candidates) {
-      if (n.id === noteId) {
-        continue;
-      }
+      if (n.id === noteId) continue;
       const content = n.content ?? "";
       const directRefs = collectReferencedNoteIdsFromMarkdown(content);
       const hitDirect = directRefs.has(noteId);
@@ -624,54 +573,64 @@ export function registerWpnReadRoutes(
     return reply.send({ sources });
   });
 
-  app.get("/wpn/projects/:projectId/explorer-state", async (request, reply) => {
-    const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
-    const { projectId } = request.params as { projectId: string };
-    const readResult = await assertCanReadProject(reply, auth, projectId);
-    if (!readResult) {
-      return;
-    }
-    const userId = auth.sub;
-    const exCol = getWpnExplorerStateCollection();
-    const doc = await exCol.findOne({ userId, project_id: projectId });
-    const expanded_ids = Array.isArray(doc?.expanded_ids) ? doc!.expanded_ids : [];
-    return reply.send({ expanded_ids });
-  });
+  app.get(
+    "/wpn/projects/:projectId/explorer-state",
+    async (request, reply) => {
+      const auth = await requireAuth(request, reply, jwtSecret);
+      if (!auth) return;
+      const { projectId } = request.params as { projectId: string };
+      const readResult = await assertCanReadProject(reply, auth, projectId);
+      if (!readResult) return;
+      const userId = auth.sub;
+      const rows = await db()
+        .select({ expanded_ids: wpnExplorerState.expanded_ids })
+        .from(wpnExplorerState)
+        .where(
+          and(
+            eq(wpnExplorerState.userId, userId),
+            eq(wpnExplorerState.project_id, projectId),
+          ),
+        )
+        .limit(1);
+      const expanded_ids = Array.isArray(rows[0]?.expanded_ids)
+        ? rows[0]!.expanded_ids
+        : [];
+      return reply.send({ expanded_ids });
+    },
+  );
 
   app.get("/wpn/notes/:id", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { id } = request.params as { id: string };
     const ws = await assertCanReadWorkspaceForNote(reply, auth, id);
-    if (!ws) {
-      return;
-    }
-    const noteCol = getWpnNotesCollection();
-    const n = await noteCol.findOne({ id, deleted: { $ne: true } });
+    if (!ws) return;
+    const noteRows = await db()
+      .select()
+      .from(wpnNotes)
+      .where(and(eq(wpnNotes.id, id), ne(wpnNotes.deleted, true)))
+      .limit(1);
+    const n = noteRows[0];
     if (!n) {
       return reply.status(404).send({ error: "Note not found" });
     }
-    // Phase 6 — resolve display info for created_by / updated_by.
     const ids = new Set<string>();
     if (n.created_by_user_id) ids.add(n.created_by_user_id);
     if (n.updated_by_user_id) ids.add(n.updated_by_user_id);
-    let usersById = new Map<string, UserDoc>();
+    const usersById = new Map<string, UserRow>();
     if (ids.size > 0) {
-      const users = (await getUsersCollection()
-        .find({
-          _id: {
-            $in: [...ids].filter((s) => /^[a-f0-9]{24}$/i.test(s)).map((s) => new ObjectId(s)),
-          },
-        })
-        .toArray()) as UserDoc[];
-      usersById = new Map(users.map((u) => [u._id.toHexString(), u]));
+      const userIds = [...ids].filter(isUuid);
+      if (userIds.length > 0) {
+        const userDocs = await db()
+          .select()
+          .from(users)
+          .where(inArray(users.id, userIds));
+        for (const u of userDocs) {
+          usersById.set(u.id, u);
+        }
+      }
     }
-    const author = (uid: string | undefined) => {
+    const author = (uid: string | null | undefined) => {
       if (!uid) return null;
       const u = usersById.get(uid);
       if (!u) return null;
@@ -703,23 +662,18 @@ export function registerWpnReadRoutes(
     return reply.send({ note });
   });
 
-  /**
-   * Resolve a note's full scope chain — { noteId, projectId, workspaceId, spaceId, orgId }.
-   * Used by MCP clients to auto-switch active org/space when a tool is invoked
-   * with a noteId that lives outside the currently active scope. Returns 404
-   * (via assertCanReadWorkspaceForNote) when the note is missing or unreadable.
-   */
   app.get("/wpn/notes/:id/scope", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { id } = request.params as { id: string };
     const ws = await assertCanReadWorkspaceForNote(reply, auth, id);
-    if (!ws) {
-      return;
-    }
-    const note = await getWpnNotesCollection().findOne({ id, deleted: { $ne: true } });
+    if (!ws) return;
+    const noteRows = await db()
+      .select({ project_id: wpnNotes.project_id })
+      .from(wpnNotes)
+      .where(and(eq(wpnNotes.id, id), ne(wpnNotes.deleted, true)))
+      .limit(1);
+    const note = noteRows[0];
     if (!note) {
       return reply.status(404).send({ error: "Note not found" });
     }
@@ -731,4 +685,6 @@ export function registerWpnReadRoutes(
       orgId: ws.orgId ?? null,
     });
   });
+
+  void sql;
 }
