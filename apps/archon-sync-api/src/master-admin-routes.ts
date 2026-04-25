@@ -1,51 +1,67 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import bcrypt from "bcryptjs";
 import type { FastifyInstance } from "fastify";
-import { ObjectId } from "mongodb";
+import {
+  asc,
+  count,
+  eq,
+  and,
+  gt,
+  ilike,
+  inArray,
+  ne,
+  sql,
+} from "drizzle-orm";
 import { z } from "zod";
 import { requireMasterAdmin } from "./admin-auth.js";
+import { getDb } from "./pg.js";
 import {
-  getOrgMembershipsCollection,
-  getOrgsCollection,
-  getSpaceMembershipsCollection,
-  getSpacesCollection,
-  getTeamMembershipsCollection,
-  getUsersCollection,
-  getWorkspaceSharesCollection,
-  getWpnExplorerStateCollection,
-  getWpnNotesCollection,
-  getWpnProjectsCollection,
-  getWpnWorkspacesCollection,
-  type UserDoc,
-} from "./db.js";
+  organizations,
+  orgMemberships,
+  projectShares,
+  spaceMemberships,
+  spaces,
+  teamMemberships,
+  users,
+  workspaceShares,
+  wpnExplorerState,
+  wpnNotes,
+  wpnProjects,
+  wpnWorkspaces,
+} from "./db/schema.js";
 import { recordAudit } from "./audit.js";
+import { isUuid } from "./db/legacy-id-map.js";
 
 function generateTempPassword(): string {
   return randomBytes(9).toString("base64url");
 }
 
-const upsertMasterBody = z.object({
-  email: z.string().email().optional(),
-  userId: z.string().min(1).optional(),
-  password: z.string().min(8).max(256).optional(),
-}).refine((d) => d.email || d.userId, {
-  message: "email or userId required",
-});
+const upsertMasterBody = z
+  .object({
+    email: z.string().email().optional(),
+    userId: z.string().min(1).optional(),
+    password: z.string().min(8).max(256).optional(),
+  })
+  .refine((d) => d.email || d.userId, {
+    message: "email or userId required",
+  });
 
-const upsertOrgAdminBody = z.object({
-  email: z.string().email().optional(),
-  userId: z.string().min(1).optional(),
-  password: z.string().min(8).max(256).optional(),
-}).refine((d) => d.email || d.userId, {
-  message: "email or userId required",
-});
-
-function isObjectIdHex(s: string): boolean {
-  return /^[a-f0-9]{24}$/i.test(s);
-}
+const upsertOrgAdminBody = z
+  .object({
+    email: z.string().email().optional(),
+    userId: z.string().min(1).optional(),
+    password: z.string().min(8).max(256).optional(),
+  })
+  .refine((d) => d.email || d.userId, {
+    message: "email or userId required",
+  });
 
 async function countMasterAdmins(): Promise<number> {
-  return getUsersCollection().countDocuments({ isMasterAdmin: true });
+  const rows = await getDb()
+    .select({ n: count() })
+    .from(users)
+    .where(eq(users.isMasterAdmin, true));
+  return rows[0]?.n ?? 0;
 }
 
 export function registerMasterAdminRoutes(
@@ -53,18 +69,19 @@ export function registerMasterAdminRoutes(
   opts: { jwtSecret: string },
 ): void {
   const { jwtSecret } = opts;
+  const db = (): ReturnType<typeof getDb> => getDb();
 
-  /** Master-only: list every org on the platform (metadata only, no content). */
+  /** Master-only: list every org on the platform (metadata only). */
   app.get("/master/orgs", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
-    const orgs = await getOrgsCollection()
-      .find({})
-      .sort({ name: 1 })
-      .toArray();
+    const orgs = await db()
+      .select()
+      .from(organizations)
+      .orderBy(asc(organizations.name));
     return reply.send({
       orgs: orgs.map((o) => ({
-        orgId: o._id.toHexString(),
+        orgId: o.id,
         name: o.name,
         slug: o.slug,
         createdAt: o.createdAt,
@@ -76,13 +93,14 @@ export function registerMasterAdminRoutes(
   app.get("/master/admins", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
-    const users = (await getUsersCollection()
-      .find({ isMasterAdmin: true })
-      .sort({ email: 1 })
-      .toArray()) as UserDoc[];
+    const userRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.isMasterAdmin, true))
+      .orderBy(asc(users.email));
     return reply.send({
-      admins: users.map((u) => ({
-        userId: u._id.toHexString(),
+      admins: userRows.map((u) => ({
+        userId: u.id,
         email: u.email,
         displayName: u.displayName ?? null,
       })),
@@ -90,9 +108,7 @@ export function registerMasterAdminRoutes(
   });
 
   /**
-   * Master-only: create a new master admin, either by promoting an existing
-   * user (body.userId) or minting a fresh account (body.email, optional
-   * body.password — otherwise a temp password is generated and returned once).
+   * Master-only: create a new master admin (promote existing or mint fresh).
    */
   app.post("/master/admins", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
@@ -101,24 +117,24 @@ export function registerMasterAdminRoutes(
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const users = getUsersCollection();
 
     if (parsed.data.userId) {
-      if (!isObjectIdHex(parsed.data.userId)) {
+      if (!isUuid(parsed.data.userId)) {
         return reply.status(400).send({ error: "Invalid user id" });
       }
-      const u = (await users.findOne({
-        _id: new ObjectId(parsed.data.userId),
-      })) as UserDoc | null;
-      if (!u) {
-        return reply.status(404).send({ error: "User not found" });
-      }
-      await users.updateOne(
-        { _id: u._id },
-        { $set: { isMasterAdmin: true } },
-      );
+      const rows = await db()
+        .select()
+        .from(users)
+        .where(eq(users.id, parsed.data.userId))
+        .limit(1);
+      const u = rows[0];
+      if (!u) return reply.status(404).send({ error: "User not found" });
+      await db()
+        .update(users)
+        .set({ isMasterAdmin: true })
+        .where(eq(users.id, u.id));
       return reply.send({
-        userId: u._id.toHexString(),
+        userId: u.id,
         email: u.email,
         isMasterAdmin: true,
         createdUser: false,
@@ -126,22 +142,29 @@ export function registerMasterAdminRoutes(
     }
 
     const email = parsed.data.email!.trim().toLowerCase();
-    const existing = (await users.findOne({ email })) as UserDoc | null;
-    if (existing) {
+    const existingRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
+    if (existingRows[0]) {
       return reply.status(409).send({
-        error: "Email already registered; pass userId to promote the existing account",
+        error:
+          "Email already registered; pass userId to promote the existing account",
       });
     }
     const password = parsed.data.password ?? generateTempPassword();
     const passwordHash = await bcrypt.hash(password, 12);
-    const ins = await users.insertOne({
+    const newUserId = randomUUID();
+    await db().insert(users).values({
+      id: newUserId,
       email,
       passwordHash,
       mustSetPassword: parsed.data.password ? false : true,
       isMasterAdmin: true,
-    } as Omit<UserDoc, "_id">);
+    });
     return reply.send({
-      userId: ins.insertedId.toHexString(),
+      userId: newUserId,
       email,
       isMasterAdmin: true,
       createdUser: true,
@@ -154,7 +177,7 @@ export function registerMasterAdminRoutes(
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { userId } = request.params as { userId: string };
-    if (!isObjectIdHex(userId)) {
+    if (!isUuid(userId)) {
       return reply.status(400).send({ error: "Invalid user id" });
     }
     const total = await countMasterAdmins();
@@ -163,11 +186,12 @@ export function registerMasterAdminRoutes(
         .status(409)
         .send({ error: "Cannot demote the last master admin" });
     }
-    const result = await getUsersCollection().updateOne(
-      { _id: new ObjectId(userId), isMasterAdmin: true },
-      { $unset: { isMasterAdmin: "" } },
-    );
-    if (result.matchedCount === 0) {
+    const result = await db()
+      .update(users)
+      .set({ isMasterAdmin: null })
+      .where(and(eq(users.id, userId), eq(users.isMasterAdmin, true)))
+      .returning({ id: users.id });
+    if (result.length === 0) {
       return reply.status(404).send({ error: "Master admin not found" });
     }
     return reply.status(204).send();
@@ -178,14 +202,24 @@ export function registerMasterAdminRoutes(
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { orgId } = request.params as { orgId: string };
-    const rows = await getOrgMembershipsCollection()
-      .find({ orgId, role: "admin" })
-      .toArray();
-    const userIds = rows.map((r) => r.userId).filter(isObjectIdHex);
-    const users = (await getUsersCollection()
-      .find({ _id: { $in: userIds.map((id) => new ObjectId(id)) } })
-      .toArray()) as UserDoc[];
-    const byId = new Map(users.map((u) => [u._id.toHexString(), u]));
+    const rows = await db()
+      .select()
+      .from(orgMemberships)
+      .where(
+        and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.role, "admin")),
+      );
+    const userIds = rows.map((r) => r.userId);
+    const userRows = userIds.length
+      ? await db()
+          .select({
+            id: users.id,
+            email: users.email,
+            displayName: users.displayName,
+          })
+          .from(users)
+          .where(inArray(users.id, userIds))
+      : [];
+    const byId = new Map(userRows.map((u) => [u.id, u]));
     return reply.send({
       admins: rows.map((r) => {
         const u = byId.get(r.userId);
@@ -199,78 +233,84 @@ export function registerMasterAdminRoutes(
     });
   });
 
-  /**
-   * Master-only: create or promote an org admin. Body accepts either
-   * `userId` (promote existing user) or `email` + optional `password` (mint
-   * a new user locked to this org, return the temp password once).
-   */
+  /** Master-only: create or promote an org admin. */
   app.post("/master/orgs/:orgId/admins", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { orgId } = request.params as { orgId: string };
-    if (!isObjectIdHex(orgId)) {
+    if (!isUuid(orgId)) {
       return reply.status(400).send({ error: "Invalid org id" });
     }
-    const org = await getOrgsCollection().findOne({ _id: new ObjectId(orgId) });
-    if (!org) {
+    const orgRows = await db()
+      .select()
+      .from(organizations)
+      .where(eq(organizations.id, orgId))
+      .limit(1);
+    if (!orgRows[0]) {
       return reply.status(404).send({ error: "Organization not found" });
     }
     const parsed = upsertOrgAdminBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const users = getUsersCollection();
-    const memberships = getOrgMembershipsCollection();
 
-    let userIdHex: string;
+    let userId: string;
     let createdUser = false;
     let mintedPassword: string | undefined;
 
     if (parsed.data.userId) {
-      if (!isObjectIdHex(parsed.data.userId)) {
+      if (!isUuid(parsed.data.userId)) {
         return reply.status(400).send({ error: "Invalid user id" });
       }
-      const u = (await users.findOne({
-        _id: new ObjectId(parsed.data.userId),
-      })) as UserDoc | null;
-      if (!u) {
+      const uRows = await db()
+        .select()
+        .from(users)
+        .where(eq(users.id, parsed.data.userId))
+        .limit(1);
+      if (!uRows[0]) {
         return reply.status(404).send({ error: "User not found" });
       }
-      userIdHex = u._id.toHexString();
+      userId = uRows[0].id;
     } else {
       const email = parsed.data.email!.trim().toLowerCase();
-      const existing = (await users.findOne({ email })) as UserDoc | null;
-      if (existing) {
+      const existing = await db()
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
+      if (existing[0]) {
         return reply.status(409).send({
-          error: "Email already registered; pass userId to promote that account",
+          error:
+            "Email already registered; pass userId to promote that account",
         });
       }
       const password = parsed.data.password ?? generateTempPassword();
       const passwordHash = await bcrypt.hash(password, 12);
-      const ins = await users.insertOne({
+      userId = randomUUID();
+      await db().insert(users).values({
+        id: userId,
         email,
         passwordHash,
         mustSetPassword: parsed.data.password ? false : true,
         lockedOrgId: orgId,
         defaultOrgId: orgId,
-      } as Omit<UserDoc, "_id">);
-      userIdHex = ins.insertedId.toHexString();
+      });
       createdUser = true;
       mintedPassword = parsed.data.password ? undefined : password;
     }
 
-    await memberships.updateOne(
-      { orgId, userId: userIdHex },
-      {
-        $set: { role: "admin" },
-        $setOnInsert: {
-          orgId,
-          userId: userIdHex,
-          joinedAt: new Date(),
-        },
-      },
-      { upsert: true },
-    );
+    await db()
+      .insert(orgMemberships)
+      .values({
+        orgId,
+        userId,
+        role: "admin",
+        joinedAt: new Date(),
+      })
+      .onConflictDoUpdate({
+        target: [orgMemberships.orgId, orgMemberships.userId],
+        set: { role: "admin" },
+      });
 
     await recordAudit({
       orgId,
@@ -279,48 +319,59 @@ export function registerMasterAdminRoutes(
         ? "master.org_admin.create_with_password"
         : "master.org_admin.promote",
       targetType: "org_membership",
-      targetId: userIdHex,
+      targetId: userId,
     });
 
-    const u = (await users.findOne({ _id: new ObjectId(userIdHex) })) as UserDoc;
+    const finalUserRows = await db()
+      .select({ email: users.email })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
     return reply.send({
-      userId: userIdHex,
-      email: u.email,
+      userId,
+      email: finalUserRows[0]?.email ?? "",
       role: "admin",
       createdUser,
       password: mintedPassword,
     });
   });
 
-  /**
-   * Master-only: demote an org admin (set their membership role to `member`).
-   * Does not remove them from the org.
-   */
-  app.delete("/master/orgs/:orgId/admins/:userId", async (request, reply) => {
-    const ctx = await requireMasterAdmin(request, reply, jwtSecret);
-    if (!ctx) return;
-    const { orgId, userId } = request.params as { orgId: string; userId: string };
-    const result = await getOrgMembershipsCollection().updateOne(
-      { orgId, userId, role: "admin" },
-      { $set: { role: "member" } },
-    );
-    if (result.matchedCount === 0) {
-      return reply.status(404).send({ error: "Org admin not found" });
-    }
-    await recordAudit({
-      orgId,
-      actorUserId: ctx.auth.sub,
-      action: "master.org_admin.demote",
-      targetType: "org_membership",
-      targetId: userId,
-    });
-    return reply.status(204).send();
-  });
+  /** Master-only: demote an org admin (sets role to member). */
+  app.delete(
+    "/master/orgs/:orgId/admins/:userId",
+    async (request, reply) => {
+      const ctx = await requireMasterAdmin(request, reply, jwtSecret);
+      if (!ctx) return;
+      const { orgId, userId } = request.params as {
+        orgId: string;
+        userId: string;
+      };
+      const result = await db()
+        .update(orgMemberships)
+        .set({ role: "member" })
+        .where(
+          and(
+            eq(orgMemberships.orgId, orgId),
+            eq(orgMemberships.userId, userId),
+            eq(orgMemberships.role, "admin"),
+          ),
+        )
+        .returning({ orgId: orgMemberships.orgId });
+      if (result.length === 0) {
+        return reply.status(404).send({ error: "Org admin not found" });
+      }
+      await recordAudit({
+        orgId,
+        actorUserId: ctx.auth.sub,
+        action: "master.org_admin.demote",
+        targetType: "org_membership",
+        targetId: userId,
+      });
+      return reply.status(204).send();
+    },
+  );
 
-  /**
-   * Master-only: paginated platform-wide user listing. Optional `q` filters
-   * by case-insensitive email substring. Cursor is the last returned `userId`.
-   */
+  /** Master-only: paginated platform-wide user listing. */
   app.get("/master/users", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
@@ -335,59 +386,72 @@ export function registerMasterAdminRoutes(
       return reply.status(400).send({ error: q.error.flatten() });
     }
     const limit = q.data.limit ?? 50;
-    const filter: Record<string, unknown> = {};
+    const conds = [] as ReturnType<typeof eq>[];
     if (q.data.q && q.data.q.length > 0) {
-      const escaped = q.data.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      filter.email = { $regex: escaped, $options: "i" };
+      conds.push(ilike(users.email, `%${q.data.q}%`));
     }
-    if (q.data.cursor && isObjectIdHex(q.data.cursor)) {
-      filter._id = { $gt: new ObjectId(q.data.cursor) };
+    if (q.data.cursor && isUuid(q.data.cursor)) {
+      conds.push(gt(users.id, q.data.cursor));
     }
-    const docs = (await getUsersCollection()
-      .find(filter)
-      .sort({ _id: 1 })
-      .limit(limit + 1)
-      .toArray()) as UserDoc[];
+    const where = conds.length > 0 ? and(...conds) : undefined;
+    const docs = await (where
+      ? db()
+          .select()
+          .from(users)
+          .where(where)
+          .orderBy(asc(users.id))
+          .limit(limit + 1)
+      : db().select().from(users).orderBy(asc(users.id)).limit(limit + 1));
     const hasMore = docs.length > limit;
     const rows = hasMore ? docs.slice(0, limit) : docs;
-    const orgMemberships = (await getOrgMembershipsCollection()
-      .aggregate([
-        { $match: { userId: { $in: rows.map((u) => u._id.toHexString()) } } },
-        { $group: { _id: "$userId", count: { $sum: 1 } } },
-      ])
-      .toArray()) as Array<{ _id: string; count: number }>;
+    const userIds = rows.map((u) => u.id);
+    const orgCountRows = userIds.length
+      ? await db()
+          .select({
+            userId: orgMemberships.userId,
+            n: sql<number>`count(*)::int`,
+          })
+          .from(orgMemberships)
+          .where(inArray(orgMemberships.userId, userIds))
+          .groupBy(orgMemberships.userId)
+      : [];
     const orgCountByUser = new Map<string, number>(
-      orgMemberships.map((m) => [m._id, m.count]),
+      orgCountRows.map((m) => [m.userId, m.n]),
     );
     return reply.send({
       users: rows.map((u) => ({
-        userId: u._id.toHexString(),
+        userId: u.id,
         email: u.email,
         displayName: u.displayName ?? null,
         isMasterAdmin: u.isMasterAdmin === true,
         lockedOrgId: u.lockedOrgId ?? null,
         disabled: u.disabled === true,
         mustSetPassword: u.mustSetPassword === true,
-        orgCount: orgCountByUser.get(u._id.toHexString()) ?? 0,
+        orgCount: orgCountByUser.get(u.id) ?? 0,
       })),
-      nextCursor: hasMore ? rows[rows.length - 1]!._id.toHexString() : null,
+      nextCursor: hasMore ? rows[rows.length - 1]!.id : null,
     });
   });
 
-  /** Master-only: disable a user account. Idempotent. Rejects self + other masters. */
+  /** Master-only: disable a user. */
   app.post("/master/users/:userId/disable", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { userId } = request.params as { userId: string };
-    if (!isObjectIdHex(userId)) {
+    if (!isUuid(userId)) {
       return reply.status(400).send({ error: "Invalid user id" });
     }
     if (userId === ctx.auth.sub) {
-      return reply.status(400).send({ error: "Cannot disable your own account" });
+      return reply
+        .status(400)
+        .send({ error: "Cannot disable your own account" });
     }
-    const target = (await getUsersCollection().findOne({
-      _id: new ObjectId(userId),
-    })) as UserDoc | null;
+    const targetRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const target = targetRows[0];
     if (!target) {
       return reply.status(404).send({ error: "User not found" });
     }
@@ -396,29 +460,31 @@ export function registerMasterAdminRoutes(
         error: "Demote the master admin before disabling the account",
       });
     }
-    await getUsersCollection().updateOne(
-      { _id: new ObjectId(userId) },
-      {
-        $set: { disabled: true },
-        $unset: { refreshSessions: "", activeRefreshJti: "" },
-      },
-    );
+    await db()
+      .update(users)
+      .set({
+        disabled: true,
+        refreshSessions: null,
+        activeRefreshJti: null,
+      })
+      .where(eq(users.id, userId));
     return reply.send({ userId, disabled: true });
   });
 
-  /** Master-only: re-enable a disabled user account. Idempotent. */
+  /** Master-only: re-enable a disabled user. */
   app.post("/master/users/:userId/enable", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { userId } = request.params as { userId: string };
-    if (!isObjectIdHex(userId)) {
+    if (!isUuid(userId)) {
       return reply.status(400).send({ error: "Invalid user id" });
     }
-    const result = await getUsersCollection().updateOne(
-      { _id: new ObjectId(userId) },
-      { $unset: { disabled: "" } },
-    );
-    if (result.matchedCount === 0) {
+    const result = await db()
+      .update(users)
+      .set({ disabled: null })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id });
+    if (result.length === 0) {
       return reply.status(404).send({ error: "User not found" });
     }
     return reply.send({ userId, disabled: false });
@@ -426,22 +492,27 @@ export function registerMasterAdminRoutes(
 
   /**
    * Master-only: hard-delete a user. Cascades content the user solely owned
-   * and, for spaces where they're the sole owner, reassigns ownership to an
-   * admin of the parent org. Returns 409 with a list of un-reassignable
-   * spaces when no replacement owner exists in their parent orgs.
+   * and reassigns sole-owner spaces to an admin of the parent org. Returns
+   * 409 with the un-reassignable list when no replacement owner exists.
    */
   app.delete("/master/users/:userId", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
     const { userId } = request.params as { userId: string };
-    if (!isObjectIdHex(userId)) {
+    if (!isUuid(userId)) {
       return reply.status(400).send({ error: "Invalid user id" });
     }
     if (userId === ctx.auth.sub) {
-      return reply.status(400).send({ error: "Cannot delete your own account" });
+      return reply
+        .status(400)
+        .send({ error: "Cannot delete your own account" });
     }
-    const targetOid = new ObjectId(userId);
-    const target = (await getUsersCollection().findOne({ _id: targetOid })) as UserDoc | null;
+    const targetRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const target = targetRows[0];
     if (!target) {
       return reply.status(404).send({ error: "User not found" });
     }
@@ -451,32 +522,58 @@ export function registerMasterAdminRoutes(
       });
     }
 
-    // Pre-flight: find spaces where target is a sole owner and try to pick a new owner.
-    const ownedSpaces = await getSpaceMembershipsCollection()
-      .find({ userId, role: "owner" })
-      .toArray();
+    // Find spaces where target is sole owner.
+    const ownedSpaces = await db()
+      .select()
+      .from(spaceMemberships)
+      .where(
+        and(
+          eq(spaceMemberships.userId, userId),
+          eq(spaceMemberships.role, "owner"),
+        ),
+      );
     const reassignments: { spaceId: string; newOwnerId: string }[] = [];
     const unresolved: { spaceId: string; name: string }[] = [];
     for (const m of ownedSpaces) {
-      const otherOwners = await getSpaceMembershipsCollection().countDocuments({
-        spaceId: m.spaceId,
-        role: "owner",
-        userId: { $ne: userId },
-      });
+      const otherOwnersRow = await db()
+        .select({ n: count() })
+        .from(spaceMemberships)
+        .where(
+          and(
+            eq(spaceMemberships.spaceId, m.spaceId),
+            eq(spaceMemberships.role, "owner"),
+            ne(spaceMemberships.userId, userId),
+          ),
+        );
+      const otherOwners = otherOwnersRow[0]?.n ?? 0;
       if (otherOwners > 0) continue;
-      if (!isObjectIdHex(m.spaceId)) continue;
-      const space = await getSpacesCollection().findOne({ _id: new ObjectId(m.spaceId) });
+      const spaceRows = await db()
+        .select()
+        .from(spaces)
+        .where(eq(spaces.id, m.spaceId))
+        .limit(1);
+      const space = spaceRows[0];
       if (!space) continue;
-      const replacement = await getOrgMembershipsCollection().findOne({
-        orgId: space.orgId,
-        role: "admin",
-        userId: { $ne: userId },
-      });
+      const replacementRows = await db()
+        .select({ userId: orgMemberships.userId })
+        .from(orgMemberships)
+        .where(
+          and(
+            eq(orgMemberships.orgId, space.orgId),
+            eq(orgMemberships.role, "admin"),
+            ne(orgMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      const replacement = replacementRows[0];
       if (!replacement) {
         unresolved.push({ spaceId: m.spaceId, name: space.name });
         continue;
       }
-      reassignments.push({ spaceId: m.spaceId, newOwnerId: replacement.userId });
+      reassignments.push({
+        spaceId: m.spaceId,
+        newOwnerId: replacement.userId,
+      });
     }
     if (unresolved.length > 0) {
       return reply.status(409).send({
@@ -488,47 +585,57 @@ export function registerMasterAdminRoutes(
 
     // Apply space-ownership transfers.
     for (const r of reassignments) {
-      await getSpaceMembershipsCollection().updateOne(
-        { spaceId: r.spaceId, userId: r.newOwnerId },
-        {
-          $set: { role: "owner" },
-          $setOnInsert: {
-            spaceId: r.spaceId,
-            userId: r.newOwnerId,
-            addedByUserId: ctx.auth.sub,
-            joinedAt: new Date(),
-          },
-        },
-        { upsert: true },
-      );
+      await db()
+        .insert(spaceMemberships)
+        .values({
+          spaceId: r.spaceId,
+          userId: r.newOwnerId,
+          role: "owner",
+          addedByUserId: ctx.auth.sub,
+          joinedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: [spaceMemberships.spaceId, spaceMemberships.userId],
+          set: { role: "owner" },
+        });
     }
 
     // Cascade the user's owned WPN content.
-    const ownedWorkspaces = await getWpnWorkspacesCollection().find({ userId }).toArray();
+    const ownedWorkspaces = await db()
+      .select({ id: wpnWorkspaces.id })
+      .from(wpnWorkspaces)
+      .where(eq(wpnWorkspaces.userId, userId));
     const wsIds = ownedWorkspaces.map((w) => w.id);
     if (wsIds.length > 0) {
-      const projects = await getWpnProjectsCollection()
-        .find({ workspace_id: { $in: wsIds } })
-        .toArray();
+      const projects = await db()
+        .select({ id: wpnProjects.id })
+        .from(wpnProjects)
+        .where(inArray(wpnProjects.workspace_id, wsIds));
       const projectIds = projects.map((p) => p.id);
       if (projectIds.length > 0) {
-        await getWpnNotesCollection().deleteMany({ project_id: { $in: projectIds } });
-        await getWpnExplorerStateCollection().deleteMany({
-          project_id: { $in: projectIds },
-        });
+        await db()
+          .delete(wpnNotes)
+          .where(inArray(wpnNotes.project_id, projectIds));
+        await db()
+          .delete(wpnExplorerState)
+          .where(inArray(wpnExplorerState.project_id, projectIds));
+        await db()
+          .delete(projectShares)
+          .where(inArray(projectShares.projectId, projectIds));
       }
-      await getWpnProjectsCollection().deleteMany({ workspace_id: { $in: wsIds } });
-      await getWorkspaceSharesCollection().deleteMany({ workspaceId: { $in: wsIds } });
-      await getWpnWorkspacesCollection().deleteMany({ id: { $in: wsIds } });
+      await db()
+        .delete(wpnProjects)
+        .where(inArray(wpnProjects.workspace_id, wsIds));
+      await db()
+        .delete(workspaceShares)
+        .where(inArray(workspaceShares.workspaceId, wsIds));
+      await db().delete(wpnWorkspaces).where(inArray(wpnWorkspaces.id, wsIds));
     }
-    // Remove target from any workspace-share allow lists.
-    await getWorkspaceSharesCollection().deleteMany({ userId });
-    // Remove all org/space/team memberships.
-    await getOrgMembershipsCollection().deleteMany({ userId });
-    await getSpaceMembershipsCollection().deleteMany({ userId });
-    await getTeamMembershipsCollection().deleteMany({ userId });
-    // Delete the user doc itself.
-    await getUsersCollection().deleteOne({ _id: targetOid });
+    await db().delete(workspaceShares).where(eq(workspaceShares.userId, userId));
+    await db().delete(orgMemberships).where(eq(orgMemberships.userId, userId));
+    await db().delete(spaceMemberships).where(eq(spaceMemberships.userId, userId));
+    await db().delete(teamMemberships).where(eq(teamMemberships.userId, userId));
+    await db().delete(users).where(eq(users.id, userId));
 
     return reply.send({
       userId,
