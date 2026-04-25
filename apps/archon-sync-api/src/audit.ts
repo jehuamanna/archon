@@ -1,4 +1,6 @@
-import { getAuditEventsCollection } from "./db.js";
+import * as crypto from "node:crypto";
+import { getDb } from "./pg.js";
+import { auditEvents } from "./db/schema.js";
 import type { AuditAction } from "./org-schemas.js";
 
 export type RecordAuditInput = {
@@ -17,7 +19,8 @@ export type RecordAuditInput = {
  */
 export async function recordAudit(input: RecordAuditInput): Promise<void> {
   try {
-    await getAuditEventsCollection().insertOne({
+    await getDb().insert(auditEvents).values({
+      id: crypto.randomUUID(),
       orgId: input.orgId,
       actorUserId: input.actorUserId,
       action: input.action,
@@ -25,7 +28,7 @@ export async function recordAudit(input: RecordAuditInput): Promise<void> {
       targetId: input.targetId,
       metadata: input.metadata ?? null,
       ts: new Date(),
-    } as never);
+    });
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("[audit] insert failed", err);
