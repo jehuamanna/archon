@@ -105,6 +105,11 @@ export function useYjsBodyShadow(
 
   useEffect(() => {
     if (!noteId || !spaceId) {
+      // eslint-disable-next-line no-console
+      console.debug(
+        "[yjs-body] inert",
+        { noteId: !!noteId, spaceId: !!spaceId },
+      );
       setConnected(false);
       return;
     }
@@ -112,11 +117,18 @@ export function useYjsBodyShadow(
     (async () => {
       const syncBase = resolveSyncBase().trim().replace(/\/$/, "");
       if (!syncBase) {
+        // eslint-disable-next-line no-console
+        console.debug("[yjs-body] no sync base resolved");
         setConnected(false);
         return;
       }
       const token = await mintSpaceWsToken(syncBase, spaceId);
       if (cancelled || !token) {
+        // eslint-disable-next-line no-console
+        console.debug("[yjs-body] token mint failed", {
+          spaceId,
+          syncBase,
+        });
         setConnected(false);
         return;
       }
@@ -141,7 +153,14 @@ export function useYjsBodyShadow(
       // sends the initial state. Until then, pushLatest() returns false.
       const onStatus = (): void => {
         if (cancelled) return;
-        setConnected(provider.synced && provider.isConnected);
+        const ok = provider.synced && provider.isConnected;
+        // eslint-disable-next-line no-console
+        console.debug("[yjs-body] status", {
+          synced: provider.synced,
+          connected: provider.isConnected,
+          flag: ok,
+        });
+        setConnected(ok);
       };
       provider.on("status", onStatus);
       provider.on("synced", onStatus);
