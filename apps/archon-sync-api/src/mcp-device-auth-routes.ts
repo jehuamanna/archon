@@ -1,16 +1,15 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { ObjectId } from "mongodb";
+import { and, count, eq, gte, gt } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuth, signAccessToken, signRefreshToken } from "./auth.js";
-import type { UserDoc } from "./db.js";
-import { getUsersCollection } from "./db.js";
+import { getDb } from "./pg.js";
+import { mcpDeviceSessions, users } from "./db/schema.js";
 import { buildSessionsAfterAppend } from "./refresh-sessions.js";
-import { getMcpDeviceSessionsCollection } from "./db.js";
+import { isUuid } from "./db/legacy-id-map.js";
 
 const MAX_ACTIVE_SESSIONS_PER_USER = 5;
 
-/** Pending browser MCP login window (user_code / device_code). Override with ARCHON_MCP_DEVICE_SESSION_TTL_MS (milliseconds), min 60_000, max 10 years. Default 30 days. */
 function resolveDeviceSessionTtlMs(): number {
   const raw =
     typeof process.env.ARCHON_MCP_DEVICE_SESSION_TTL_MS === "string"
@@ -72,9 +71,7 @@ function verificationBaseUrl(request: FastifyRequest): string {
     typeof process.env.ARCHON_MCP_WEB_VERIFY_BASE === "string"
       ? process.env.ARCHON_MCP_WEB_VERIFY_BASE.trim().replace(/\/+$/, "")
       : "";
-  if (fromEnv) {
-    return fromEnv;
-  }
+  if (fromEnv) return fromEnv;
   const host = request.headers.host ?? "127.0.0.1:4010";
   const proto =
     request.headers["x-forwarded-proto"] === "https" ? "https" : "http";
@@ -86,25 +83,35 @@ export function registerMcpDeviceAuthRoutes(
   opts: { jwtSecret: string },
 ): void {
   const { jwtSecret } = opts;
+  const db = (): ReturnType<typeof getDb> => getDb();
 
   app.post("/auth/mcp/device/start", async (request, reply) => {
     const ip = clientIp(request);
-    const coll = getMcpDeviceSessionsCollection();
     const since = new Date(Date.now() - START_RATE_WINDOW_MS);
-    const recentStarts = await coll.countDocuments({
-      clientIp: ip,
-      createdAt: { $gte: since },
-    });
+    const recentRow = await db()
+      .select({ n: count() })
+      .from(mcpDeviceSessions)
+      .where(
+        and(
+          eq(mcpDeviceSessions.clientIp, ip),
+          gte(mcpDeviceSessions.createdAt, since),
+        ),
+      );
+    const recentStarts = recentRow[0]?.n ?? 0;
     if (recentStarts >= START_RATE_MAX_PER_IP) {
-      return reply.status(429).send({ error: "Too many device login attempts from this network" });
+      return reply
+        .status(429)
+        .send({ error: "Too many device login attempts from this network" });
     }
 
     let userCode = randomUserCode();
     for (let attempt = 0; attempt < 8; attempt++) {
-      const clash = await coll.findOne({ userCode });
-      if (!clash) {
-        break;
-      }
+      const clash = await db()
+        .select({ id: mcpDeviceSessions.id })
+        .from(mcpDeviceSessions)
+        .where(eq(mcpDeviceSessions.userCode, userCode))
+        .limit(1);
+      if (clash.length === 0) break;
       userCode = randomUserCode();
     }
 
@@ -113,7 +120,8 @@ export function registerMcpDeviceAuthRoutes(
     const now = Date.now();
     const expiresAt = new Date(now + DEVICE_SESSION_TTL_MS);
 
-    await coll.insertOne({
+    await db().insert(mcpDeviceSessions).values({
+      id: randomUUID(),
       userCode,
       deviceCodeHash,
       status: "awaiting_user",
@@ -124,7 +132,6 @@ export function registerMcpDeviceAuthRoutes(
 
     const base = verificationBaseUrl(request);
     const verification_uri = `${base}/mcp-auth?user_code=${encodeURIComponent(userCode)}`;
-
     return reply.send({
       device_code: deviceCode,
       user_code: userCode,
@@ -136,58 +143,67 @@ export function registerMcpDeviceAuthRoutes(
 
   app.post("/auth/mcp/device/authorize", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const parsed = authorizeBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const { user_code } = parsed.data;
-    const coll = getMcpDeviceSessionsCollection();
-    const row = await coll.findOne({ userCode: user_code });
-    if (!row || !row._id) {
+    const rows = await db()
+      .select()
+      .from(mcpDeviceSessions)
+      .where(eq(mcpDeviceSessions.userCode, user_code))
+      .limit(1);
+    const row = rows[0];
+    if (!row) {
       return reply.status(404).send({ error: "Unknown or expired user_code" });
     }
     if (row.expiresAt.getTime() <= Date.now()) {
       return reply.status(410).send({ error: "This login request has expired" });
     }
     if (row.status === "consumed") {
-      return reply.status(410).send({ error: "This login request was already completed" });
+      return reply
+        .status(410)
+        .send({ error: "This login request was already completed" });
     }
-
     if (row.boundUserId && row.boundUserId !== auth.sub) {
-      return reply.status(403).send({ error: "This device session belongs to another account" });
+      return reply
+        .status(403)
+        .send({ error: "This device session belongs to another account" });
     }
-
     if (row.status === "awaiting_mcp" && row.boundUserId === auth.sub) {
       return reply.send({ ok: true, status: "already_authorized" });
     }
-
     if (row.status !== "awaiting_user") {
       return reply.status(400).send({ error: "Invalid device session state" });
     }
 
-    const active = await coll.countDocuments({
-      boundUserId: auth.sub,
-      status: "awaiting_mcp",
-      expiresAt: { $gt: new Date() },
-    });
+    const activeRow = await db()
+      .select({ n: count() })
+      .from(mcpDeviceSessions)
+      .where(
+        and(
+          eq(mcpDeviceSessions.boundUserId, auth.sub),
+          eq(mcpDeviceSessions.status, "awaiting_mcp"),
+          gt(mcpDeviceSessions.expiresAt, new Date()),
+        ),
+      );
+    const active = activeRow[0]?.n ?? 0;
     if (active >= MAX_ACTIVE_SESSIONS_PER_USER) {
       return reply.status(409).send({
         error: `Too many active MCP browser logins (${MAX_ACTIVE_SESSIONS_PER_USER}). Wait for them to expire or complete polling.`,
       });
     }
 
-    const users = getUsersCollection();
-    let userOid: ObjectId;
-    try {
-      userOid = new ObjectId(auth.sub);
-    } catch {
+    if (!isUuid(auth.sub)) {
       return reply.status(400).send({ error: "Invalid account id in session" });
     }
-
-    const userRow = (await users.findOne({ _id: userOid })) as UserDoc | null;
+    const userRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.id, auth.sub))
+      .limit(1);
+    const userRow = userRows[0];
     if (!userRow) {
       return reply.status(400).send({ error: "Account not found" });
     }
@@ -195,23 +211,38 @@ export function registerMcpDeviceAuthRoutes(
     const jti = randomUUID();
     const accessToken = signAccessToken(jwtSecret, payload, "mcp");
     const refreshToken = signRefreshToken(jwtSecret, payload, jti, "mcp");
-    const nextSessions = buildSessionsAfterAppend(userRow, jti);
-    await users.updateOne(
-      { _id: userOid },
-      { $set: { refreshSessions: nextSessions }, $unset: { activeRefreshJti: "" } },
-    );
-
-    await coll.updateOne(
-      { _id: row._id, status: "awaiting_user" },
+    const nextSessions = buildSessionsAfterAppend(
       {
-        $set: {
-          boundUserId: auth.sub,
-          status: "awaiting_mcp",
-          issuedAccessToken: accessToken,
-          issuedRefreshToken: refreshToken,
-        },
+        refreshSessions: userRow.refreshSessions,
+        activeRefreshJti: userRow.activeRefreshJti,
       },
+      jti,
     );
+    await db()
+      .update(users)
+      .set({
+        refreshSessions: nextSessions.map((s) => ({
+          jti: s.jti,
+          createdAt: s.createdAt.toISOString(),
+        })),
+        activeRefreshJti: null,
+      })
+      .where(eq(users.id, auth.sub));
+
+    await db()
+      .update(mcpDeviceSessions)
+      .set({
+        boundUserId: auth.sub,
+        status: "awaiting_mcp",
+        issuedAccessToken: accessToken,
+        issuedRefreshToken: refreshToken,
+      })
+      .where(
+        and(
+          eq(mcpDeviceSessions.id, row.id),
+          eq(mcpDeviceSessions.status, "awaiting_user"),
+        ),
+      );
 
     return reply.send({ ok: true, status: "authorized", userId: auth.sub });
   });
@@ -222,20 +253,18 @@ export function registerMcpDeviceAuthRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const deviceCodeHash = hashDeviceCode(parsed.data.device_code, jwtSecret);
-    const coll = getMcpDeviceSessionsCollection();
-    const row = await coll.findOne({ deviceCodeHash });
-    if (!row || !row._id) {
-      return reply.send({ status: "invalid" });
-    }
+    const rows = await db()
+      .select()
+      .from(mcpDeviceSessions)
+      .where(eq(mcpDeviceSessions.deviceCodeHash, deviceCodeHash))
+      .limit(1);
+    const row = rows[0];
+    if (!row) return reply.send({ status: "invalid" });
     if (row.expiresAt.getTime() <= Date.now()) {
       return reply.send({ status: "expired" });
     }
-    if (row.status === "consumed") {
-      return reply.send({ status: "invalid" });
-    }
-    if (row.status !== "awaiting_mcp") {
-      return reply.send({ status: "pending" });
-    }
+    if (row.status === "consumed") return reply.send({ status: "invalid" });
+    if (row.status !== "awaiting_mcp") return reply.send({ status: "pending" });
     if (!row.issuedAccessToken || !row.issuedRefreshToken || !row.boundUserId) {
       return reply.send({ status: "pending" });
     }
@@ -247,16 +276,14 @@ export function registerMcpDeviceAuthRoutes(
       userId: row.boundUserId,
     };
 
-    await coll.updateOne(
-      { _id: row._id },
-      {
-        $set: {
-          status: "consumed",
-          issuedAccessToken: null,
-          issuedRefreshToken: null,
-        },
-      },
-    );
+    await db()
+      .update(mcpDeviceSessions)
+      .set({
+        status: "consumed",
+        issuedAccessToken: null,
+        issuedRefreshToken: null,
+      })
+      .where(eq(mcpDeviceSessions.id, row.id));
 
     return reply.send(out);
   });
