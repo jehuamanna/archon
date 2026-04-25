@@ -1,7 +1,9 @@
 import type { FastifyInstance } from "fastify";
+import { eq, and, lt, desc } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
-import { getAuditEventsCollection } from "./db.js";
+import { getDb } from "./pg.js";
+import { auditEvents } from "./db/schema.js";
 import { requireOrgRole } from "./org-auth.js";
 
 export function registerAdminRoutes(
@@ -13,14 +15,10 @@ export function registerAdminRoutes(
   /** Admin-only: paginated audit log for the org, newest-first. */
   app.get("/orgs/:orgId/audit", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const { orgId } = request.params as { orgId: string };
     const ctx = await requireOrgRole(request, reply, auth, orgId, "admin");
-    if (!ctx) {
-      return;
-    }
+    if (!ctx) return;
     const q = z
       .object({
         before: z.coerce.number().optional(),
@@ -31,18 +29,18 @@ export function registerAdminRoutes(
       return reply.status(400).send({ error: q.error.flatten() });
     }
     const limit = q.data.limit ?? 100;
-    const filter: Record<string, unknown> = { orgId };
-    if (q.data.before) {
-      filter.ts = { $lt: new Date(q.data.before) };
-    }
-    const rows = await getAuditEventsCollection()
-      .find(filter)
-      .sort({ ts: -1 })
-      .limit(limit)
-      .toArray();
+    const where = q.data.before
+      ? and(eq(auditEvents.orgId, orgId), lt(auditEvents.ts, new Date(q.data.before)))
+      : eq(auditEvents.orgId, orgId);
+    const rows = await getDb()
+      .select()
+      .from(auditEvents)
+      .where(where)
+      .orderBy(desc(auditEvents.ts))
+      .limit(limit);
     return reply.send({
       events: rows.map((r) => ({
-        eventId: r._id.toHexString(),
+        eventId: r.id,
         orgId: r.orgId,
         actorUserId: r.actorUserId,
         action: r.action,
@@ -51,7 +49,8 @@ export function registerAdminRoutes(
         metadata: r.metadata ?? null,
         ts: r.ts,
       })),
-      nextBefore: rows.length === limit ? rows[rows.length - 1]!.ts.getTime() : null,
+      nextBefore:
+        rows.length === limit ? rows[rows.length - 1]!.ts.getTime() : null,
     });
   });
 }
