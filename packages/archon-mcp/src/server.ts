@@ -539,6 +539,56 @@ function wpnCatch(e: unknown, runtime: McpAuthRuntime): ToolReturn {
   return errorResult(msg);
 }
 
+/**
+ * Surfaced on tool results when a noteId-driven call automatically switched
+ * the active org and/or space to make the note discoverable. Lets the calling
+ * agent (and the user) see that session state changed.
+ */
+type ScopeSwitch = {
+  fromOrgId: string | null;
+  toOrgId: string | null;
+  fromSpaceId: string | null;
+  toSpaceId: string | null;
+};
+
+/**
+ * Ensure the active org/space matches the home of `noteId` before the tool
+ * proceeds. Returns the switch record when state changed, or `null` when
+ * already in scope (or when noteId is empty / not a UUID — in which case the
+ * caller should fall through to its normal lookup logic). Never throws — a
+ * scope-resolution error is swallowed and the caller's downstream call is
+ * allowed to surface the underlying failure on its own.
+ */
+async function ensureNoteScope(
+  client: WpnHttpClient,
+  noteId: string | null | undefined,
+): Promise<ScopeSwitch | null> {
+  if (!noteId) return null;
+  const trimmed = noteId.trim();
+  if (!trimmed || !isLikelyUuid(trimmed)) return null;
+  try {
+    const r = await client.ensureScopeForNote(trimmed);
+    if (!r.switched) return null;
+    return {
+      fromOrgId: r.fromOrgId,
+      toOrgId: r.toOrgId,
+      fromSpaceId: r.fromSpaceId,
+      toSpaceId: r.toSpaceId,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Merge `scopeSwitched` into a tool result payload only when a switch occurred. */
+function withScopeSwitched<T extends Record<string, unknown>>(
+  payload: T,
+  switched: ScopeSwitch | null,
+): T | (T & { scopeSwitched: ScopeSwitch }) {
+  if (!switched) return payload;
+  return { ...payload, scopeSwitched: switched };
+}
+
 /** Compose "Workspace / Project / Title" for an image note, or null when the context catalog misses it. */
 async function resolveNotePathForImage(
   client: WpnHttpClient,
@@ -648,7 +698,8 @@ const MCP_INSTRUCTIONS =
   "Auth: use ARCHON_SYNC_API_BASE + ARCHON_ACCESS_TOKEN (cloud), ARCHON_LOCAL_WPN_URL + ARCHON_LOCAL_WPN_TOKEN (Electron loopback), or ARCHON_MCP_CLOUD_SESSION=1 for browser (archon_login_browser_*) or password (archon_login). " +
   "If any tool returns JSON with error \"unauthenticated\" and suggested_tools, call archon_login_browser_start first (preferred), complete the browser step, use archon_login_browser_poll with device_code until authorized, or use archon_login — do not use archon_logout for that case. " +
   "archon_auth_status reports session state without exposing secrets. " +
-  "Cross-org: archon_list_orgs lists the user's orgs; archon_set_active_org flips the session to another org (re-issues JWT, resets active space); archon_list_wpn accepts optional orgId/spaceId for a one-shot read against a different org without changing the session.";
+  "Cross-org: archon_list_orgs lists the user's orgs; archon_set_active_org flips the session to another org (re-issues JWT, resets active space); archon_list_wpn accepts optional orgId/spaceId for a one-shot read against a different org without changing the session. " +
+  "Auto scope-switch: tools that take a noteId (get_note, get_image_note, get_note_with_links, get_note_title, note_rename, execute_note (UUID), find_notes (UUID), create_child_note (parentNoteId), write_back_child, write_note (patch_existing or create_child/sibling with anchorId), delete_notes (first id), move_note, move_note_to_project, duplicate_subtree, backlinks) automatically switch the active org/space to the note's home before running, so you don't have to call archon_set_active_org first. When a switch happens, the tool result includes a `scopeSwitched` field with the before/after orgId and spaceId.";
 
 /**
  * Create a fully-configured McpServer with all Archon WPN tools registered.
@@ -696,7 +747,8 @@ export function createArchonMcpServer(
       description:
         "Find note(s) by title or id using GET /wpn/notes-with-context. Optional workspaceQuery / projectQuery narrow scope. " +
         "Returns status unique | ambiguous | none | workspace_ambiguous | project_ambiguous; " +
-        "each match includes noteId, title, and path \"Workspace / Project / Title\".",
+        "each match includes noteId, title, and path \"Workspace / Project / Title\". " +
+        "When query is a UUID, the active org/space is auto-switched to the note's home before searching (response includes scopeSwitched).",
       inputSchema: findNotesInput,
     },
     async (args) => {
@@ -705,6 +757,7 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.query);
         const rows = await client.getNotesWithContext();
         const result = findNotesByQuery(
           rows,
@@ -712,7 +765,7 @@ export function createArchonMcpServer(
           args.workspaceQuery,
           args.projectQuery,
         );
-        return jsonResult(result);
+        return jsonResult(withScopeSwitched(result as Record<string, unknown>, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1246,15 +1299,17 @@ export function createArchonMcpServer(
     "archon_delete_notes",
     {
       description:
-        "Bulk delete notes by id. Descendants of each note are also removed. This is irreversible.",
+        "Bulk delete notes by id. Descendants of each note are also removed. This is irreversible. " +
+        "Active org/space auto-switches to the home of the first id before the call (response includes scopeSwitched when changed).",
       inputSchema: deleteNotesInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
+        const switched = await ensureNoteScope(client, args.ids[0]);
         await client.deleteNotes(args.ids);
-        return jsonResult({ ok: true as const, deletedIds: args.ids });
+        return jsonResult(withScopeSwitched({ ok: true as const, deletedIds: args.ids }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1265,15 +1320,17 @@ export function createArchonMcpServer(
     "archon_move_note",
     {
       description:
-        "Move a note within its project tree. Placement: 'before' (sibling above target), 'after' (sibling below target), 'into' (first child of target).",
+        "Move a note within its project tree. Placement: 'before' (sibling above target), 'after' (sibling below target), 'into' (first child of target). " +
+        "Active org/space auto-switches to the dragged note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: moveNoteInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
+        const switched = await ensureNoteScope(client, args.draggedId);
         await client.moveNote(args.projectId, args.draggedId, args.targetId, args.placement);
-        return jsonResult({ ok: true as const });
+        return jsonResult(withScopeSwitched({ ok: true as const }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1284,15 +1341,20 @@ export function createArchonMcpServer(
     "archon_duplicate_subtree",
     {
       description:
-        "Duplicate a note and all its descendants within the same project. Returns the new root note id.",
+        "Duplicate a note and all its descendants within the same project. Returns the new root note id. " +
+        "Active org/space auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: duplicateSubtreeInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const result = await client.duplicateSubtree(args.projectId, args.noteId);
-        return jsonResult({ ok: true as const, ...((result && typeof result === "object") ? result : {}) });
+        return jsonResult(withScopeSwitched(
+          { ok: true as const, ...((result && typeof result === "object") ? result : {}) },
+          switched,
+        ));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1485,19 +1547,21 @@ export function createArchonMcpServer(
     {
       description:
         "Move a note (with its entire subtree) to a different project, optionally nested under a parent note in the target project. " +
-        "Caller needs write access on both the source and destination workspaces. Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces instead.",
+        "Caller needs write access on both the source and destination workspaces. Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces instead. " +
+        "Active org/space auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: moveNoteToProjectInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         await client.moveNoteToProject(
           args.noteId,
           args.targetProjectId,
           args.targetParentId ?? null,
         );
-        return jsonResult({ ok: true as const });
+        return jsonResult(withScopeSwitched({ ok: true as const }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1582,15 +1646,17 @@ export function createArchonMcpServer(
     "archon_backlinks",
     {
       description:
-        "Find all notes that reference a given note id in their content (backlinks / incoming references). Returns source note ids, titles, and project ids.",
+        "Find all notes that reference a given note id in their content (backlinks / incoming references). Returns source note ids, titles, and project ids. " +
+        "Active org/space auto-switches to the target note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: backlinksInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const sources = await client.getBacklinks(args.noteId);
-        return jsonResult({ noteId: args.noteId, sources });
+        return jsonResult(withScopeSwitched({ noteId: args.noteId, sources }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1687,7 +1753,7 @@ export function createArchonMcpServer(
 
   mcp.tool(
     "archon_get_note",
-    "Fetch a single note by id (includes content and metadata).",
+    "Fetch a single note by id (includes content and metadata). Active org/space auto-switches to the note's home before the read (response includes scopeSwitched when changed).",
     getNoteInput.shape,
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
@@ -1695,8 +1761,9 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const note = await client.getNote(args.noteId);
-        return jsonResult({ note });
+        return jsonResult(withScopeSwitched({ note } as Record<string, unknown>, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1705,7 +1772,7 @@ export function createArchonMcpServer(
 
   mcp.tool(
     "archon_get_image_note",
-    `Fetch an image-type note's bytes in an MCP-friendly form. Modes: 'auto' (native image block, falls back to signed URL over ${GET_IMAGE_NOTE_DEFAULT_MAX_BYTES} bytes), 'inline' (force native image block), 'base64' (JSON with dataBase64), 'url' (no bytes, just a short-lived signed URL), 'thumbnail' (PLAN-04 WebP thumb). Always returns metadata { noteId, title, path, mimeType, sizeBytes, width, height }. Byte-returning modes strip EXIF / text metadata for JPEG / PNG / WebP (url mode streams raw R2 bytes). Errors on non-image notes; callers should use archon_get_note for markdown.`,
+    `Fetch an image-type note's bytes in an MCP-friendly form. Modes: 'auto' (native image block, falls back to signed URL over ${GET_IMAGE_NOTE_DEFAULT_MAX_BYTES} bytes), 'inline' (force native image block), 'base64' (JSON with dataBase64), 'url' (no bytes, just a short-lived signed URL), 'thumbnail' (PLAN-04 WebP thumb). Always returns metadata { noteId, title, path, mimeType, sizeBytes, width, height }. Byte-returning modes strip EXIF / text metadata for JPEG / PNG / WebP (url mode streams raw R2 bytes). Errors on non-image notes; callers should use archon_get_note for markdown. Active org/space auto-switches to the note's home before the read.`,
     getImageNoteInput.shape,
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
@@ -1713,6 +1780,7 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        await ensureNoteScope(client, args.noteId);
         return await handleGetImageNote(args, {
           getNote: (id) => client.getNote(id),
           resolvePath: (note) => resolveNotePathForImage(client, note),
@@ -1740,6 +1808,7 @@ export function createArchonMcpServer(
       const cap = args.maxNotes ?? 200;
       const includeBacklinks = args.includeBacklinks ?? true;
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const catalog = await client.getNotesWithContext();
         const catalogById = new Map<string, WpnNoteWithContextRow>();
         const catalogByCanonical = new Map<string, string>();
@@ -1830,20 +1899,23 @@ export function createArchonMcpServer(
           ? await client.getBacklinks(args.noteId).catch(() => [])
           : [];
 
-        return jsonResult({
-          note: seed,
-          linkedNotes,
-          backlinks,
-          unresolved,
-          unresolvedVfsLinks,
-          stats: {
-            fetched: 1 + Object.keys(linkedNotes).length,
-            unresolvedCount: unresolved.length,
-            unresolvedVfsCount: unresolvedVfsLinks.length,
-            truncated,
-            cap,
-          },
-        });
+        return jsonResult(withScopeSwitched(
+          {
+            note: seed,
+            linkedNotes,
+            backlinks,
+            unresolved,
+            unresolvedVfsLinks,
+            stats: {
+              fetched: 1 + Object.keys(linkedNotes).length,
+              unresolvedCount: unresolved.length,
+              unresolvedVfsCount: unresolvedVfsLinks.length,
+              truncated,
+              cap,
+            },
+          } as Record<string, unknown>,
+          switched,
+        ));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1854,7 +1926,8 @@ export function createArchonMcpServer(
     "archon_get_note_title",
     {
       description:
-        "Return the current title for a note id without fetching full content. Use with archon_note_rename to prepend e.g. DONE or fix typos.",
+        "Return the current title for a note id without fetching full content. Use with archon_note_rename to prepend e.g. DONE or fix typos. " +
+        "Active org/space auto-switches to the note's home before the read.",
       inputSchema: getNoteTitleInput,
     },
     async (args) => {
@@ -1863,8 +1936,12 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const note = await client.getNote(args.noteId);
-        return jsonResult({ noteId: note.id, title: note.title });
+        return jsonResult(withScopeSwitched(
+          { noteId: note.id, title: note.title } as Record<string, unknown>,
+          switched,
+        ));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1875,7 +1952,8 @@ export function createArchonMcpServer(
     "archon_note_rename",
     {
       description:
-        "Rename a note by id (PATCH title only). Fails with a clear error if another sibling under the same parent already uses that title.",
+        "Rename a note by id (PATCH title only). Fails with a clear error if another sibling under the same parent already uses that title. " +
+        "Active org/space auto-switches to the note's home before the call.",
       inputSchema: noteRenameInput,
     },
     async (args) => {
@@ -1884,8 +1962,9 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.noteId);
         const note = await client.patchNote(args.noteId, { title: args.title });
-        return jsonResult({ ok: true as const, note });
+        return jsonResult(withScopeSwitched({ ok: true as const, note }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1898,7 +1977,8 @@ export function createArchonMcpServer(
       description:
         "Resolve a task note by title or UUID (optional workspaceQuery / projectQuery), then fetch it when the match is unique. " +
         "If multiple notes share the title, returns status ambiguous with each candidate's full path and noteId — have the user pick one, then call again with noteQuery set to that UUID (or narrow filters). " +
-        "On success, the agent should read note.content and follow those instructions in the session.",
+        "On success, the agent should read note.content and follow those instructions in the session. " +
+        "When noteQuery is a UUID, the active org/space is auto-switched to the note's home before searching (response includes scopeSwitched).",
       inputSchema: executeNoteInput,
     },
     async (args) => {
@@ -1907,6 +1987,7 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.noteQuery);
         const rows = await client.getNotesWithContext();
         const resolved = findNotesByQuery(
           rows,
@@ -1915,19 +1996,25 @@ export function createArchonMcpServer(
           args.projectQuery,
         );
         if (resolved.status !== "unique") {
-          return jsonResult({
-            stage: "needs_resolution" as const,
-            ...resolved,
-            nextStep:
-              "If ambiguous, show the user each path and noteId from matches; after they choose, call archon_execute_note again with noteQuery equal to the chosen noteId (or narrow workspaceQuery/projectQuery).",
-          });
+          return jsonResult(withScopeSwitched(
+            {
+              stage: "needs_resolution" as const,
+              ...resolved,
+              nextStep:
+                "If ambiguous, show the user each path and noteId from matches; after they choose, call archon_execute_note again with noteQuery equal to the chosen noteId (or narrow workspaceQuery/projectQuery).",
+            } as Record<string, unknown>,
+            switched,
+          ));
         }
         const note = await client.getNote(resolved.matches[0]!.noteId);
-        return jsonResult({
-          stage: "fetched" as const,
-          match: resolved.matches[0],
-          note,
-        });
+        return jsonResult(withScopeSwitched(
+          {
+            stage: "fetched" as const,
+            match: resolved.matches[0],
+            note,
+          } as Record<string, unknown>,
+          switched,
+        ));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1954,6 +2041,7 @@ export function createArchonMcpServer(
       try {
         const idTrim = args.parentNoteId?.trim() ?? "";
         if (idTrim.length > 0) {
+          const switched = await ensureNoteScope(client, idTrim);
           const parent = await client.getNote(idTrim);
           const noteType = (args.type ?? "markdown").trim() || "markdown";
           const created = await client.createNote(parent.project_id, {
@@ -1964,12 +2052,15 @@ export function createArchonMcpServer(
             content: args.content,
             metadata: args.metadata,
           });
-          return jsonResult({
-            ok: true as const,
-            parentNoteId: parent.id,
-            projectId: parent.project_id,
-            createdNoteId: created.id,
-          });
+          return jsonResult(withScopeSwitched(
+            {
+              ok: true as const,
+              parentNoteId: parent.id,
+              projectId: parent.project_id,
+              createdNoteId: created.id,
+            },
+            switched,
+          ));
         }
 
         let workspaceName: string;
@@ -2027,7 +2118,8 @@ export function createArchonMcpServer(
     {
       description:
         "After completing work scoped to a Archon task note, persist results as a new direct child of that note (GET task note for project, then POST create child). " +
-        "Prefer this over archon_write_note create_child when you only know taskNoteId.",
+        "Prefer this over archon_write_note create_child when you only know taskNoteId. " +
+        "Active org/space auto-switches to the task note's home before the call.",
       inputSchema: writeBackChildInput,
     },
     async (args) => {
@@ -2036,6 +2128,7 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
+        const switched = await ensureNoteScope(client, args.taskNoteId);
         const task = await client.getNote(args.taskNoteId);
         const noteType = (args.type ?? "markdown").trim() || "markdown";
         const created = await client.createNote(task.project_id, {
@@ -2046,12 +2139,15 @@ export function createArchonMcpServer(
           content: args.content,
           metadata: args.metadata,
         });
-        return jsonResult({
-          ok: true as const,
-          taskNoteId: args.taskNoteId,
-          projectId: task.project_id,
-          createdNoteId: created.id,
-        });
+        return jsonResult(withScopeSwitched(
+          {
+            ok: true as const,
+            taskNoteId: args.taskNoteId,
+            projectId: task.project_id,
+            createdNoteId: created.id,
+          },
+          switched,
+        ));
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -2062,7 +2158,8 @@ export function createArchonMcpServer(
     "archon_write_note",
     {
       description:
-        "Create or patch a note. Modes: patch_existing (PATCH), create_root | create_child | create_sibling (POST with relation).",
+        "Create or patch a note. Modes: patch_existing (PATCH), create_root | create_child | create_sibling (POST with relation). " +
+        "For patch_existing, active org/space auto-switches to the note's home before the patch.",
       inputSchema: writeNoteInput,
     },
     async (args) => {
@@ -2076,6 +2173,7 @@ export function createArchonMcpServer(
       }
       try {
         if (args.mode === "patch_existing") {
+          const switched = await ensureNoteScope(client, args.noteId);
           const patch: {
             title?: string;
             content?: string;
@@ -2095,7 +2193,7 @@ export function createArchonMcpServer(
             patch.metadata = args.metadata;
           }
           const note = await client.patchNote(args.noteId!, patch);
-          return jsonResult({ ok: true as const, note });
+          return jsonResult(withScopeSwitched({ ok: true as const, note }, switched));
         }
         const relation =
           args.mode === "create_root"
@@ -2104,6 +2202,12 @@ export function createArchonMcpServer(
               ? ("child" as const)
               : ("sibling" as const);
         const anchorId = args.mode === "create_root" ? undefined : args.anchorId;
+        // For create_child / create_sibling with an anchorId, switch to the anchor's home
+        // so the create lands in the right scope.
+        const switched =
+          args.mode !== "create_root" && anchorId
+            ? await ensureNoteScope(client, anchorId)
+            : null;
         const body = {
           type: args.type!,
           relation,
@@ -2113,7 +2217,7 @@ export function createArchonMcpServer(
           metadata: args.metadata ?? undefined,
         };
         const created = await client.createNote(args.projectId!, body);
-        return jsonResult({ ok: true as const, created });
+        return jsonResult(withScopeSwitched({ ok: true as const, created }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
       }

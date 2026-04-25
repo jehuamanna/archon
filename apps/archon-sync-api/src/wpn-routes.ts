@@ -702,4 +702,33 @@ export function registerWpnReadRoutes(
     };
     return reply.send({ note });
   });
+
+  /**
+   * Resolve a note's full scope chain — { noteId, projectId, workspaceId, spaceId, orgId }.
+   * Used by MCP clients to auto-switch active org/space when a tool is invoked
+   * with a noteId that lives outside the currently active scope. Returns 404
+   * (via assertCanReadWorkspaceForNote) when the note is missing or unreadable.
+   */
+  app.get("/wpn/notes/:id/scope", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) {
+      return;
+    }
+    const { id } = request.params as { id: string };
+    const ws = await assertCanReadWorkspaceForNote(reply, auth, id);
+    if (!ws) {
+      return;
+    }
+    const note = await getWpnNotesCollection().findOne({ id, deleted: { $ne: true } });
+    if (!note) {
+      return reply.status(404).send({ error: "Note not found" });
+    }
+    return reply.send({
+      noteId: id,
+      projectId: note.project_id,
+      workspaceId: ws.id,
+      spaceId: ws.spaceId ?? null,
+      orgId: ws.orgId ?? null,
+    });
+  });
 }

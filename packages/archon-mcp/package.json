@@ -20,7 +20,7 @@
     "start": "node dist/cli.js",
     "dev": "tsx src/cli.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/resolve-note.test.ts src/find-wpn.test.ts src/resolve-parent-in-tree.test.ts src/wpn-client.cache.test.ts src/wpn-client.switch-org.test.ts src/mcp-cloud-auth-persist.test.ts src/note-link-extract.test.ts src/note-vfs-resolve.test.ts src/get-image-note.test.ts src/strip-image-metadata.test.ts"
+    "test": "tsx --test src/resolve-note.test.ts src/find-wpn.test.ts src/resolve-parent-in-tree.test.ts src/wpn-client.cache.test.ts src/wpn-client.switch-org.test.ts src/wpn-client.ensure-scope.test.ts src/mcp-cloud-auth-persist.test.ts src/note-link-extract.test.ts src/note-vfs-resolve.test.ts src/get-image-note.test.ts src/strip-image-metadata.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

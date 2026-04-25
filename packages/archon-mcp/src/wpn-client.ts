@@ -343,6 +343,133 @@ export class WpnHttpClient {
     return rows;
   }
 
+  /**
+   * Resolve a noteId to its scope chain via `GET /wpn/notes/:id/scope`. Returns
+   * `null` when the note doesn't exist or is unreadable (404). Read-only — does
+   * not mutate session state. Pair with {@link ensureScopeForNote} for the
+   * "switch then retry" flow used by every noteId-taking MCP tool.
+   */
+  async getNoteScope(noteId: string): Promise<{
+    noteId: string;
+    projectId: string;
+    workspaceId: string;
+    spaceId: string | null;
+    orgId: string | null;
+  } | null> {
+    const { res, text, body } = await this.fetchWpn(
+      `/wpn/notes/${encodeURIComponent(noteId)}/scope`,
+      "GET",
+      "WPN get note scope",
+    );
+    if (res.status === 404) {
+      return null;
+    }
+    if (!res.ok) {
+      const err = (body as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`WPN GET note scope failed (${res.status}): ${err}`);
+    }
+    const b = body as {
+      noteId?: unknown;
+      projectId?: unknown;
+      workspaceId?: unknown;
+      spaceId?: unknown;
+      orgId?: unknown;
+    };
+    if (
+      typeof b.noteId !== "string" ||
+      typeof b.projectId !== "string" ||
+      typeof b.workspaceId !== "string"
+    ) {
+      throw new Error("WPN GET note scope: missing fields in response");
+    }
+    return {
+      noteId: b.noteId,
+      projectId: b.projectId,
+      workspaceId: b.workspaceId,
+      spaceId: typeof b.spaceId === "string" && b.spaceId.length > 0 ? b.spaceId : null,
+      orgId: typeof b.orgId === "string" && b.orgId.length > 0 ? b.orgId : null,
+    };
+  }
+
+  /**
+   * Ensure the active org/space matches the home of `noteId`, switching when
+   * needed so a downstream `notes-with-context`-style call (e.g. the
+   * `archon_execute_note` find pass) can see the note. Returns a record of
+   * what changed — `switched: false` when already in scope, otherwise the
+   * before/after orgId and spaceId so the calling tool can surface it.
+   *
+   * Org change requires re-minting the JWT (`switchActiveOrg`); same-org space
+   * change just updates the header in the holder. When the note is unreadable
+   * (404), returns `{ switched: false, found: false }` and lets the caller
+   * decide whether to fall through (most tools will still attempt the original
+   * call so the existing 404 / "not found" surfaces normally).
+   */
+  async ensureScopeForNote(noteId: string): Promise<{
+    switched: boolean;
+    found: boolean;
+    fromOrgId: string | null;
+    toOrgId: string | null;
+    fromSpaceId: string | null;
+    toSpaceId: string | null;
+  }> {
+    const fromOrgId = this.holder.activeOrgId;
+    const fromSpaceId = this.holder.activeSpaceId;
+    let scope: Awaited<ReturnType<WpnHttpClient["getNoteScope"]>>;
+    try {
+      scope = await this.getNoteScope(noteId);
+    } catch {
+      // Network / server error — don't block the original tool call; let it
+      // surface the underlying error itself.
+      return {
+        switched: false,
+        found: false,
+        fromOrgId,
+        toOrgId: fromOrgId,
+        fromSpaceId,
+        toSpaceId: fromSpaceId,
+      };
+    }
+    if (!scope) {
+      return {
+        switched: false,
+        found: false,
+        fromOrgId,
+        toOrgId: fromOrgId,
+        fromSpaceId,
+        toSpaceId: fromSpaceId,
+      };
+    }
+    const targetOrgId = scope.orgId;
+    const targetSpaceId = scope.spaceId;
+    const orgMatches = targetOrgId === null || targetOrgId === fromOrgId;
+    const spaceMatches = targetSpaceId === null || targetSpaceId === fromSpaceId;
+    if (orgMatches && spaceMatches) {
+      return {
+        switched: false,
+        found: true,
+        fromOrgId,
+        toOrgId: fromOrgId,
+        fromSpaceId,
+        toSpaceId: fromSpaceId,
+      };
+    }
+    if (!orgMatches && targetOrgId) {
+      await this.switchActiveOrg(targetOrgId);
+    }
+    if (targetSpaceId && this.holder.activeSpaceId !== targetSpaceId) {
+      this.holder.setActiveSpace(targetSpaceId);
+      this.invalidateNotesWithContextCacheInternal();
+    }
+    return {
+      switched: true,
+      found: true,
+      fromOrgId,
+      toOrgId: this.holder.activeOrgId,
+      fromSpaceId,
+      toSpaceId: this.holder.activeSpaceId,
+    };
+  }
+
   async getNote(noteId: string): Promise<WpnNoteDetail> {
     const { res, text, body } = await this.fetchWpn(
       `/wpn/notes/${encodeURIComponent(noteId)}`,
