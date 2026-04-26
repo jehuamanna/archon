@@ -978,8 +978,8 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
               className="flex h-full min-h-0 shrink-0 flex-col border-r border-border bg-muted/15"
               style={{ width: SHELL_ACTIVITY_BAR_WIDTH_PX }}
             >
-              <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto py-2">
-                {railItems.map((it) => {
+              {(() => {
+                const renderRailButton = (it: typeof railItems[number]) => {
                   const railActive = Boolean(
                     activeTab?.tabTypeId && it.tabTypeId && it.tabTypeId === activeTab.tabTypeId,
                   );
@@ -1000,31 +1000,41 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
                       {Badge ? <Badge /> : null}
                     </button>
                   );
-                })}
-                {widgetSlots.list("rail").map((w) => {
-                  const W = w.component;
-                  return (
-                    <div key={w.id} className="w-full border-t border-border/40 pt-1">
-                      <W slotId="rail" />
+                };
+                const topItems = railItems.filter((it) => (it.placement ?? "top") === "top");
+                const bottomItems = railItems.filter((it) => it.placement === "bottom");
+                return (
+                  <>
+                    <div className="flex min-h-0 flex-1 flex-col items-center gap-1 overflow-y-auto py-2">
+                      {topItems.map(renderRailButton)}
+                      {widgetSlots.list("rail").map((w) => {
+                        const W = w.component;
+                        return (
+                          <div key={w.id} className="w-full border-t border-border/40 pt-1">
+                            <W slotId="rail" />
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })}
-              </div>
-              <div className="flex shrink-0 flex-col items-center border-t border-border/40 py-2">
-                <button
-                  type="button"
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md border ${
-                    showSidebarPanel
-                      ? "border-border bg-muted/50 text-foreground"
-                      : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/30"
-                  }`}
-                  title="Toggle side panel"
-                  aria-label="Toggle side panel"
-                  onClick={() => store.toggle("sidebarPanel")}
-                >
-                  <IconPrimarySidebarLayout className="shrink-0" />
-                </button>
-              </div>
+                    <div className="flex shrink-0 flex-col items-center gap-1 border-t border-border/40 py-2">
+                      {bottomItems.map(renderRailButton)}
+                      <button
+                        type="button"
+                        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md border ${
+                          showSidebarPanel
+                            ? "border-border bg-muted/50 text-foreground"
+                            : "border-transparent text-muted-foreground hover:border-border hover:bg-muted/30"
+                        }`}
+                        title="Toggle side panel"
+                        aria-label="Toggle side panel"
+                        onClick={() => store.toggle("sidebarPanel")}
+                      >
+                        <IconPrimarySidebarLayout className="shrink-0" />
+                      </button>
+                    </div>
+                  </>
+                );
+              })()}
             </div>
           ) : null}
 

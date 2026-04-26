@@ -48,11 +48,14 @@ function lineColAt(text: string, offset: number): { line: number; col: number } 
   return { line, col };
 }
 
-const MARKDOWN_AUTOSAVE_DEBOUNCE_MS = 500;
+const MARKDOWN_AUTOSAVE_DEBOUNCE_MS = 150;
+const MARKDOWN_AUTOSAVE_MAX_WAIT_MS = 750;
 
 /**
  * System markdown note editor (CodeMirror 6 + debounced react-markdown preview).
- * Persists via debounced writes: one save after typing idles for {@link MARKDOWN_AUTOSAVE_DEBOUNCE_MS}, plus immediate flush on blur and when leaving the note.
+ * Persists via debounced writes: one save after typing idles for {@link MARKDOWN_AUTOSAVE_DEBOUNCE_MS},
+ * with a hard cap of {@link MARKDOWN_AUTOSAVE_MAX_WAIT_MS} so continuous typing still flushes
+ * regularly. Plus immediate flush on blur and when leaving the note.
  */
 export function MarkdownNoteEditor({
   note,
@@ -72,6 +75,7 @@ export function MarkdownNoteEditor({
   const [caretHead, setCaretHead] = useState(0);
   const latestRef = useRef(note.content ?? "");
   const flushTimerRef = useRef<number | null>(null);
+  const firstScheduledAtRef = useRef<number | null>(null);
   const persistRef = useRef(persist);
   const noteIdRef = useRef(note.id);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
@@ -465,6 +469,7 @@ export function MarkdownNoteEditor({
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
+    firstScheduledAtRef.current = null;
     if (!persistRef.current) return;
     if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
     void dispatch(
@@ -474,12 +479,34 @@ export function MarkdownNoteEditor({
 
   const scheduleBatchedFlush = useCallback(() => {
     if (!persistRef.current) return;
+    const now = Date.now();
+    // Hard cap: if the first pending edit has been waiting MAX_WAIT_MS, flush immediately
+    // so continuous typing can't starve the save indefinitely.
+    if (
+      firstScheduledAtRef.current !== null &&
+      now - firstScheduledAtRef.current >= MARKDOWN_AUTOSAVE_MAX_WAIT_MS
+    ) {
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      firstScheduledAtRef.current = null;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      void dispatch(
+        saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
+      );
+      return;
+    }
+    if (firstScheduledAtRef.current === null) {
+      firstScheduledAtRef.current = now;
+    }
     // Debounce: reset the idle timer on every keystroke so only the trailing save fires.
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
     }
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
+      firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
       if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
@@ -496,6 +523,7 @@ export function MarkdownNoteEditor({
         window.clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
+      firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
       if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(

@@ -34,6 +34,10 @@ export interface Note {
    * or scratch-mode fixture) is treated as writable so older paths keep working.
    */
   canWrite?: boolean;
+  /** Server-side creation timestamp (ms since epoch). Optional — may be absent for scratch-mode and bundled notes. */
+  created_at_ms?: number;
+  /** Server-side last-update timestamp (ms since epoch). Same caveats as `created_at_ms`. */
+  updated_at_ms?: number;
 }
 
 export interface NoteListItem {

@@ -16,13 +16,18 @@ export function ArchonModeLineHost(): React.ReactElement {
   const pluginPri = useArchonModeLineSegment("plugin.primary");
   const pluginSec = useArchonModeLineSegment("plugin.secondary");
 
+  // Single-row mode line. Plugin segments fold into the right cluster after
+  // host-right; the second row was visually noisy and rarely populated, so
+  // we merge into one strip and let truncation handle overflow.
   const leftText = useMemo(() => joinSegment(left), [left]);
-  const centerText = useMemo(() => joinSegment(center), [center]);
-  const rightText = useMemo(() => joinSegment(right), [right]);
-  const priText = useMemo(() => joinSegment(pluginPri), [pluginPri]);
-  const secText = useMemo(() => joinSegment(pluginSec), [pluginSec]);
-
-  const showPluginRow = priText.length > 0 || secText.length > 0;
+  const centerText = useMemo(
+    () => [joinSegment(center), joinSegment(pluginPri)].filter(Boolean).join(" · "),
+    [center, pluginPri],
+  );
+  const rightText = useMemo(
+    () => [joinSegment(right), joinSegment(pluginSec)].filter(Boolean).join(" · "),
+    [right, pluginSec],
+  );
 
   return (
     <div
@@ -51,16 +56,6 @@ export function ArchonModeLineHost(): React.ReactElement {
           {rightText}
         </span>
       </div>
-      {showPluginRow ? (
-        <div className="flex min-h-[20px] items-center gap-2 border-t border-border/60 px-2 py-0.5 text-[10px] leading-tight text-muted-foreground/90">
-          <span className="min-w-0 flex-1 truncate" title={priText || undefined}>
-            {priText}
-          </span>
-          <span className="min-w-0 shrink truncate opacity-80" title={secText || undefined}>
-            {secText}
-          </span>
-        </div>
-      ) : null}
     </div>
   );
 }

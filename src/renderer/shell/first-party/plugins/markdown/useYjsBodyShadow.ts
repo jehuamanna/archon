@@ -133,9 +133,13 @@ export function useYjsBodyShadow(
         return;
       }
       const wsBase = resolveRealtimeWsBase(syncBase);
+      // Hocuspocus connects to `url` verbatim (it sends `name` in the auth
+      // protocol message, not in the URL path). The server route is mounted
+      // at `/api/v1/ws/yjs`, so the base must include `/ws/yjs`.
+      const wsUrl = `${wsBase.replace(/\/$/, "")}/ws/yjs`;
       const doc = new Y.Doc();
       const provider = new HocuspocusProvider({
-        url: wsBase,
+        url: wsUrl,
         name: noteId,
         document: doc,
         token,

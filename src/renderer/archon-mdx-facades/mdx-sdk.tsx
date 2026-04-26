@@ -3,8 +3,8 @@
  *
  * Imports are stripped by `remark-archon-mdx-facade-imports.ts`; the tag names
  * that authors use (`Input`, `Value`, `PushButton`, `List`, `Table`, `Chart`,
- * `NoteEmbed`, `Markdown`, `Button`, `Select`, `Checkbox`, `Form`) resolve
- * through the MDXProvider component map returned by
+ * `NoteEmbed`, `Markdown`, `Button`, `Select`, `Checkbox`, `Form`, `Code`,
+ * `Slideshow`) resolve through the MDXProvider component map returned by
  * `getArchonMdxFacadeComponentMap`.
  *
  * State is persisted per project via the sync-api routes in
@@ -12,19 +12,35 @@
  *   GET /projects/:projectId/mdx-state/:key  →  { value, version }
  *   PUT /projects/:projectId/mdx-state/:key  with If-Match and JSON body
  *
- * Live cross-tab sync uses HTTP polling (2 s) in v1 — the WebSocket endpoint
- * from phase 4 requires an upgrade-capable transport that Next's `app.inject`
- * can't provide. When the WS endpoint is exposed directly (e.g. by the
- * standalone sync-api on :4010), the polling fallback can be swapped for
- * WebSocket without touching MDX authors.
+ * Live cross-tab sync rides the project-scoped `/api/v1/ws/mdx-state` socket
+ * (see `mdx-state-ws-client.ts`). One socket per projectId is shared by every
+ * `useProjectState` consumer. Inline frames apply the new value directly; the
+ * initial `read()` and a catch-up `read()` on each (re)connect cover any gap.
+ * No periodic polling.
  */
 import React from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { markdown } from "@codemirror/lang-markdown";
+import { javascript } from "@codemirror/lang-javascript";
+import type { Extension } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import type { WpnNoteLinkResolver } from "../components/renderers/mdx-shell-context";
+import { parseInternalMarkdownNoteLink } from "../utils/markdown-internal-note-href";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import {
+  markdownShellClass,
+  useArchonMarkdownUiComponents,
+} from "../components/renderers/useArchonMarkdownUiComponents";
 import { createSyncBaseUrlResolver } from "@archon/platform";
 import { useMdxShell } from "../components/renderers/mdx-shell-context";
 import { readCloudSyncToken } from "../cloud-sync/cloud-sync-storage";
+import {
+  subscribeProjectStateFrames,
+  type MdxStateFrame,
+} from "./mdx-state-ws-client";
 
-const POLL_MS = 2000;
-const WRITE_DEBOUNCE_MS = 50;
+const WRITE_DEBOUNCE_MS = 250;
 
 /**
  * Module-scoped in-flight map for mdx-state GETs keyed by URL. Multiple
@@ -231,13 +247,13 @@ function isUnboundKey(key: string): boolean {
 /**
  * Per-(projectId, key) state hook.
  *
- * Design notes — why this is more than a naive fetch/poll:
+ * Design notes — why this is more than a naive fetch/subscribe:
  *
- * 1. While the user is typing, local state is authoritative. GET polls
- *    never clobber a "dirty" (locally-modified) value; they only update
- *    `versionRef` in the background so the next PUT has a fresh
- *    `If-Match`. Without this the 2-second poll would erase typing that
- *    hadn't been PUT-acknowledged yet.
+ * 1. While the user is typing, local state is authoritative. Inbound
+ *    frames and reads never clobber a "dirty" (locally-modified) value;
+ *    they only update `versionRef` in the background so the next PUT has
+ *    a fresh `If-Match`. Without this an inbound echo would erase typing
+ *    that hadn't been PUT-acknowledged yet.
  *
  * 2. Writes are strictly serialized via `inFlightRef`. A second keystroke
  *    while a PUT is in flight sets `queuedRef` rather than firing a second
@@ -250,9 +266,10 @@ function isUnboundKey(key: string): boolean {
  *    local value. `dirtyRef` stays true, and the drain loop fires another
  *    PUT with the updated version + the user's current local value.
  *
- * 4. While a write is pending or in flight, GET polls are suppressed —
- *    there's nothing for the server to tell us that our local value
- *    doesn't already know.
+ * 4. Live updates arrive via the project-scoped WS subscription — inline
+ *    frames apply directly, chunked/absent frames trigger a single
+ *    targeted GET. On reconnect we fire one catch-up read in case any
+ *    frames were missed while the socket was down.
  */
 function useProjectState<T>(
   key: string,
@@ -431,12 +448,32 @@ function useProjectState<T>(
     }
     if (!projectId) return;
     void read();
-    const id = setInterval(() => {
-      // Suppressed by `read` internally when dirtyRef / inFlightRef is set.
-      void read();
-    }, POLL_MS);
-    return () => clearInterval(id);
-  }, [read, projectId, unbound]);
+    const onFrame = (frame: MdxStateFrame): void => {
+      if (frame.projectId !== projectId) return;
+      if (frame.key !== key) return;
+      // A write of ours is still settling; the PUT response will sync versionRef
+      // and `latestRef` already has the locally-correct value. Ignoring the
+      // frame avoids racing the user's in-progress edit with our own echo.
+      if (dirtyRef.current || inFlightRef.current) return;
+      if (frame.version <= versionRef.current) return;
+      if (frame.mode === "inline" && "value" in frame) {
+        versionRef.current = frame.version;
+        const v = frame.value as T;
+        latestRef.current = v;
+        setValue(v);
+        if (putUrl) publishLatest(putUrl, frame.value);
+        setError(undefined);
+      } else {
+        // chunked or absent — refetch this one key.
+        void read();
+      }
+    };
+    const onConnectionChange = (connected: boolean): void => {
+      // Catch up on any updates the client missed while the WS was down.
+      if (connected) void read();
+    };
+    return subscribeProjectStateFrames(projectId, onFrame, onConnectionChange);
+  }, [read, projectId, unbound, key, putUrl]);
 
   // Subscribe to cross-hook broadcasts so this hook reflects writes made by
   // other <Input>/<PushButton>/etc. instances on the same key immediately.
@@ -993,6 +1030,688 @@ export function Markdown({ source }: { source?: string }): React.ReactElement {
   );
 }
 
+type CodeLanguage = "markdown" | "javascript" | "typescript" | "json" | "plain";
+
+function languageExtension(lang: CodeLanguage | string | undefined): Extension[] {
+  switch (lang) {
+    case "javascript":
+      return [javascript()];
+    case "typescript":
+      return [javascript({ typescript: true })];
+    case "json":
+    case "plain":
+      return [];
+    case "markdown":
+    default:
+      return [markdown()];
+  }
+}
+
+/**
+ * CodeMirror-backed editor surfaced to MDX as `<Code>`. Defaults to markdown
+ * highlighting so a note can offer a "type a markdown document" surface and
+ * keep the source in `useProjectState` like every other input — no special
+ * casing in the host. `language="javascript" | "typescript" | "json" | "plain"`
+ * picks a different mode (json/plain fall back to no highlighting since
+ * `@codemirror/lang-json` isn't bundled).
+ */
+export function Code({
+  value: valueKey,
+  onChange: onChangeKey,
+  language,
+  placeholder,
+  readOnly,
+}: {
+  value?: string;
+  onChange?: string;
+  language?: CodeLanguage | string;
+  placeholder?: string;
+  readOnly?: boolean | string;
+}): React.ReactElement {
+  const boundKey = onChangeKey ?? valueKey ?? "";
+  const [v, setV] = useProjectState<string>(boundKey, "");
+  const extensions = React.useMemo(() => languageExtension(language), [language]);
+  const ro = parseBoolAttr(readOnly);
+  return (
+    <div className="my-2 overflow-hidden rounded-md border border-border bg-background">
+      <CodeMirror
+        value={typeof v === "string" ? v : ""}
+        placeholder={placeholder}
+        readOnly={ro}
+        extensions={extensions}
+        basicSetup={{ lineNumbers: false, foldGutter: false, highlightActiveLine: false }}
+        onChange={(next) => setV(next)}
+      />
+    </div>
+  );
+}
+
+/** WPN-explorer drag MIME — must match `WpnExplorerPanelView.tsx:85`. */
+const WPN_NOTE_DND_MIME = "application/archon-wpn-note";
+
+/**
+ * CodeMirror extension that turns a WPN-explorer drag-drop into a markdown
+ * link inserted at the drop position. When the drop payload is missing or
+ * the resolver can't find the note, the handler returns `false` so default
+ * CodeMirror behavior runs (e.g. plain-text URI list still gets pasted).
+ */
+function wpnNoteLinkDropExtension(
+  resolver: WpnNoteLinkResolver | undefined,
+): Extension {
+  return EditorView.domEventHandlers({
+    dragenter(event: DragEvent): boolean {
+      // Some browsers require preventDefault on dragenter for the element
+      // to be treated as a valid drop target. dragover-only is not
+      // always sufficient — claim the drop here too.
+      const types = event.dataTransfer?.types;
+      if (!types || !Array.from(types).includes(WPN_NOTE_DND_MIME)) return false;
+      event.preventDefault();
+      return true;
+    },
+    dragover(event: DragEvent): boolean {
+      const types = event.dataTransfer?.types;
+      if (!types || !Array.from(types).includes(WPN_NOTE_DND_MIME)) return false;
+      event.preventDefault();
+      // Source's `effectAllowed` is `copyMove` (see WpnExplorerPanelView.tsx
+      // `onDragStartNote`), so `copy` is valid and gives the user a
+      // copy-cursor indicator that the drop is accepted.
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      return true;
+    },
+    drop(event: DragEvent, view: EditorView): boolean {
+      const dt = event.dataTransfer;
+      if (!dt) return false;
+      const raw = dt.getData(WPN_NOTE_DND_MIME);
+      if (!raw) return false;
+      let payload: { projectId?: unknown; noteId?: unknown };
+      try {
+        payload = JSON.parse(raw) as { projectId?: unknown; noteId?: unknown };
+      } catch {
+        return false;
+      }
+      const projectId = typeof payload.projectId === "string" ? payload.projectId : "";
+      const noteId = typeof payload.noteId === "string" ? payload.noteId : "";
+      if (!projectId || !noteId) return false;
+      const resolved = resolver ? resolver({ projectId, noteId }) : null;
+      if (!resolved) return false;
+      event.preventDefault();
+      event.stopPropagation();
+      const md = `[${resolved.label}](${resolved.href})`;
+      const pos =
+        view.posAtCoords({ x: event.clientX, y: event.clientY }) ??
+        view.state.selection.main.head;
+      view.dispatch({
+        changes: { from: pos, to: pos, insert: md },
+        selection: { anchor: pos + md.length },
+      });
+      view.focus();
+      return true;
+    },
+  });
+}
+
+/**
+ * Fetch a note's markdown content by id (preferred) or by title within the
+ * current MDX project. Mirrors `NoteEmbed`'s pattern (id → `GET /wpn/notes/:id`;
+ * title → list-then-get inside `projectId`) but returns the raw source string
+ * for components that need to do their own rendering. Returns
+ * `{ source: "" }` and a non-empty `error` when neither input is present or
+ * the fetch fails.
+ */
+function useExternalNoteSource(
+  id: string | undefined,
+  title: string | undefined,
+  projectId: string | null,
+): { source: string; loading: boolean; error?: string } {
+  const [state, setState] = React.useState<{
+    source: string;
+    loading: boolean;
+    error?: string;
+  }>({ source: "", loading: !!(id || title) });
+
+  React.useEffect(() => {
+    if (!id && !title) {
+      setState({ source: "", loading: false });
+      return;
+    }
+    let cancelled = false;
+    setState((prev) => ({ ...prev, loading: true, error: undefined }));
+    void (async () => {
+      try {
+        if (id) {
+          const res = await fetch(
+            `${syncBase()}/wpn/notes/${encodeURIComponent(id)}`,
+            { headers: authHeaders(), credentials: "omit" },
+          );
+          if (!res.ok) {
+            if (!cancelled)
+              setState({ source: "", loading: false, error: `GET ${res.status}` });
+            return;
+          }
+          const body = (await res.json()) as { note?: { content?: string } };
+          if (!cancelled)
+            setState({ source: body.note?.content ?? "", loading: false });
+          return;
+        }
+        if (title && projectId) {
+          const listRes = await fetch(
+            `${syncBase()}/wpn/projects/${encodeURIComponent(projectId)}/notes`,
+            { headers: authHeaders(), credentials: "omit" },
+          );
+          if (!listRes.ok) {
+            if (!cancelled)
+              setState({ source: "", loading: false, error: `GET ${listRes.status}` });
+            return;
+          }
+          const listBody = (await listRes.json()) as {
+            notes?: Array<{ id: string; title: string }>;
+          };
+          const hit = listBody.notes?.find((n) => n.title === title);
+          if (!hit) {
+            if (!cancelled)
+              setState({ source: "", loading: false, error: "note not found" });
+            return;
+          }
+          const noteRes = await fetch(
+            `${syncBase()}/wpn/notes/${encodeURIComponent(hit.id)}`,
+            { headers: authHeaders(), credentials: "omit" },
+          );
+          if (!noteRes.ok) {
+            if (!cancelled)
+              setState({ source: "", loading: false, error: `GET ${noteRes.status}` });
+            return;
+          }
+          const noteBody = (await noteRes.json()) as {
+            note?: { content?: string };
+          };
+          if (!cancelled)
+            setState({ source: noteBody.note?.content ?? "", loading: false });
+          return;
+        }
+        if (!cancelled)
+          setState({
+            source: "",
+            loading: false,
+            error: "title or id required",
+          });
+      } catch (e) {
+        if (!cancelled)
+          setState({ source: "", loading: false, error: (e as Error).message });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [id, title, projectId]);
+
+  return state;
+}
+
+type SlideSeparator = "hr" | "h1";
+
+/**
+ * Split a markdown deck into slides. `hr` splits on lines containing only
+ * `---` (>=3 dashes, optional whitespace). `h1` makes each `# ` heading a
+ * new slide. Empty leading/trailing chunks are dropped; remaining chunks
+ * are trimmed but their internal whitespace is preserved.
+ */
+function splitSlides(src: string, sep: SlideSeparator): string[] {
+  const text = String(src ?? "");
+  if (sep === "h1") {
+    // Match `# ` at line-start. Keep the heading by re-prefixing each chunk.
+    const parts = text.split(/^(?=# )/m).map((p) => p.replace(/\s+$/, ""));
+    const out = parts.filter((p) => p.trim().length > 0);
+    return out.length > 0 ? out : [text.trim()];
+  }
+  // hr: split on /^\s*-{3,}\s*$/ (a line that is only dashes)
+  const parts = text.split(/^[ \t]*-{3,}[ \t]*$/m).map((p) => p.trim());
+  const out = parts.filter((p) => p.length > 0);
+  return out.length > 0 ? out : [text.trim()];
+}
+
+/**
+ * `<Slideshow>` — markdown deck with built-in Edit/Present toggle. The
+ * source is bound to `value` (a project-state stateKey, same pattern as
+ * `<Code>`); slides are split on `---` by default (configurable via
+ * `separator`). In present mode each slide renders through react-markdown
+ * with the same component map and Tailwind class set as a regular
+ * markdown note.
+ *
+ * The host MDX shell's editor/preview split does NOT pipe a mode flag into
+ * rendered MDX — by design, mini-app components are always rendered in
+ * "preview." The Edit/Present toggle therefore lives inside this
+ * component, persisted per-deck under a state key derived from `value`
+ * (`${value}__mode`) so reopening the note restores the last-used view.
+ */
+export function Slideshow({
+  value: valueKey,
+  onChange: onChangeKey,
+  noteId,
+  noteTitle,
+  indexKey,
+  placeholder,
+  separator,
+}: {
+  value?: string;
+  onChange?: string;
+  noteId?: string;
+  noteTitle?: string;
+  indexKey?: string;
+  placeholder?: string;
+  separator?: SlideSeparator | string;
+}): React.ReactElement {
+  const boundKey = onChangeKey ?? valueKey ?? "";
+  // External-note mode: when `noteId` or `noteTitle` is set, the deck source
+  // is read-only — fetched from the source note rather than project state.
+  // Editing is disabled (users edit the source note directly), so the
+  // Edit/Present toggle, the textarea, and the Link-to-note picker all
+  // collapse and the component renders the present branch only.
+  const isExternal = !!(
+    (noteId && noteId.length > 0) ||
+    (noteTitle && noteTitle.length > 0)
+  );
+  const projectId = useProjectId();
+  const external = useExternalNoteSource(
+    isExternal ? noteId : undefined,
+    isExternal ? noteTitle : undefined,
+    projectId,
+  );
+  const [src, setSrc] = useProjectState<string>(
+    isExternal ? "__slideshow_external_unused" : boundKey,
+    "",
+  );
+  const effectiveSrc = isExternal ? external.source : src;
+  const sep: SlideSeparator = separator === "h1" ? "h1" : "hr";
+  const slides = React.useMemo(
+    () => splitSlides(typeof effectiveSrc === "string" ? effectiveSrc : "", sep),
+    [effectiveSrc, sep],
+  );
+
+  // Edit/Present mode persists per-deck via a state-key derived from the
+  // bound `value` key, so reopening the note (or opening it in another tab)
+  // restores the last-used view. When `value` is unbound, the mode falls
+  // back to a local-only state (the `__`-prefix convention skips the network
+  // in `useProjectState`). External-note decks are forced to present mode.
+  const modeKey = boundKey ? `${boundKey}__mode` : "__slideshow_mode_unbound";
+  const [storedMode, setStoredMode] = useProjectState<"edit" | "present">(
+    modeKey,
+    "edit",
+  );
+  const mode: "edit" | "present" = isExternal
+    ? "present"
+    : storedMode === "present"
+      ? "present"
+      : "edit";
+  const setMode = (next: "edit" | "present"): void => {
+    if (isExternal) return;
+    setStoredMode(next);
+  };
+  // External decks have no Edit mode, so we can't reuse `mode` to drive the
+  // full-screen overlay (it would force every embedded `<Slideshow noteId>`
+  // to take over the viewport on mount). Track full-screen separately, keep
+  // the inline present view as the default, and let the Present/Exit
+  // buttons + Esc toggle it.
+  const [externalFullscreen, setExternalFullscreen] = React.useState(false);
+
+  // Slide index: project-state when `indexKey` is set, otherwise local React state.
+  const [persistedIdx, setPersistedIdx] = useProjectState<number>(
+    indexKey ?? "__slideshow_unbound_idx",
+    0,
+  );
+  const [localIdx, setLocalIdx] = React.useState<number>(0);
+  const rawIdx = indexKey ? persistedIdx ?? 0 : localIdx;
+  const idx = Math.max(0, Math.min(slides.length - 1, rawIdx | 0));
+  const setIdx = (n: number): void => {
+    const clamped = Math.max(0, Math.min(slides.length - 1, n));
+    if (indexKey) setPersistedIdx(clamped);
+    else setLocalIdx(clamped);
+  };
+
+  const shell = useMdxShell();
+  const viewRef = React.useRef<EditorView | null>(null);
+  const cmExtensions = React.useMemo(
+    () => [markdown(), wpnNoteLinkDropExtension(shell.resolveWpnNoteLink)],
+    [shell.resolveWpnNoteLink],
+  );
+
+  const insertLinkAtCaret = React.useCallback(
+    (link: { label: string; href: string }): void => {
+      const view = viewRef.current;
+      if (!view) return;
+      const md = `[${link.label}](${link.href})`;
+      const pos = view.state.selection.main.head;
+      view.dispatch({
+        changes: { from: pos, to: pos, insert: md },
+        selection: { anchor: pos + md.length },
+      });
+      view.focus();
+    },
+    [],
+  );
+
+  const onPickNoteLinkClick = React.useCallback((): void => {
+    const opener = shell.openWpnNoteLinkPicker;
+    if (!opener || !viewRef.current) return;
+    opener((link) => insertLinkAtCaret(link));
+  }, [shell.openWpnNoteLinkPicker, insertLinkAtCaret]);
+
+  const canPickNoteLink = !!shell.openWpnNoteLinkPicker;
+  const { components: baseComponents } = useArchonMarkdownUiComponents({});
+  const openInternalNoteLinkInNewTab = shell.openInternalNoteLinkInNewTab;
+  // Slides should open internal note links in a NEW Archon tab (not a new
+  // browser tab — that would lose context in the desktop app and double-load
+  // the SPA in the web app). External http(s) links keep the legacy
+  // `target="_blank"` behavior. Falls back to `target="_blank"` for internal
+  // links too when rendered outside `MdxNoteEditor` (no host workbench).
+  const components = React.useMemo(
+    () => ({
+      ...baseComponents,
+      a: ({
+        href,
+        children,
+        ...rest
+      }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
+        const internal =
+          typeof href === "string" ? parseInternalMarkdownNoteLink(href) : null;
+        if (internal && openInternalNoteLinkInNewTab) {
+          return (
+            <a
+              {...rest}
+              href={href}
+              onClick={(e) => {
+                if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+                e.preventDefault();
+                openInternalNoteLinkInNewTab(internal);
+              }}
+            >
+              {children}
+            </a>
+          );
+        }
+        return (
+          <a {...rest} href={href} target="_blank" rel="noopener noreferrer">
+            {children}
+          </a>
+        );
+      },
+    }),
+    [baseComponents, openInternalNoteLinkInNewTab],
+  );
+
+  const toggleBtn = (
+    target: "edit" | "present",
+    label: string,
+  ): React.ReactElement => {
+    const active = mode === target;
+    return (
+      <button
+        type="button"
+        onClick={() => setMode(target)}
+        className={
+          "rounded-md border px-2.5 py-1 text-[12px] font-medium transition-colors " +
+          (active
+            ? "border-primary bg-primary text-primary-foreground"
+            : "border-border bg-background text-foreground hover:bg-muted/50")
+        }
+      >
+        {label}
+      </button>
+    );
+  };
+
+  const navBtn = (
+    onClick: () => void,
+    disabled: boolean,
+    label: string,
+  ): React.ReactElement => (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={
+        "rounded-md border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground transition-colors " +
+        (disabled ? "opacity-40 cursor-not-allowed" : "hover:bg-muted/50")
+      }
+    >
+      {label}
+    </button>
+  );
+
+  const isPresenting = isExternal ? externalFullscreen : mode === "present";
+
+  // In Present mode, take over the viewport — Esc returns to Edit (or, for
+  // external decks, collapses the full-screen overlay back to inline).
+  // Arrow keys navigate slides while presenting.
+  React.useEffect(() => {
+    if (!isPresenting) return;
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        if (isExternal) setExternalFullscreen(false);
+        else setMode("edit");
+      } else if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
+        if (idx < slides.length - 1) {
+          e.preventDefault();
+          setIdx(idx + 1);
+        }
+      } else if (e.key === "ArrowLeft" || e.key === "PageUp") {
+        if (idx > 0) {
+          e.preventDefault();
+          setIdx(idx - 1);
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // setMode/setExternalFullscreen/setIdx are stable; intentionally re-bind on idx/slides.length so the closure is fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPresenting, isExternal, idx, slides.length]);
+
+  // Present mode swaps to a fixed-position overlay that fills the
+  // viewport. Edit mode keeps the inline component layout so the deck
+  // sits naturally in the surrounding MDX content.
+  const outerClass = isPresenting
+    ? "fixed inset-0 z-50 flex flex-col overflow-hidden bg-background"
+    : "my-3 flex min-h-[320px] flex-1 flex-col overflow-hidden rounded-md border border-border bg-background";
+
+  return (
+    <div className={outerClass}>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-muted/20 px-3 py-1.5">
+        <div className="flex items-center gap-1.5">
+          {!isExternal && toggleBtn("edit", "Edit")}
+          {!isExternal && toggleBtn("present", "Present")}
+          {isExternal && !externalFullscreen && (
+            <button
+              type="button"
+              onClick={() => setExternalFullscreen(true)}
+              className="rounded-md border border-border bg-background px-2.5 py-1 text-[12px] font-medium text-foreground transition-colors hover:bg-muted/50"
+            >
+              Present
+            </button>
+          )}
+          {isExternal && externalFullscreen && (
+            <button
+              type="button"
+              onClick={() => setExternalFullscreen(false)}
+              className="rounded-md border border-primary bg-primary px-2.5 py-1 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            >
+              Exit
+            </button>
+          )}
+          {isExternal && (
+            <span className="ml-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+              External note
+            </span>
+          )}
+        </div>
+        {!isExternal && mode === "edit" && (
+          <button
+            type="button"
+            onClick={onPickNoteLinkClick}
+            disabled={!canPickNoteLink}
+            title={
+              canPickNoteLink
+                ? "Pick a note and insert a markdown link at the caret"
+                : "Note picker isn't available in this rendering context"
+            }
+            className={
+              "rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors " +
+              (canPickNoteLink ? "hover:bg-muted/50" : "cursor-not-allowed opacity-40")
+            }
+          >
+            Link to note (path)
+          </button>
+        )}
+        {mode === "present" && (
+          <div className="flex items-center gap-3 text-[12px] text-muted-foreground">
+            <span>
+              Slide {idx + 1} of {slides.length}
+            </span>
+            {isPresenting && (
+              <span className="hidden text-[11px] opacity-70 sm:inline">
+                ← / → to navigate · Esc to exit
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+      {isExternal && external.loading ? (
+        <div className="p-4 text-[12px] text-muted-foreground">
+          Loading deck…
+        </div>
+      ) : isExternal && external.error ? (
+        <div className="p-4 text-[12px] text-destructive" role="alert">
+          Slideshow error: {external.error}
+        </div>
+      ) : mode === "edit" ? (
+        <div className="min-h-0 flex-1 overflow-hidden">
+          <CodeMirror
+            value={typeof src === "string" ? src : ""}
+            placeholder={placeholder}
+            height="100%"
+            extensions={cmExtensions}
+            basicSetup={{
+              lineNumbers: false,
+              foldGutter: false,
+              highlightActiveLine: false,
+            }}
+            className="archon-md-cm h-full min-h-0 overflow-hidden text-[13px] [&_.cm-editor]:flex [&_.cm-editor]:h-full [&_.cm-editor]:min-h-0 [&_.cm-editor]:flex-col [&_.cm-scroller]:min-h-0 [&_.cm-scroller]:flex-1"
+            onCreateEditor={(view) => {
+              viewRef.current = view;
+            }}
+            onChange={(next) => setSrc(next)}
+          />
+        </div>
+      ) : (
+        <div
+          className={
+            "flex min-h-0 flex-1 flex-col gap-2 " +
+            (isPresenting ? "px-16 py-12 sm:px-24 sm:py-16" : "p-4")
+          }
+        >
+          {isPresenting && (
+            <style>{`
+.archon-slideshow-fullscreen h1 {
+  font-size: clamp(40px, 6vw, 64px) !important;
+  line-height: 1.1 !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.02em !important;
+  margin: 0 0 0.5em !important;
+}
+.archon-slideshow-fullscreen h2 {
+  font-size: clamp(28px, 4.5vw, 44px) !important;
+  line-height: 1.15 !important;
+  font-weight: 600 !important;
+  letter-spacing: -0.01em !important;
+  margin: 0.6em 0 0.4em !important;
+}
+.archon-slideshow-fullscreen h3 {
+  font-size: clamp(22px, 3.4vw, 32px) !important;
+  line-height: 1.2 !important;
+  font-weight: 600 !important;
+  margin: 0.6em 0 0.3em !important;
+}
+.archon-slideshow-fullscreen p,
+.archon-slideshow-fullscreen li,
+.archon-slideshow-fullscreen blockquote {
+  font-size: clamp(18px, 2.4vw, 24px) !important;
+  line-height: 1.5 !important;
+}
+.archon-slideshow-fullscreen ul,
+.archon-slideshow-fullscreen ol {
+  margin: 0.5em 0 !important;
+  padding-left: 0.4em !important;
+  list-style-position: inside !important;
+}
+.archon-slideshow-fullscreen li {
+  text-indent: -1.2em !important;
+  padding-left: 1.2em !important;
+}
+.archon-slideshow-fullscreen li + li {
+  margin-top: 0.35em !important;
+}
+.archon-slideshow-fullscreen li::marker {
+  font-variant-numeric: tabular-nums;
+}
+.archon-slideshow-fullscreen blockquote {
+  border-left: 4px solid currentColor;
+  padding-left: 0.8em !important;
+  opacity: 0.85;
+  margin: 0.6em 0 !important;
+}
+.archon-slideshow-fullscreen code {
+  font-size: 0.85em !important;
+}
+.archon-slideshow-fullscreen pre {
+  font-size: clamp(14px, 1.6vw, 20px) !important;
+  line-height: 1.45 !important;
+  padding: 0.9em 1.1em !important;
+  border-radius: 8px !important;
+}
+.archon-slideshow-fullscreen pre code {
+  font-size: inherit !important;
+}
+.archon-slideshow-fullscreen table {
+  font-size: clamp(16px, 1.9vw, 20px) !important;
+}
+.archon-slideshow-fullscreen th,
+.archon-slideshow-fullscreen td {
+  padding: 0.5em 0.7em !important;
+}
+.archon-slideshow-fullscreen hr {
+  margin: 1em 0 !important;
+}
+            `}</style>
+          )}
+          <div
+            className={
+              "mx-auto w-full min-h-0 flex-1 overflow-y-auto " +
+              (isPresenting
+                ? "max-w-[1100px] archon-slideshow-fullscreen"
+                : "") +
+              " " +
+              markdownShellClass
+            }
+          >
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+              {slides[idx] ?? ""}
+            </ReactMarkdown>
+          </div>
+          <div
+            className={
+              "mx-auto mt-2 flex w-full shrink-0 justify-between " +
+              (isPresenting ? "max-w-[1100px]" : "max-w-4xl")
+            }
+          >
+            {navBtn(() => setIdx(idx - 1), idx <= 0, "◀ Prev")}
+            {navBtn(() => setIdx(idx + 1), idx >= slides.length - 1, "Next ▶")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /**
  * Tag name → component map for the `@archon/mdx-sdk` facade. Extends the
  * existing `@archon/ui` map via composition in `component-map.ts`.
@@ -1014,5 +1733,7 @@ export function getArchonMdxSdkFacadeComponentMap(): Record<
     Chart,
     NoteEmbed,
     Markdown,
+    Code,
+    Slideshow,
   } as unknown as Record<string, React.ComponentType<Record<string, unknown>>>;
 }

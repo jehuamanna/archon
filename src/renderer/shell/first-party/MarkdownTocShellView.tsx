@@ -138,7 +138,10 @@ export function MarkdownTocShellView(_props: ShellViewComponentProps): React.Rea
                     title={b.title}
                     onClick={() => {
                       const cached = getCachedCanonicalVfsPathForNoteId(b.id);
-                      openNoteById(b.id, cached ? { canonicalVfsPath: cached } : undefined);
+                      openNoteById(b.id, {
+                        ...(b.title ? { title: b.title } : {}),
+                        ...(cached ? { canonicalVfsPath: cached } : {}),
+                      });
                     }}
                   >
                     {b.title.trim() || "Untitled"}

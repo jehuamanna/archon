@@ -1,5 +1,5 @@
 import { getArchon } from "../../shared/archon-host-access";
-import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { Note } from "@archon/ui-types";
 import type { AppDispatch, RootState } from "../store";
@@ -10,6 +10,37 @@ import {
   invalidateArchonNoteTypesCaches,
 } from "../utils/cached-archon-note-types";
 import NoteTypeReactRenderer from "./renderers/NoteTypeReactRenderer";
+import { useArchonContributionRegistry } from "../shell/ArchonContributionContext";
+import {
+  getCachedCanonicalVfsPathForNoteId,
+  subscribeNoteVfsPathCacheInvalidated,
+} from "../shell/noteIdVfsPathCache";
+
+function relativeTimeShort(ms: number | undefined | null): string {
+  if (!ms) return "—";
+  const delta = Date.now() - ms;
+  if (delta < 60_000) return "just now";
+  const m = Math.floor(delta / 60_000);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+function useCachedNoteVfsPath(noteId: string): string | undefined {
+  const [path, setPath] = useState<string | undefined>(() =>
+    getCachedCanonicalVfsPathForNoteId(noteId),
+  );
+  useEffect(() => {
+    setPath(getCachedCanonicalVfsPathForNoteId(noteId));
+    return subscribeNoteVfsPathCacheInvalidated(() => {
+      setPath(getCachedCanonicalVfsPathForNoteId(noteId));
+    });
+  }, [noteId]);
+  return path;
+}
 
 function CopyGlyph(props: { className?: string }): React.ReactElement {
   return (
@@ -52,7 +83,6 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
   const [pluginState, setPluginState] = useState<"checking" | "ok" | "missing">(
     "checking",
   );
-  const hasPlugin = pluginState === "ok";
   const titleRef = useRef<HTMLHeadingElement>(null);
   const [titleEditing, setTitleEditing] = useState(false);
   const { showToast } = useToast();
@@ -105,6 +135,51 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
 
   const displayTitle = titleDraft !== undefined ? titleDraft : note.title;
 
+  // Status-bar context: type + plugin badge + WPN path on the center segment;
+  // created/updated relative timestamps on the right segment. Re-registers
+  // (replacing by id) whenever the relevant fields change. Auto-disposes on
+  // unmount so the bar is clean when no note is active.
+  const contribRegistry = useArchonContributionRegistry();
+  const vfsPath = useCachedNoteVfsPath(note.id);
+  const hasPlugin = pluginState === "ok";
+  const centerLine = useMemo(() => {
+    const parts: string[] = [note.type];
+    if (hasPlugin) parts.push("Plugin active");
+    else if (pluginState === "missing") parts.push("No plugin");
+    if (vfsPath) parts.push(vfsPath);
+    return parts.join(" · ");
+  }, [note.type, hasPlugin, pluginState, vfsPath]);
+  const rightLine = useMemo(() => {
+    const segments: string[] = [];
+    if (note.updated_at_ms) segments.push(`Updated ${relativeTimeShort(note.updated_at_ms)}`);
+    if (note.created_at_ms) segments.push(`Created ${relativeTimeShort(note.created_at_ms)}`);
+    return segments.join(" · ");
+  }, [note.updated_at_ms, note.created_at_ms]);
+  useEffect(() => {
+    const idC = `archon.note.context.${note.id}.center`;
+    const idR = `archon.note.context.${note.id}.right`;
+    const disposeC = contribRegistry.registerModeLineItem({
+      id: idC,
+      segment: "host.center",
+      priority: 60,
+      text: centerLine,
+      sourcePluginId: "archon.note.context",
+    });
+    const disposeR = rightLine
+      ? contribRegistry.registerModeLineItem({
+          id: idR,
+          segment: "host.right",
+          priority: 60,
+          text: rightLine,
+          sourcePluginId: "archon.note.context",
+        })
+      : null;
+    return () => {
+      disposeC();
+      disposeR?.();
+    };
+  }, [contribRegistry, note.id, centerLine, rightLine]);
+
   useLayoutEffect(() => {
     const el = titleRef.current;
     if (!el || titleEditing) {
@@ -133,25 +208,6 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
           Install a plugin to handle this note type from the Plugin Manager.
         </p>
       </div>
-    );
-  };
-
-  const copyNoteTitle = () => {
-    void navigator.clipboard.writeText(note.title).then(
-      () => {
-        showToast({
-          severity: "info",
-          message: "Note name copied",
-          mergeKey: "note-viewer-copy-title",
-        });
-      },
-      () => {
-        showToast({
-          severity: "error",
-          message: "Could not copy name (clipboard permission).",
-          mergeKey: "note-viewer-copy-title-err",
-        });
-      },
     );
   };
 
@@ -209,7 +265,7 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
-      <header className="shrink-0 border-b border-border px-4 py-3">
+      <header className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-2">
         <h2
           key={note.id}
           ref={titleRef}
@@ -218,7 +274,7 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
           role="heading"
           aria-level={2}
           tabIndex={0}
-          className="min-h-[1.25rem] max-w-full rounded-sm px-1 py-0.5 text-[13px] font-semibold leading-tight text-foreground outline-none ring-offset-background hover:bg-muted/40 focus:bg-muted/40 focus:ring-2 focus:ring-ring focus:ring-offset-2"
+          className="min-w-0 flex-1 truncate rounded-sm px-1 py-0.5 text-[13px] font-semibold leading-tight text-foreground outline-none ring-offset-background hover:bg-muted/40 focus:bg-muted/40 focus:ring-2 focus:ring-ring focus:ring-offset-2"
           onFocus={() => setTitleEditing(true)}
           onInput={() => {
             const el = titleRef.current;
@@ -240,41 +296,16 @@ const NoteViewer: React.FC<NoteViewerProps> = ({
             }
           }}
         />
-        <div className="mt-3 flex w-full min-w-0 flex-nowrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-            <div className="flex items-center gap-2 text-[12px]">
-              <span className="text-muted-foreground">Type</span>
-              <span className="font-mono text-foreground">{note.type}</span>
-            </div>
-            {hasPlugin ? (
-              <span className="rounded-sm bg-badge-text-bg px-2 py-0.5 font-medium text-[11px] text-badge-text-fg">
-                Plugin active
-              </span>
-            ) : null}
-          </div>
-          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-              title="Copy note name"
-              aria-label="Copy note name"
-              onClick={copyNoteTitle}
-            >
-              <CopyGlyph />
-              <span>Copy note name</span>
-            </button>
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-              title="Copy note id"
-              aria-label="Copy note id"
-              onClick={copyNoteId}
-            >
-              <CopyGlyph />
-              <span>Copy note id</span>
-            </button>
-          </div>
-        </div>
+        <button
+          type="button"
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+          title="Copy note id"
+          aria-label="Copy note id"
+          onClick={copyNoteId}
+        >
+          <CopyGlyph />
+          <span>Copy note id</span>
+        </button>
       </header>
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-4 py-3">
         <div className="flex min-h-0 flex-1 flex-col">{renderNote()}</div>

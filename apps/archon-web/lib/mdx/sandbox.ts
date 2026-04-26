@@ -105,7 +105,10 @@ function rewriteEsmToCjs(src: string): string {
     /import\s*\{([^}]+)\}\s*from\s*["']react["'];?/g,
     (_m, names: string) => rewriteImportList(names, "reactRuntime"),
   );
-  // @archon/mdx-sdk — the authoring SDK (components + hooks).
+  // @archon/mdx-sdk — author-facing facade name. Symbols are resolved against
+  // the `sdk` endowment passed by the host (currently @archon/mdx-sdk-runtime).
+  // The schema-only @archon/mdx-sdk package keeps this name stable for authors
+  // and validators while the runtime can be swapped behind it.
   out = out.replace(
     /import\s*\{([^}]+)\}\s*from\s*["']@archon\/mdx-sdk["'];?/g,
     (_m, names: string) => rewriteImportList(names, "sdk"),

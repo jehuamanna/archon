@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useProjectState, useNote } from "./hooks.js";
+import { useProjectState, useNote } from "./hooks";
 
 export interface InputProps {
   value: string;
@@ -255,6 +255,225 @@ export function PushButton(props: PushButtonProps): React.ReactElement {
     "button",
     { type: "button", onClick },
     props.label,
+  );
+}
+
+export interface CodeProps {
+  value: string;
+  onChange: string;
+  language?: "markdown" | "javascript" | "typescript" | "json" | "plain";
+  placeholder?: string;
+  readOnly?: boolean;
+}
+
+/**
+ * `<Code>` — CodeMirror editor in the Electron renderer; the web runtime
+ * here ships a minimal `<textarea>` fallback (no codemirror bundle in web)
+ * so mini-app notes that use `<Code>` still work end-to-end.
+ */
+export function Code(props: CodeProps): React.ReactElement {
+  const boundKey = props.onChange ?? props.value;
+  const [v, setV] = useProjectState<string>(boundKey, "");
+  return React.createElement("textarea", {
+    value: typeof v === "string" ? v : "",
+    placeholder: props.placeholder,
+    readOnly: !!props.readOnly,
+    spellCheck: false,
+    "data-archon-code-language": props.language ?? "markdown",
+    rows: 12,
+    style: { fontFamily: "ui-monospace, monospace", width: "100%" },
+    onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setV(e.target.value),
+  });
+}
+
+export interface SlideshowProps {
+  value?: string;
+  onChange?: string;
+  noteId?: string;
+  noteTitle?: string;
+  indexKey?: string;
+  placeholder?: string;
+  separator?: "hr" | "h1";
+}
+
+function splitSlides(src: string, sep: "hr" | "h1"): string[] {
+  const text = String(src ?? "");
+  if (sep === "h1") {
+    const parts = text.split(/^(?=# )/m).map((p) => p.replace(/\s+$/, ""));
+    const out = parts.filter((p) => p.trim().length > 0);
+    return out.length > 0 ? out : [text.trim()];
+  }
+  const parts = text.split(/^[ \t]*-{3,}[ \t]*$/m).map((p) => p.trim());
+  const out = parts.filter((p) => p.length > 0);
+  return out.length > 0 ? out : [text.trim()];
+}
+
+/**
+ * `<Slideshow>` web-runtime fallback. The Electron renderer wires this to
+ * CodeMirror + react-markdown; here we ship a textarea for editing and a
+ * `<pre>` block for presenting so the navigation flow still works without
+ * a markdown bundle in the web app.
+ */
+export function Slideshow(props: SlideshowProps): React.ReactElement {
+  const boundKey = props.onChange ?? props.value ?? "";
+  // External-note mode: when `noteId` or `noteTitle` is set, the deck source
+  // is read-only and fetched from the source note (mirrors NoteEmbed). The
+  // Edit toggle is hidden; users edit by opening the source note directly.
+  const externalRef = props.noteId ?? props.noteTitle ?? "";
+  const isExternal = externalRef.length > 0;
+  const externalNote = useNote(isExternal ? externalRef : "");
+  const [src, setSrc] = useProjectState<string>(
+    isExternal ? "__slideshow_external_unused" : boundKey,
+    "",
+  );
+  const effectiveSrc = isExternal ? externalNote.source : src;
+  const sep: "hr" | "h1" = props.separator === "h1" ? "h1" : "hr";
+  const slides = splitSlides(
+    typeof effectiveSrc === "string" ? effectiveSrc : "",
+    sep,
+  );
+  // Persist Edit/Present mode per-deck so reopens remember the last view.
+  // External decks are forced to present mode.
+  const modeKey = boundKey ? `${boundKey}__mode` : "__slideshow_mode_unbound";
+  const [storedMode, setStoredMode] = useProjectState<"edit" | "present">(
+    modeKey,
+    "edit",
+  );
+  const mode: "edit" | "present" = isExternal
+    ? "present"
+    : storedMode === "present"
+      ? "present"
+      : "edit";
+  const setMode = (next: "edit" | "present"): void => {
+    if (isExternal) return;
+    setStoredMode(next);
+  };
+  const [persistedIdx, setPersistedIdx] = useProjectState<number>(
+    props.indexKey ?? "__slideshow_unbound_idx",
+    0,
+  );
+  const [localIdx, setLocalIdx] = React.useState<number>(0);
+  const rawIdx = props.indexKey ? persistedIdx ?? 0 : localIdx;
+  const idx = Math.max(0, Math.min(slides.length - 1, rawIdx | 0));
+  const setIdx = (n: number): void => {
+    const clamped = Math.max(0, Math.min(slides.length - 1, n));
+    if (props.indexKey) setPersistedIdx(clamped);
+    else setLocalIdx(clamped);
+  };
+
+  const toolbarChildren: React.ReactNode[] = [];
+  if (!isExternal) {
+    toolbarChildren.push(
+      React.createElement(
+        "button",
+        {
+          key: "edit",
+          type: "button",
+          onClick: () => setMode("edit"),
+          disabled: mode === "edit",
+        },
+        "Edit",
+      ),
+      React.createElement(
+        "button",
+        {
+          key: "present",
+          type: "button",
+          onClick: () => setMode("present"),
+          disabled: mode === "present",
+        },
+        "Present",
+      ),
+    );
+  } else {
+    toolbarChildren.push(
+      React.createElement(
+        "span",
+        {
+          key: "ext",
+          style: { fontSize: 11, textTransform: "uppercase", color: "#666" },
+        },
+        "External note",
+      ),
+    );
+  }
+  if (mode === "present") {
+    toolbarChildren.push(
+      React.createElement(
+        "span",
+        { key: "count", style: { marginLeft: "auto", fontSize: 12 } },
+        `Slide ${idx + 1} of ${slides.length}`,
+      ),
+    );
+  }
+  const externalLoading = isExternal && externalNote.loading;
+  const externalError = isExternal && externalNote.error;
+  return React.createElement(
+    "div",
+    { style: { border: "1px solid #ccc", borderRadius: 4, margin: "12px 0" } },
+    React.createElement(
+      "div",
+      {
+        style: {
+          display: "flex",
+          gap: 6,
+          padding: 6,
+          borderBottom: "1px solid #eee",
+        },
+      },
+      ...toolbarChildren,
+    ),
+    externalLoading
+      ? React.createElement(
+          "div",
+          { style: { padding: 12, fontSize: 12, color: "#666" } },
+          "Loading deck…",
+        )
+      : externalError
+        ? React.createElement(
+            "div",
+            {
+              role: "alert",
+              style: { padding: 12, fontSize: 12, color: "#b91c1c" },
+            },
+            `Slideshow error: ${String(externalNote.error)}`,
+          )
+        : mode === "edit"
+      ? React.createElement("textarea", {
+          value: typeof src === "string" ? src : "",
+          placeholder: props.placeholder,
+          rows: 12,
+          spellCheck: false,
+          style: { width: "100%", fontFamily: "ui-monospace, monospace", border: 0, padding: 8 },
+          onChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => setSrc(e.target.value),
+        })
+      : React.createElement(
+          "div",
+          { style: { padding: 12 } },
+          React.createElement(
+            "pre",
+            { style: { whiteSpace: "pre-wrap", margin: 0, minHeight: 120 } },
+            slides[idx] ?? "",
+          ),
+          React.createElement(
+            "div",
+            { style: { display: "flex", justifyContent: "space-between", marginTop: 8 } },
+            React.createElement(
+              "button",
+              { type: "button", onClick: () => setIdx(idx - 1), disabled: idx <= 0 },
+              "◀ Prev",
+            ),
+            React.createElement(
+              "button",
+              {
+                type: "button",
+                onClick: () => setIdx(idx + 1),
+                disabled: idx >= slides.length - 1,
+              },
+              "Next ▶",
+            ),
+          ),
+        ),
   );
 }
 

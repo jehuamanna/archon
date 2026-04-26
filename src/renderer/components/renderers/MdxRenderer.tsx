@@ -22,7 +22,13 @@ import {
   ObservableEmbed,
   ObservableRuntimeEmbed,
 } from "./mdx-embed-components";
-import { MdxShellProvider, useMdxShell } from "./mdx-shell-context";
+import {
+  MdxShellProvider,
+  useMdxShell,
+  type WpnNoteLinkResolver,
+  type WpnNoteLinkPickerOpener,
+  type MdxShellContextValue,
+} from "./mdx-shell-context";
 import { useArchonContributionRegistryMaybe } from "../../shell/ArchonContributionContext";
 import { ReactMarkdownNoteBody, type MarkdownRendererProps } from "./ReactMarkdownNoteBody";
 import { markdownShellClass, useArchonMarkdownUiComponents } from "./useArchonMarkdownUiComponents";
@@ -30,6 +36,9 @@ import { shouldRenderMdx } from "../../utils/note-mdx-format";
 
 export type MdxRendererProps = MarkdownRendererProps & {
   nestingDepth?: number;
+  resolveWpnNoteLink?: WpnNoteLinkResolver;
+  openWpnNoteLinkPicker?: WpnNoteLinkPickerOpener;
+  openInternalNoteLinkInNewTab?: MdxShellContextValue["openInternalNoteLinkInNewTab"];
 };
 
 const MAX_DOC_EMBED_DEPTH = 6;
@@ -104,6 +113,9 @@ function DocPageEmbed({ noteId }: { noteId: string }): React.ReactElement {
           onArchonCmdLink={shell.onArchonCmdLink}
           onWelcomeShellSegmentClick={shell.onWelcomeShellSegmentClick}
           isLinkTargetValid={shell.isLinkTargetValid}
+          resolveWpnNoteLink={shell.resolveWpnNoteLink}
+          openWpnNoteLinkPicker={shell.openWpnNoteLinkPicker}
+          openInternalNoteLinkInNewTab={shell.openInternalNoteLinkInNewTab}
         />
       ) : (
         <ReactMarkdownNoteBody
@@ -137,6 +149,9 @@ export function MdxRenderer({
   onArchonCmdLink,
   onWelcomeShellSegmentClick,
   isLinkTargetValid,
+  resolveWpnNoteLink,
+  openWpnNoteLinkPicker,
+  openInternalNoteLinkInNewTab,
 }: MdxRendererProps): React.ReactElement {
   const trustMode = pickMdxTrustMode(note);
   const trustRemarkPlugin = useMemo(() => remarkArchonMdxTrust(trustMode), [trustMode]);
@@ -203,6 +218,9 @@ export function MdxRenderer({
       onArchonCmdLink,
       onWelcomeShellSegmentClick,
       isLinkTargetValid,
+      resolveWpnNoteLink,
+      openWpnNoteLinkPicker,
+      openInternalNoteLinkInNewTab,
     }),
     [
       nestingDepth,
@@ -212,6 +230,9 @@ export function MdxRenderer({
       onArchonCmdLink,
       onWelcomeShellSegmentClick,
       isLinkTargetValid,
+      resolveWpnNoteLink,
+      openWpnNoteLinkPicker,
+      openInternalNoteLinkInNewTab,
     ],
   );
 
@@ -251,7 +272,9 @@ export function MdxRenderer({
 
   return (
     <MdxShellProvider value={shellValue}>
-      <div className={`p-4 archon-typography max-w-none min-w-0 ${markdownShellClass}`}>
+      <div
+        className={`p-4 archon-typography max-w-none min-w-0 flex min-h-full flex-col ${markdownShellClass}`}
+      >
         {compileErr ? (
           <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-[13px] text-destructive whitespace-pre-wrap">
             {compileErr}

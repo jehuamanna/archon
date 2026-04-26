@@ -56,7 +56,13 @@ const nextConfig = {
    * without this, Next 16 blocks `/_next/*` dev assets and the app can break or show wrong UI.
    */
   allowedDevOrigins: ["127.0.0.1", "localhost"],
-  transpilePackages: ["@archon/platform", "rxdb", "dexie"],
+  transpilePackages: [
+    "@archon/platform",
+    "@archon/mdx-sdk-runtime",
+    "@nodex-studio/mdx-sdk",
+    "rxdb",
+    "dexie",
+  ],
   images: { unoptimized: true },
   async headers() {
     if (staticExport) {

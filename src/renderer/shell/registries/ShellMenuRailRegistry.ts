@@ -32,12 +32,27 @@ export type ShellMenuRailItem = {
     sidebarPanel?: boolean;
     companion?: boolean;
   };
+  /**
+   * Hide chrome regions when opening this tab. Runs after `expandChrome`.
+   * Use for tabs whose main area is self-contained and shouldn't bring the
+   * sidebar / companion along (e.g. the Welcome view).
+   */
+  collapseChrome?: {
+    sidebarPanel?: boolean;
+    companion?: boolean;
+  };
   sidebarViewId?: string;
   secondaryViewId?: string;
   /** Legacy: open a single view without opening a tab (prefer {@link tabTypeId}). */
   openViewId?: string;
   /** Where to open the view (default: sidebar panel). */
   openViewRegion?: ShellRegionId;
+  /**
+   * Where to render the icon in the activity bar. `top` (default) groups
+   * with the primary navigation; `bottom` pins below the separator with
+   * utilities like Admin and Notifications.
+   */
+  placement?: "top" | "bottom";
 };
 
 type Listener = () => void;

@@ -101,6 +101,73 @@ export const PROP_SPECS: Record<string, ComponentPropSpec> = {
       semantic: "Text shown when the state key is undefined.",
     },
   },
+  Code: {
+    value: {
+      type: "stateKey",
+      required: true,
+      semantic: "State key holding the source text (e.g. a markdown document).",
+    },
+    onChange: {
+      type: "stateKey",
+      required: true,
+      semantic: "State key to write on each edit (can equal `value`).",
+    },
+    language: {
+      type: "enum",
+      enum: ["markdown", "javascript", "typescript", "json", "plain"],
+      default: "markdown",
+      semantic: "Syntax highlighting language. Defaults to markdown.",
+    },
+    placeholder: {
+      type: "string",
+      default: "",
+      semantic: "Placeholder shown when the editor is empty.",
+    },
+    readOnly: {
+      type: "boolean",
+      default: false,
+      semantic: "Disable editing.",
+    },
+  },
+  Slideshow: {
+    value: {
+      type: "stateKey",
+      semantic:
+        "State key holding the full markdown source of the deck. Ignored when `noteId` or `noteTitle` is set.",
+    },
+    onChange: {
+      type: "stateKey",
+      semantic:
+        "State key written on each edit (typically equals `value`). Ignored when `noteId` or `noteTitle` is set.",
+    },
+    noteId: {
+      type: "noteId",
+      semantic:
+        "When set, the deck source is loaded read-only from this note's markdown content. Edit mode is disabled.",
+    },
+    noteTitle: {
+      type: "string",
+      semantic:
+        "Same-project title lookup, alternative to `noteId`. Read-only.",
+    },
+    indexKey: {
+      type: "stateKey",
+      semantic:
+        "Optional state key for the current slide index. When omitted, the index is component-local and resets on reload.",
+    },
+    placeholder: {
+      type: "string",
+      default: "",
+      semantic: "Placeholder text shown when the deck source is empty.",
+    },
+    separator: {
+      type: "enum",
+      enum: ["hr", "h1"],
+      default: "hr",
+      semantic:
+        "How to split the source into slides. `hr`: split on lines containing only `---`. `h1`: each `# ` heading starts a new slide.",
+    },
+  },
   PushButton: {
     label: { type: "string", required: true, semantic: "Button label." },
     fromKey: {

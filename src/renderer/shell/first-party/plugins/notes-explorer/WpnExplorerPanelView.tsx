@@ -1745,7 +1745,11 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     }
 
     const vfsPath = explorerCanonicalVfsPath(projectId, "Untitled", workspaces, projectsByWs);
-    openNoteById(realId, { newTab: true, ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}) });
+    openNoteById(realId, {
+      newTab: true,
+      title: "Untitled",
+      ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+    });
   };
 
   const onDeleteNotes = async (projectId: string, ids: string[]) => {
@@ -2436,7 +2440,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         noteOpenTimerRef.current = null;
         pendingOpenNoteIdRef.current = null;
         const vfsPath = explorerCanonicalVfsPath(projectId, title, workspaces, projectsByWs);
-        openNoteById(id, vfsPath ? { canonicalVfsPath: vfsPath } : undefined);
+        openNoteById(id, {
+          ...(title ? { title } : {}),
+          ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+        });
       }, NOTE_OPEN_DELAY_MS);
     },
     [openNoteById, workspaces, projectsByWs],
@@ -2453,7 +2460,11 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const onDragStartNote = (e: React.DragEvent, projectId: string, noteId: string) => {
     explorerNoteDragRef.current = { projectId, noteId };
     e.dataTransfer.setData(DND_NOTE_MIME, JSON.stringify({ projectId, noteId }));
-    e.dataTransfer.effectAllowed = "move";
+    // `copyMove` so external consumers (e.g. SDK <Slideshow>'s drop handler)
+    // can accept with `dropEffect = "copy"` while the explorer's own
+    // intra-tree onDrop handlers (which only inspect the MIME payload, not
+    // the effect) keep working unchanged.
+    e.dataTransfer.effectAllowed = "copyMove";
   };
 
   const onDragEndNote = () => {
@@ -4020,7 +4031,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                     menu.projectId && row
                       ? explorerCanonicalVfsPath(menu.projectId, row.title, workspaces, projectsByWs)
                       : undefined;
-                  openNoteById(menu.id, vfsPath ? { canonicalVfsPath: vfsPath } : undefined);
+                  openNoteById(menu.id, {
+                    ...(row?.title ? { title: row.title } : {}),
+                    ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+                  });
                 }}
               >
                 Open note

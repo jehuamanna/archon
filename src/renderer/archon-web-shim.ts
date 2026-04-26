@@ -748,14 +748,19 @@ export function createWebArchonApi(baseUrl: string): ArchonRendererApi {
       return r.types;
     },
     getSelectableNoteTypes: async () => {
+      // Hide `code` and `text` from the new-note picker. They remain valid
+      // registered types (existing notes still render), but users no longer
+      // see them as creatable options. `markdown` and `mdx` cover the
+      // text/code authoring use cases more richly.
+      const HIDDEN_FROM_PICKER = new Set(["code", "text"]);
       if (syncWpnNotesBackend()) {
-        return [...WPN_BUILTIN_NOTE_TYPES];
+        return WPN_BUILTIN_NOTE_TYPES.filter((t) => !HIDDEN_FROM_PICKER.has(t));
       }
       const r = await req<{ types: string[] }>(
         "GET",
         "/notes/types/selectable",
       );
-      return r.types;
+      return r.types.filter((t) => !HIDDEN_FROM_PICKER.has(t));
     },
     getProjectState: async () => {
       const emptyRoots = {

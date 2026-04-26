@@ -8,8 +8,8 @@ import {
   SDKProvider,
   sdkVersion,
   type SDKContextValue,
-} from "@archon/mdx-sdk";
-import * as sdk from "@archon/mdx-sdk";
+} from "@archon/mdx-sdk-runtime";
+import * as sdk from "@archon/mdx-sdk-runtime";
 
 export interface MdxRendererProps {
   source: string;

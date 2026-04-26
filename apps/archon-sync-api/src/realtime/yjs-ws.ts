@@ -86,10 +86,14 @@ export function registerYjsWsRoutes(
 
   const { jwtSecret } = opts;
   const adapter = getYjsAdapter();
-  const debounceMs = Number(process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS ?? 2000);
+  const debounceMs = Number(process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS ?? 400);
+  const maxDebounceMs = Number(
+    process.env.ARCHON_YJS_AUTOSAVE_MAX_DEBOUNCE_MS ?? 1500,
+  );
 
   _sharedServer = Server.configure({
     debounce: debounceMs,
+    maxDebounce: maxDebounceMs,
     async onAuthenticate({ token, documentName }) {
       const payload = await verifyAndTranslate(jwtSecret, token);
       if (payload.typ !== "spaceWs") {
