@@ -2,12 +2,11 @@ import React, { useEffect } from "react";
 import { ensureSesLockdown } from "./shell/sandbox/sesLockdown";
 import { ChromeOnlyWorkbench } from "./shell/ChromeOnlyWorkbench";
 import { ArchonCommandPalette } from "./shell/ArchonCommandPalette";
-import { ArchonMiniBar } from "./shell/ArchonMiniBar";
 import { ArchonModeLineHost } from "./shell/ArchonModeLineHost";
 import { ArchonReplOverlay } from "./shell/ArchonReplOverlay";
 import { useArchonShell } from "./shell/useArchonShell";
+import { useArchonActiveTabModeLine } from "./shell/useArchonActiveTabModeLine";
 import { useNotificationsPolling } from "./shell/useNotificationsPolling";
-import { useShellLayoutState } from "./shell/layout/ShellLayoutContext";
 import { useRegisterShellCoreBlocks } from "./shell/first-party/registerShellCoreBlocks";
 import { useRegisterShellDefaultKeybindings } from "./shell/first-party/registerShellDefaultKeybindings";
 import { useRegisterAdminPlugin } from "./shell/first-party/plugins/admin/useRegisterAdminPlugin";
@@ -79,7 +78,6 @@ function CloudRuntimeBootstrap(): null {
 
 const App: React.FC = () => {
   const shellVm = useArchonShell();
-  const layout = useShellLayoutState();
   useRegisterMarkdownNotePlugin();
   useRegisterImageNotesPlugin();
   useRegisterShellCoreBlocks();
@@ -92,6 +90,7 @@ const App: React.FC = () => {
   useRegisterAdminPlugin();
   useRegisterNotificationsPlugin();
   useNotificationsPolling();
+  useArchonActiveTabModeLine();
 
   const inviteToken = readInviteTokenFromUrl();
 
@@ -122,14 +121,13 @@ const App: React.FC = () => {
           <WebScratchCloudHydrator />
           <ElectronScratchCloudHydrator />
           <div className="flex h-screen min-h-0 flex-col">
-            {/* Reserve vertical space for mode line + minibuffer so they do not overlay the workbench. */}
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <ChromeOnlyWorkbench />
             </div>
-            {/* Emacs order: mode line above minibuffer; minibuffer sits on the bottom edge. */}
-            {layout.visible.modeLine ? <ArchonModeLineHost /> : null}
+            {/* Status bar (mode line) — always present, populated by per-view contributions. */}
+            <ArchonModeLineHost />
             <ArchonCommandPalette vm={shellVm} />
-            {layout.visible.miniBar ? <ArchonMiniBar vm={shellVm} /> : null}
+            {/* M-x minibuffer remains hidden by workspace preference. */}
             <ArchonReplOverlay />
             <GlobalContextMenuHost />
           </div>

@@ -1,19 +1,14 @@
 import "./load-root-env.js";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import { test } from "node:test";
 import jwt from "jsonwebtoken";
 import type { FastifyInstance } from "fastify";
+import { and, eq } from "drizzle-orm";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import {
-  closeMongo,
-  connectMongo,
-  getWpnExplorerStateCollection,
-  getWpnNotesCollection,
-  getWpnProjectsCollection,
-} from "./db.js";
-import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
+import { getDb } from "./pg.js";
+import { wpnExplorerState, wpnNotes, wpnProjects } from "./db/schema.js";
+import { setupPgTestSchema, type TestPgSchemaContext } from "./test-pg-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
@@ -21,13 +16,12 @@ test(
   "Phase 2: default space backfilled, second space + member visibility, last-owner protection",
   { timeout: 20_000 },
   async (t) => {
-    const dbName = `archon_sync_spaces_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -240,12 +234,14 @@ test(
       assert.strictEqual(deleteDefault.statusCode, 400);
 
       // ----- Engineering still has a workspace, so admin's delete attempt is refused.
+      // The route returns 409 (Conflict) for "space still has workspaces" — see
+      // space-routes.ts: `Space still has workspaces; move or delete them first`.
       const tryDeleteEng = await app.inject({
         method: "DELETE",
         url: `${ARCHON_SYNC_API_V1_PREFIX}/spaces/${newSpaceJson.spaceId}`,
         headers: adminAuth,
       });
-      assert.strictEqual(tryDeleteEng.statusCode, 400);
+      assert.strictEqual(tryDeleteEng.statusCode, 409);
 
       // ----- Legacy /wpn/workspaces still works for the admin.
       const legacy = await app.inject({
@@ -258,12 +254,7 @@ test(
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );
@@ -272,13 +263,12 @@ test(
   "Workspace move-to-space cascades spaceId and enforces auth + same-org",
   { timeout: 20_000 },
   async (t) => {
-    const dbName = `archon_sync_move_ws_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -446,15 +436,33 @@ test(
       assert.ok(engWsIds.includes(wsId), "workspace should be in engineering space");
 
       // ----- Cascade check: projects + notes + explorer_state all carry the new spaceId.
-      const projectDoc = await getWpnProjectsCollection().findOne({ id: projId });
+      const projectDoc = (
+        await getDb()
+          .select()
+          .from(wpnProjects)
+          .where(eq(wpnProjects.id, projId))
+          .limit(1)
+      )[0];
       assert.ok(projectDoc, "project row must still exist");
       assert.strictEqual(projectDoc.spaceId, engSpaceId);
 
-      const noteDoc = await getWpnNotesCollection().findOne({ id: noteId });
+      const noteDoc = (
+        await getDb()
+          .select()
+          .from(wpnNotes)
+          .where(eq(wpnNotes.id, noteId))
+          .limit(1)
+      )[0];
       assert.ok(noteDoc, "note row must still exist");
       assert.strictEqual(noteDoc.spaceId, engSpaceId);
 
-      const exDoc = await getWpnExplorerStateCollection().findOne({ project_id: projId });
+      const exDoc = (
+        await getDb()
+          .select()
+          .from(wpnExplorerState)
+          .where(eq(wpnExplorerState.project_id, projId))
+          .limit(1)
+      )[0];
       if (exDoc) {
         assert.strictEqual(exDoc.spaceId, engSpaceId);
       }
@@ -471,12 +479,7 @@ test(
       if (app) {
         await app.close();
       }
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );

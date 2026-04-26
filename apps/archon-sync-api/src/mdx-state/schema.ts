@@ -1,4 +1,11 @@
-import type { Collection, Db, ObjectId } from "mongodb";
+/**
+ * mdx-state size + rate limit constants.
+ *
+ * The Postgres table definitions for `mdx_state_head`, `mdx_state_chunks`,
+ * and `mdx_state_ws_cursors` live in `apps/archon-sync-api/src/db/schema.ts`.
+ * This module keeps the framework-agnostic constants and helpers that
+ * service.ts + rate-limit.ts + the routes layer share.
+ */
 
 /** Thresholds — mirror `docs/mdx-notes/mongo-schema.md`. */
 export const INLINE_THRESHOLD_BYTES = 4 * 1024 * 1024;
@@ -10,8 +17,8 @@ export const MAX_KEYS_PER_PROJECT = 1000;
 export const WRITE_RATE_PER_SECOND = 20;
 export const WRITE_RATE_BURST = 50;
 
-export interface MdxStateHeadDoc {
-  _id?: ObjectId;
+/** Per-key state head (post-PG). */
+export interface MdxStateHeadRow {
   projectId: string;
   key: string;
   mode: "inline" | "chunked";
@@ -20,11 +27,12 @@ export interface MdxStateHeadDoc {
   totalBytes: number;
   version: number;
   updatedAt: Date;
-  updatedBy: { userId: string; email: string };
+  updatedByUserId: string;
+  updatedByEmail: string;
 }
 
-export interface MdxStateChunkDoc {
-  _id?: ObjectId;
+/** Per-chunk row for chunked-mode state. */
+export interface MdxStateChunkRow {
   projectId: string;
   key: string;
   chunkIndex: number;
@@ -32,57 +40,28 @@ export interface MdxStateChunkDoc {
   data: Buffer;
 }
 
-/** Per-WebSocket-connection Change Stream resume tokens. */
-export interface MdxStateWsCursorDoc {
-  _id?: ObjectId;
+/** Per-WebSocket-connection LISTEN cursor for resumable subscribers. */
+export interface MdxStateWsCursorRow {
   connectionId: string;
   projectId: string;
   resumeToken: unknown;
   updatedAt: Date;
 }
 
-export function getMdxStateHead(db: Db): Collection<MdxStateHeadDoc> {
-  return db.collection<MdxStateHeadDoc>("mdx_state_head");
-}
-
-export function getMdxStateChunks(db: Db): Collection<MdxStateChunkDoc> {
-  return db.collection<MdxStateChunkDoc>("mdx_state_chunks");
-}
-
-export function getMdxStateWsCursors(db: Db): Collection<MdxStateWsCursorDoc> {
-  return db.collection<MdxStateWsCursorDoc>("mdx_state_ws_cursors");
-}
-
 /**
- * Idempotent index setup for the mini-app state collections. Called once from
- * `connectMongo` alongside the existing `ensureIndexes` in `db.ts`.
- */
-export async function ensureMdxStateIndexes(db: Db): Promise<void> {
-  const head = getMdxStateHead(db);
-  await head.createIndex({ projectId: 1, key: 1 }, { unique: true });
-  await head.createIndex({ projectId: 1, updatedAt: -1 });
-
-  const chunks = getMdxStateChunks(db);
-  await chunks.createIndex(
-    { projectId: 1, key: 1, chunkIndex: 1, headVersion: 1 },
-    { unique: true },
-  );
-  await chunks.createIndex({ projectId: 1, key: 1, headVersion: 1 });
-
-  const cursors = getMdxStateWsCursors(db);
-  await cursors.createIndex({ connectionId: 1 }, { unique: true });
-  await cursors.createIndex(
-    { updatedAt: 1 },
-    { expireAfterSeconds: 60 * 60 * 24 * 7 },
-  );
-}
-
-/**
- * Heuristic size estimator. JSON-encoded UTF-8 byte count is a reasonable upper
- * bound on BSON size for the value space we support (objects, arrays, strings,
- * numbers, booleans, null). We call this before the transaction to reject
- * oversize writes early.
+ * Heuristic size estimator. JSON-encoded UTF-8 byte count is a reasonable
+ * upper bound on serialized payload size — used to reject oversize writes
+ * early without serializing twice.
  */
 export function serializedSize(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
+}
+
+/**
+ * Compatibility stub — db.ts (legacy Mongo path) imports this for its
+ * connect-time index ensurer. drizzle-kit owns PG schema/index state, so
+ * this is a no-op on PG. Removed when db.ts is deleted in cleanup.
+ */
+export async function ensureMdxStateIndexes(_db: unknown): Promise<void> {
+  // No-op on Postgres — drizzle migrations create the indexes.
 }

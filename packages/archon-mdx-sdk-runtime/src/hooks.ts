@@ -1,5 +1,5 @@
 import * as React from "react";
-import { useSDKContext } from "./context.js";
+import { useSDKContext } from "./context";
 
 type Dispatch<T> = (next: T | ((prev: T) => T)) => void;
 
@@ -401,7 +401,7 @@ interface WsRegistry {
 
 const wsRegistries = new WeakMap<object, WsRegistry>();
 
-function getRegistry(ctx: { project: { id: string } } & object): WsRegistry {
+function getRegistry(ctx: object): WsRegistry {
   const reg = wsRegistries.get(ctx);
   if (reg) return reg;
   const next: WsRegistry = { listeners: new Set(), socket: null, connecting: false };

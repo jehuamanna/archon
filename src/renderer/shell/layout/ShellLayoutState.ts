@@ -34,7 +34,7 @@ export function defaultShellLayoutState(): ShellLayoutState {
       mainArea: true,
       companion: true,
       bottomArea: false,
-      miniBar: true,
+      miniBar: false,
       modeLine: true,
     },
     sizes: {

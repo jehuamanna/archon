@@ -1,4 +1,3 @@
-import type { ObjectId } from "mongodb";
 import { z } from "zod";
 
 export type NotificationType = "org_invite";
@@ -18,7 +17,7 @@ export type OrgInviteNotificationPayload = {
 };
 
 export type NotificationDoc = {
-  _id: ObjectId;
+  _id: string;
   userId: string;
   type: NotificationType;
   payload: Record<string, unknown>;

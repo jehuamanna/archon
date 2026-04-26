@@ -46,18 +46,20 @@ export function useRegisterDocumentationPlugin(): void {
       }),
     );
 
-    disposers.push(
-      regs.menuRail.registerItem({
-        id: "plugin.documentation.rail",
-        title: "Documentation",
-        icon: "?",
-        order: 20,
-        tabTypeId: TAB_DOCS,
-        tabReuseKey: "plugin.documentation",
-        sidebarViewId: VIEW_DOCS_SEARCH,
-        secondaryViewId: VIEW_DOCS_TOC,
-      }),
-    );
+    // Documentation rail icon hidden — still reachable via the
+    // `archon.docs.open` command and the `#/t/<TAB_DOCS>` URL hash.
+    // disposers.push(
+    //   regs.menuRail.registerItem({
+    //     id: "plugin.documentation.rail",
+    //     title: "Documentation",
+    //     icon: "?",
+    //     order: 20,
+    //     tabTypeId: TAB_DOCS,
+    //     tabReuseKey: "plugin.documentation",
+    //     sidebarViewId: VIEW_DOCS_SEARCH,
+    //     secondaryViewId: VIEW_DOCS_TOC,
+    //   }),
+    // );
 
     disposers.push(
       regs.tabs.registerTabType({

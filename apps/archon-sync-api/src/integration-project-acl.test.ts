@@ -1,12 +1,10 @@
 import "./load-root-env.js";
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
 import { test } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { ARCHON_SYNC_API_V1_PREFIX } from "./api-v1-prefix.js";
 import { buildSyncApiApp } from "./build-app.js";
-import { closeMongo, connectMongo } from "./db.js";
-import { dropActiveMongoDb, resolveTestMongoUri } from "./test-mongo-helper.js";
+import { setupPgTestSchema, type TestPgSchemaContext } from "./test-pg-helper.js";
 
 const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
@@ -47,13 +45,12 @@ test(
   "Phase 8: project visibility + share roles gate access correctly",
   { timeout: 30_000 },
   async (t) => {
-    const dbName = `archon_sync_proj_acl_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -305,12 +302,7 @@ test(
       );
     } finally {
       if (app) await app.close();
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );
@@ -319,13 +311,12 @@ test(
   "Phase 8: workspace share role (reader vs writer) gates writes correctly",
   { timeout: 25_000 },
   async (t) => {
-    const dbName = `archon_sync_ws_role_it_${randomBytes(8).toString("hex")}`;
     let app: FastifyInstance | undefined;
-
+    let ctx: TestPgSchemaContext | undefined;
     try {
-      await connectMongo(resolveTestMongoUri(), dbName);
+      ctx = await setupPgTestSchema();
     } catch (err) {
-      t.skip(`MongoDB not reachable: ${String(err)}`);
+      t.skip(`Postgres not reachable: ${String(err)}`);
       return;
     }
 
@@ -455,12 +446,7 @@ test(
       );
     } finally {
       if (app) await app.close();
-      await dropActiveMongoDb();
-      try {
-        await closeMongo();
-      } catch {
-        /* ignore */
-      }
+      await ctx?.teardown();
     }
   },
 );

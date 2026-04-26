@@ -13,6 +13,13 @@ export type OpenNoteInShellOptions = {
   newTab?: boolean;
   /** Workspace/Project/Title or ./Title — used for `#/w/...` in the address bar. */
   canonicalVfsPath?: string;
+  /**
+   * Override for the new-tab title. Takes precedence over the local
+   * `notes.notesList` lookup. Useful when opening a note from a different
+   * workspace/project whose body hasn't been loaded into the store yet —
+   * without it the tab silently shows "Note" until the note is fetched.
+   */
+  title?: string;
 };
 
 function buildShellNoteTabState(
@@ -44,7 +51,8 @@ export function openNoteInShell(
 ): void {
   const notesList = store.getState().notes.notesList;
   const row = notesList.find((n) => n.id === noteId);
-  const title = row?.title?.trim() || "Note";
+  const title =
+    options?.title?.trim() || row?.title?.trim() || "Note";
   deps.layout.setVisible("menuRail", true);
   deps.layout.setVisible("sidebarPanel", true);
   deps.views.openView(NOTES_EXPLORER_VIEW_SIDEBAR, "primarySidebar");

@@ -78,7 +78,9 @@ export function webScratchPlainStubOverrides(): Partial<ArchonRendererApi> {
     }),
     getRegisteredTypes: async () => [...WPN_BUILTIN_NOTE_TYPES],
     getSelectableNoteTypes: async () =>
-      [...WPN_BUILTIN_NOTE_TYPES].filter((t) => t !== "root"),
+      [...WPN_BUILTIN_NOTE_TYPES].filter(
+        (t) => t !== "root" && t !== "code" && t !== "text",
+      ),
     createNote: async (payload) => {
       const projectId = await ensureScratchMarkdownProjectId();
       return scratchWpnCreateNoteInProject(projectId, payload);

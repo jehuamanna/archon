@@ -61,6 +61,7 @@ export function useRegisterNotificationsPlugin(): void {
         title: "Notifications",
         icon: "\u{1F514}",
         order: 40,
+        placement: "bottom",
         tabTypeId: NOTIFICATIONS_TAB,
         tabReuseKey: NOTIFICATIONS_TAB_REUSE_KEY,
         sidebarViewId: NOTIFICATIONS_VIEW_SIDEBAR,

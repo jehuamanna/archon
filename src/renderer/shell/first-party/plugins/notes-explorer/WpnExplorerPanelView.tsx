@@ -43,6 +43,7 @@ import {
   ARCHON_WPN_TREE_CHANGED_EVENT,
   WPN_SYNC_REMOTE_POLL_INTERVAL_MS,
 } from "./wpnExplorerEvents";
+import { useRealtimeSpaceEvents } from "./useRealtimeSpaceEvents";
 import { ARCHON_SHELL_NOTE_TAB_CLOSED_EVENT } from "../../../shellTabUrlSync";
 import { SHELL_TAB_NOTE, SHELL_TAB_SCRATCH_MARKDOWN } from "../../shellWorkspaceIds";
 import { InlineSingleLineEditable } from "../../../../components/InlineSingleLineEditable";
@@ -777,14 +778,25 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     return () => window.removeEventListener(ARCHON_WPN_TREE_CHANGED_EVENT, onWpnTreeChanged);
   }, [loadWorkspaces]);
 
+  // `useRealtimeSpaceEvents` (declared lower) writes its connected flag here
+  // so the two polling effects can suppress themselves while a WS feed is
+  // delivering pushes. The state form drives effect re-runs; the ref form
+  // is read inside event handlers without re-binding.
+  const realtimeConnectedRef = useRef(false);
+  const [wpnRealtimeConnected, setWpnRealtimeConnected] = useState(false);
+
   useEffect(() => {
     if (!projectOpen || !syncWpnNotesBackend()) return;
+    // Realtime push is primary; polling is the fallback when WS isn't
+    // connected. The dependency on `wpnRealtimeConnected` re-runs this
+    // effect when the WS flips so we install or tear down the timer.
+    if (wpnRealtimeConnected) return;
     const id = window.setInterval(() => {
       if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS) return;
       void loadWorkspaces({ manageBusy: false });
     }, WPN_SYNC_REMOTE_POLL_INTERVAL_MS);
     return () => window.clearInterval(id);
-  }, [projectOpen, loadWorkspaces]);
+  }, [projectOpen, loadWorkspaces, wpnRealtimeConnected]);
 
   const loadProjectTree = useCallback(async (projectId: string) => {
     setIsLoadingTree(true);
@@ -827,14 +839,64 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     }
   }, []);
 
+  /**
+   * Realtime push replaces 8 s polling once a `spaceWs` channel is open.
+   * Refs plumb the latest `loadWorkspaces` / `refreshProjectNotesFromServer`
+   * into the event callback without re-binding it on every render.
+   */
+  const loadWorkspacesRef = useRef(loadWorkspaces);
+  loadWorkspacesRef.current = loadWorkspaces;
+  const refreshProjectNotesRef = useRef(refreshProjectNotesFromServer);
+  refreshProjectNotesRef.current = refreshProjectNotesFromServer;
+  const selectedProjectIdLatest = useRef(selectedProjectId);
+  selectedProjectIdLatest.current = selectedProjectId;
+  // (`wpnRealtimeConnected` + `realtimeConnectedRef` were declared near the
+  // top of the component; we just feed the hook's flag through.)
+  const wsRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { connected: realtimeConnected } = useRealtimeSpaceEvents(
+    activeSpaceId,
+    (evt) => {
+      if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS)
+        return;
+      // Coalesce bursts (rapid moves, multi-edge updates) to a single fetch.
+      if (wsRefreshTimer.current) clearTimeout(wsRefreshTimer.current);
+      wsRefreshTimer.current = setTimeout(() => {
+        wsRefreshTimer.current = null;
+        void loadWorkspacesRef.current({ manageBusy: false });
+        const proj =
+          "projectId" in evt && typeof evt.projectId === "string"
+            ? evt.projectId
+            : null;
+        if (
+          proj &&
+          selectedProjectIdLatest.current &&
+          proj === selectedProjectIdLatest.current
+        ) {
+          void refreshProjectNotesRef.current(proj);
+        }
+      }, 150);
+    },
+  );
+  // Mirror into ref + state so the polling effects can suppress themselves.
+  realtimeConnectedRef.current = realtimeConnected;
+  useEffect(() => {
+    setWpnRealtimeConnected(realtimeConnected);
+  }, [realtimeConnected]);
+
   useEffect(() => {
     if (!selectedProjectId || !projectOpen || !syncWpnNotesBackend()) return;
+    if (wpnRealtimeConnected) return;
     const id = window.setInterval(() => {
       if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS) return;
       void refreshProjectNotesFromServer(selectedProjectId);
     }, WPN_SYNC_REMOTE_POLL_INTERVAL_MS);
     return () => window.clearInterval(id);
-  }, [selectedProjectId, projectOpen, refreshProjectNotesFromServer]);
+  }, [
+    selectedProjectId,
+    projectOpen,
+    refreshProjectNotesFromServer,
+    wpnRealtimeConnected,
+  ]);
 
   useEffect(() => {
     if (!selectedProjectId || !projectOpen) return;
@@ -1683,7 +1745,11 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     }
 
     const vfsPath = explorerCanonicalVfsPath(projectId, "Untitled", workspaces, projectsByWs);
-    openNoteById(realId, { newTab: true, ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}) });
+    openNoteById(realId, {
+      newTab: true,
+      title: "Untitled",
+      ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+    });
   };
 
   const onDeleteNotes = async (projectId: string, ids: string[]) => {
@@ -2374,7 +2440,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         noteOpenTimerRef.current = null;
         pendingOpenNoteIdRef.current = null;
         const vfsPath = explorerCanonicalVfsPath(projectId, title, workspaces, projectsByWs);
-        openNoteById(id, vfsPath ? { canonicalVfsPath: vfsPath } : undefined);
+        openNoteById(id, {
+          ...(title ? { title } : {}),
+          ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+        });
       }, NOTE_OPEN_DELAY_MS);
     },
     [openNoteById, workspaces, projectsByWs],
@@ -2391,7 +2460,11 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const onDragStartNote = (e: React.DragEvent, projectId: string, noteId: string) => {
     explorerNoteDragRef.current = { projectId, noteId };
     e.dataTransfer.setData(DND_NOTE_MIME, JSON.stringify({ projectId, noteId }));
-    e.dataTransfer.effectAllowed = "move";
+    // `copyMove` so external consumers (e.g. SDK <Slideshow>'s drop handler)
+    // can accept with `dropEffect = "copy"` while the explorer's own
+    // intra-tree onDrop handlers (which only inspect the MIME payload, not
+    // the effect) keep working unchanged.
+    e.dataTransfer.effectAllowed = "copyMove";
   };
 
   const onDragEndNote = () => {
@@ -3958,7 +4031,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                     menu.projectId && row
                       ? explorerCanonicalVfsPath(menu.projectId, row.title, workspaces, projectsByWs)
                       : undefined;
-                  openNoteById(menu.id, vfsPath ? { canonicalVfsPath: vfsPath } : undefined);
+                  openNoteById(menu.id, {
+                    ...(row?.title ? { title: row.title } : {}),
+                    ...(vfsPath ? { canonicalVfsPath: vfsPath } : {}),
+                  });
                 }}
               >
                 Open note

@@ -1,37 +1,43 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { ObjectId } from "mongodb";
+import { eq, and } from "drizzle-orm";
 import type { JwtPayload } from "./auth.js";
-import {
-  getOrgMembershipsCollection,
-  getUsersCollection,
-  type UserDoc,
-} from "./db.js";
-import type { OrgMembershipDoc, OrgRole } from "./org-schemas.js";
+import { getDb } from "./pg.js";
+import { orgMemberships, users } from "./db/schema.js";
+import type { OrgRole } from "./org-schemas.js";
+import { isUuid } from "./db/legacy-id-map.js";
 
 export type OrgContext = {
   orgId: string;
   role: OrgRole;
 };
 
+/** PG-row shape replacing the Mongo OrgMembershipDoc for return types. */
+export type OrgMembershipRow = typeof orgMemberships.$inferSelect;
+
 export async function getOrgMembership(
-  userIdHex: string,
+  userId: string,
   orgId: string,
-): Promise<OrgMembershipDoc | null> {
-  const memberships = getOrgMembershipsCollection();
-  return memberships.findOne({ orgId, userId: userIdHex });
+): Promise<OrgMembershipRow | null> {
+  const rows = await getDb()
+    .select()
+    .from(orgMemberships)
+    .where(
+      and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.userId, userId)),
+    )
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export async function listMembershipsForUser(
-  userIdHex: string,
-): Promise<OrgMembershipDoc[]> {
-  const memberships = getOrgMembershipsCollection();
-  return memberships.find({ userId: userIdHex }).toArray();
+  userId: string,
+): Promise<OrgMembershipRow[]> {
+  return getDb()
+    .select()
+    .from(orgMemberships)
+    .where(eq(orgMemberships.userId, userId));
 }
 
-/**
- * Resolves and authorizes the caller against `orgId`. On failure, sends the
- * appropriate HTTP response and returns `null` — handlers must early-return.
- */
+/** Authorize against `orgId`; sends response and returns null on failure. */
 export async function requireOrgRole(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -48,40 +54,31 @@ export async function requireOrgRole(
     await reply.status(403).send({ error: "Admin role required" });
     return null;
   }
-  return { orgId, role: membership.role };
+  return { orgId, role: membership.role as OrgRole };
 }
 
-/**
- * Authorize an org-management action that either an org admin of `orgId` OR
- * a platform master admin may perform. Returns an `OrgContext` on success;
- * for master admins who are not org members, `role` is reported as `"admin"`.
- * Sends 404/403 on failure and returns `null`.
- */
+/** Org admin OR platform master admin. Master admins not enrolled in the org get role='admin'. */
 export async function requireOrgAdminOrMaster(
   request: FastifyRequest,
   reply: FastifyReply,
   auth: JwtPayload,
   orgId: string,
 ): Promise<OrgContext | null> {
-  let userOid: ObjectId;
-  try {
-    userOid = new ObjectId(auth.sub);
-  } catch {
+  if (!isUuid(auth.sub)) {
     await reply.status(401).send({ error: "Invalid session" });
     return null;
   }
-  const user = (await getUsersCollection().findOne({
-    _id: userOid,
-  })) as UserDoc | null;
-  if (user?.isMasterAdmin === true) {
+  const userRows = await getDb()
+    .select({ flag: users.isMasterAdmin })
+    .from(users)
+    .where(eq(users.id, auth.sub))
+    .limit(1);
+  if (userRows[0]?.flag === true) {
     return { orgId, role: "admin" };
   }
   return requireOrgRole(request, reply, auth, orgId, "admin");
 }
 
-/**
- * Like {@link requireOrgRole} but only checks membership exists (any role).
- */
 export async function requireOrgMember(
   request: FastifyRequest,
   reply: FastifyReply,
@@ -93,16 +90,14 @@ export async function requireOrgMember(
     await reply.status(404).send({ error: "Organization not found" });
     return null;
   }
-  return { orgId, role: membership.role };
+  return { orgId, role: membership.role as OrgRole };
 }
 
 /**
- * Resolve which org the request operates against. Priority:
+ * Resolve the active org id for the request. Priority:
  *   1. `X-Archon-Org` header
  *   2. JWT `activeOrgId` claim
- *   3. caller's `defaultOrgId` (caller must look this up; not done here)
- * Returns `null` when no org can be determined; handlers may then prompt
- * the client or fall back to defaults.
+ *   3. caller's `defaultOrgId` (callers do this lookup themselves)
  */
 export function resolveActiveOrgId(
   request: FastifyRequest,

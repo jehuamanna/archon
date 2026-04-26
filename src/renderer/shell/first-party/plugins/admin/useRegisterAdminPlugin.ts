@@ -83,6 +83,7 @@ export function useRegisterAdminPlugin(): void {
         title: "Admin",
         icon: "⚙",
         order: 30,
+        placement: "bottom",
         tabTypeId: ADMIN_TAB,
         tabReuseKey: ADMIN_TAB_REUSE_KEY,
         sidebarViewId: ADMIN_VIEW_SIDEBAR,

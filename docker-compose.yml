@@ -32,6 +32,26 @@ services:
     volumes:
       - archon-mongo-sync-data:/data
 
+  postgres:
+    profiles: ["local-pg"]
+    image: postgres:16
+    container_name: archon-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-archon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archon}
+      POSTGRES_DB: ${POSTGRES_DB:-archon_sync}
+    ports:
+      - "${ARCHON_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - archon-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-archon} -d ${POSTGRES_DB:-archon_sync}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   archon-sync-api:
     build:
       context: .
@@ -157,3 +177,4 @@ services:
 volumes:
   archon-minio-data:
   archon-mongo-sync-data:
+  archon-postgres-data:

@@ -54,6 +54,9 @@ export function runShellMenuRailAction(
       deps.views.openView(item.secondaryViewId, "companion");
       deps.layout.setVisible("companion", true);
     }
+    const cx = item.collapseChrome;
+    if (cx?.sidebarPanel) deps.layout.setVisible("sidebarPanel", false);
+    if (cx?.companion) deps.layout.setVisible("companion", false);
     return;
   }
   if (item.openViewId) {

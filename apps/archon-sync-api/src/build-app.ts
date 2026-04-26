@@ -30,7 +30,8 @@ export type BuildSyncApiAppOptions = {
 
 /**
  * Build a Fastify app with sync-api routes (including `GET /health`).
- * Does not connect Mongo — call {@link connectMongo} or {@link ensureMongoConnected} before handling traffic.
+ * Does not connect to Postgres — call {@link ensurePgConnected} from
+ * `./pg.js` before handling traffic.
  */
 export async function buildSyncApiApp(
   opts: BuildSyncApiAppOptions,

@@ -3,6 +3,17 @@ export function envString(name: string, fallback = ""): string {
   return typeof v === "string" ? v.trim() : fallback;
 }
 
+/**
+ * Canonical Postgres connection string for sync-api. Reads `DATABASE_URL`
+ * (the post-cutover env var per Plans-Phase-1 item 19); falls back to the
+ * local-pg compose default for dev.
+ */
+export function databaseUrl(): string {
+  const v = envString("DATABASE_URL");
+  if (v.length > 0) return v;
+  return "postgres://archon:archon@localhost:5432/archon_sync";
+}
+
 export function requireJwtSecret(): string {
   const s = envString("JWT_SECRET");
   const nodeEnv = envString("NODE_ENV", "development");

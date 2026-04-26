@@ -1,24 +1,21 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
-import { ObjectId } from "mongodb";
+import { and, eq, gt } from "drizzle-orm";
 import { z } from "zod";
 import {
   requireAuth,
   signAccessToken,
   signRefreshToken,
-  verifyRefreshToken,
 } from "./auth.js";
-import type { SyncNoteDoc, UserDoc } from "./db.js";
+import { verifyAndTranslateRefresh } from "./auth-translate.js";
+import { getDb } from "./pg.js";
+import { notes as legacyNotes, spaces, users } from "./db/schema.js";
 import {
   ensureDefaultSpaceForOrg,
   ensureUserHasDefaultOrg,
-  getActiveDb,
   getDefaultSpaceIdForOrg,
-  getNotesCollection,
-  getSpacesCollection,
-  getUsersCollection,
-} from "./db.js";
+} from "./org-defaults.js";
 import { registerBuiltinPluginRoutes } from "./builtin-plugin-routes.js";
 import { registerBundledDocsPublicRoutes } from "./bundled-docs-routes.js";
 import { registerMeAssetsRoutes } from "./me-assets-routes.js";
@@ -37,12 +34,20 @@ import { registerWpnImportExportRoutes } from "./wpn-import-export-routes.js";
 import { registerMasterAdminRoutes } from "./master-admin-routes.js";
 import { registerMdxStateRoutes } from "./mdx-state/routes.js";
 import { registerMdxStateWsRoutes } from "./mdx-state/ws.js";
+import { registerMdxSdkSpecRoutes } from "./mdx-sdk-spec/routes.js";
+import {
+  registerRealtimeRoutes,
+  registerSpaceWsRoutes,
+  registerYjsWsRoutes,
+  registerRealtimeDiagnosticsRoute,
+} from "./realtime/index.js";
 import { maybePromoteMasterAdmin } from "./admin-auth.js";
 import {
   buildSessionsAfterAppend,
   rotateRefreshSession,
   userHasRefreshJti,
 } from "./refresh-sessions.js";
+import { isUuid } from "./db/legacy-id-map.js";
 
 const registerBody = z.object({
   email: z.string().email(),
@@ -50,7 +55,6 @@ const registerBody = z.object({
 });
 
 const loginBody = registerBody.extend({
-  /** When `mcp`, refresh token uses ARCHON_JWT_MCP_REFRESH_EXPIRES (default 7d). */
   client: z.enum(["mcp"]).optional(),
 });
 
@@ -75,47 +79,42 @@ const syncPushBody = z.object({
     .max(500),
 });
 
+type UserRow = typeof users.$inferSelect;
+
 /**
- * Phase 8: resolve the space to stamp into the session's access token, given
- * the user doc, the org the session is entering, and a caller-provided
- * fallback (typically `getDefaultSpaceIdForOrg`). Preference order:
- *   1. `lastActiveSpaceByOrg[orgId]` (still belongs to that org)
- *   2. `lastActiveSpaceId` (still belongs to that org)
- *   3. caller-provided `fallbackSpaceIdHex` (read-only default-space lookup)
- *
- * Guards against schema drift where `lastActiveSpaceId` was set before the
- * user switched orgs — we must not stamp a spaceId that belongs to a
- * different org onto the new session, or WPN reads will scope incorrectly.
+ * Phase 8: pick the space the access token should carry.
+ * Preference order:
+ *   1. lastActiveSpaceByOrg[orgId] (still belongs to that org)
+ *   2. lastActiveSpaceId (still belongs to that org)
+ *   3. caller-provided fallback (typically getDefaultSpaceIdForOrg).
  */
 async function resolveSessionSpaceId(
-  user: UserDoc,
-  orgIdHex: string,
-  fallbackSpaceIdHex: string,
+  user: UserRow,
+  orgId: string,
+  fallbackSpaceId: string,
 ): Promise<string> {
   const candidates: string[] = [];
-  const remembered = user.lastActiveSpaceByOrg?.[orgIdHex];
-  if (typeof remembered === "string" && /^[a-f0-9]{24}$/i.test(remembered)) {
+  const remembered = (user.lastActiveSpaceByOrg as Record<string, string> | null)?.[orgId];
+  if (typeof remembered === "string" && isUuid(remembered)) {
     candidates.push(remembered);
   }
   if (
     typeof user.lastActiveSpaceId === "string" &&
-    /^[a-f0-9]{24}$/i.test(user.lastActiveSpaceId)
+    isUuid(user.lastActiveSpaceId)
   ) {
     candidates.push(user.lastActiveSpaceId);
   }
-  for (const spaceIdHex of candidates) {
-    try {
-      const space = await getSpacesCollection().findOne({
-        _id: new ObjectId(spaceIdHex),
-      });
-      if (space && space.orgId === orgIdHex) {
-        return spaceIdHex;
-      }
-    } catch {
-      // fall through to next candidate
+  for (const spaceId of candidates) {
+    const rows = await getDb()
+      .select({ orgId: spaces.orgId })
+      .from(spaces)
+      .where(eq(spaces.id, spaceId))
+      .limit(1);
+    if (rows[0]?.orgId === orgId) {
+      return spaceId;
     }
   }
-  return fallbackSpaceIdHex;
+  return fallbackSpaceId;
 }
 
 export function registerRoutes(
@@ -123,6 +122,7 @@ export function registerRoutes(
   opts: { jwtSecret: string },
 ): void {
   const { jwtSecret } = opts;
+  const db = (): ReturnType<typeof getDb> => getDb();
 
   registerBundledDocsPublicRoutes(app);
   registerWpnReadRoutes(app, { jwtSecret });
@@ -141,6 +141,11 @@ export function registerRoutes(
   registerNotificationsRoutes(app, { jwtSecret });
   registerMdxStateRoutes(app, { jwtSecret });
   registerMdxStateWsRoutes(app, { jwtSecret });
+  registerMdxSdkSpecRoutes(app);
+  registerRealtimeRoutes(app, { jwtSecret });
+  registerSpaceWsRoutes(app, { jwtSecret });
+  registerYjsWsRoutes(app, { jwtSecret });
+  registerRealtimeDiagnosticsRoute(app, { jwtSecret });
   app.register(
     async (scoped) => registerWpnImportExportRoutes(scoped, { jwtSecret }),
   );
@@ -151,42 +156,50 @@ export function registerRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const { email, password } = parsed.data;
-    const users = getUsersCollection();
-    const existing = await users.findOne({ email: email.toLowerCase() });
-    if (existing) {
+    const emailLower = email.toLowerCase();
+    const existing = await db()
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, emailLower))
+      .limit(1);
+    if (existing.length > 0) {
       return reply.status(409).send({ error: "Email already registered" });
     }
     const passwordHash = await bcrypt.hash(password, 12);
-    const ins = await users.insertOne({
-      email: email.toLowerCase(),
+    const userId = randomUUID();
+    await db().insert(users).values({
+      id: userId,
+      email: emailLower,
       passwordHash,
     });
-    const userId = ins.insertedId.toHexString();
-    await maybePromoteMasterAdmin(userId, email.toLowerCase());
-    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(
-      getActiveDb(),
-      userId,
-      email.toLowerCase(),
-    );
+    await maybePromoteMasterAdmin(userId, emailLower);
+    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, emailLower);
     const { spaceId: defaultSpaceId } = await ensureDefaultSpaceForOrg(
-      getActiveDb(),
       defaultOrgId,
       userId,
     );
     const payload = {
       sub: userId,
-      email: email.toLowerCase(),
+      email: emailLower,
       activeOrgId: defaultOrgId,
       activeSpaceId: defaultSpaceId,
     };
     const jti = randomUUID();
     const token = signAccessToken(jwtSecret, payload);
     const refreshToken = signRefreshToken(jwtSecret, payload, jti);
-    await users.updateOne(
-      { _id: ins.insertedId },
-      { $set: { refreshSessions: [{ jti, createdAt: new Date() }] } },
-    );
-    return reply.send({ token, refreshToken, userId, defaultOrgId, defaultSpaceId });
+    await db()
+      .update(users)
+      .set({
+        refreshSessions: [{ jti, createdAt: new Date().toISOString() }],
+      })
+      .where(eq(users.id, userId));
+    return reply.send({
+      token,
+      refreshToken,
+      userId,
+      defaultOrgId,
+      defaultSpaceId,
+    });
   });
 
   app.post("/auth/login", async (request, reply) => {
@@ -195,8 +208,13 @@ export function registerRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const { email, password } = parsed.data;
-    const users = getUsersCollection();
-    const user = await users.findOne({ email: email.toLowerCase() });
+    const emailLower = email.toLowerCase();
+    const userRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.email, emailLower))
+      .limit(1);
+    const user = userRows[0];
     if (!user) {
       return reply.status(401).send({ error: "Invalid email or password" });
     }
@@ -204,37 +222,27 @@ export function registerRoutes(
     if (!ok) {
       return reply.status(401).send({ error: "Invalid email or password" });
     }
-    if ((user as UserDoc).disabled === true) {
+    if (user.disabled === true) {
       return reply.status(403).send({ error: "Account disabled" });
     }
-    const userId = user._id.toHexString();
+    const userId = user.id;
     await maybePromoteMasterAdmin(userId, user.email);
-    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(
-      getActiveDb(),
-      userId,
-      user.email,
-    );
+    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, user.email);
     const { spaceId: defaultSpaceId } = await ensureDefaultSpaceForOrg(
-      getActiveDb(),
       defaultOrgId,
       userId,
     );
-    const userDoc = user as UserDoc;
     const lastActiveOrgId =
-      typeof userDoc.lastActiveOrgId === "string" && userDoc.lastActiveOrgId.length > 0
-        ? userDoc.lastActiveOrgId
+      typeof user.lastActiveOrgId === "string" && user.lastActiveOrgId.length > 0
+        ? user.lastActiveOrgId
         : null;
     const loginActiveOrgId = lastActiveOrgId ?? defaultOrgId;
-    // If the session is re-entering a non-default org, `lastActiveSpaceId`
-    // may no longer belong to it. resolveSessionSpaceId validates against
-    // the spaces collection and falls back to the target org's default space
-    // (read-only lookup — no silent space-owner enrolment for invited members).
     const fallbackSpaceId =
       loginActiveOrgId === defaultOrgId
         ? defaultSpaceId
         : (await getDefaultSpaceIdForOrg(loginActiveOrgId)) ?? defaultSpaceId;
     const loginActiveSpaceId = await resolveSessionSpaceId(
-      userDoc,
+      user,
       loginActiveOrgId,
       fallbackSpaceId,
     );
@@ -248,18 +256,30 @@ export function registerRoutes(
     const sessionVariant = parsed.data.client === "mcp" ? "mcp" : "default";
     const token = signAccessToken(jwtSecret, payload, sessionVariant);
     const refreshToken = signRefreshToken(jwtSecret, payload, jti, sessionVariant);
-    const nextSessions = buildSessionsAfterAppend(user as UserDoc, jti);
-    await users.updateOne(
-      { _id: user._id },
-      { $set: { refreshSessions: nextSessions }, $unset: { activeRefreshJti: "" } },
+    const nextSessions = buildSessionsAfterAppend(
+      {
+        refreshSessions: user.refreshSessions,
+        activeRefreshJti: user.activeRefreshJti,
+      },
+      jti,
     );
+    await db()
+      .update(users)
+      .set({
+        refreshSessions: nextSessions.map((s) => ({
+          jti: s.jti,
+          createdAt: s.createdAt.toISOString(),
+        })),
+        activeRefreshJti: null,
+      })
+      .where(eq(users.id, userId));
     return reply.send({
       token,
       refreshToken,
       userId,
       defaultOrgId,
       defaultSpaceId,
-      mustSetPassword: (user as UserDoc).mustSetPassword === true,
+      mustSetPassword: user.mustSetPassword === true,
     });
   });
 
@@ -269,30 +289,56 @@ export function registerRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     try {
-      const p = verifyRefreshToken(jwtSecret, parsed.data.refreshToken);
-      const users = getUsersCollection();
-      let userId: ObjectId;
-      try {
-        userId = new ObjectId(p.sub);
-      } catch {
-        return reply.status(401).send({ error: "Invalid or expired refresh token" });
+      const p = await verifyAndTranslateRefresh(jwtSecret, parsed.data.refreshToken);
+      if (!isUuid(p.sub)) {
+        return reply
+          .status(401)
+          .send({ error: "Invalid or expired refresh token" });
       }
-      const user = (await users.findOne({ _id: userId })) as UserDoc | null;
-      if (!user || !userHasRefreshJti(user, p.jti)) {
-        return reply.status(401).send({ error: "Invalid or expired refresh token" });
+      const userRows = await db()
+        .select()
+        .from(users)
+        .where(eq(users.id, p.sub))
+        .limit(1);
+      const user = userRows[0];
+      if (
+        !user ||
+        !userHasRefreshJti(
+          { refreshSessions: user.refreshSessions, activeRefreshJti: user.activeRefreshJti },
+          p.jti,
+        )
+      ) {
+        return reply
+          .status(401)
+          .send({ error: "Invalid or expired refresh token" });
       }
       if (user.disabled === true) {
         return reply.status(403).send({ error: "Account disabled" });
       }
       const newJti = randomUUID();
-      const nextSessions = rotateRefreshSession(user, p.jti, newJti);
-      if (!nextSessions) {
-        return reply.status(401).send({ error: "Invalid or expired refresh token" });
-      }
-      await users.updateOne(
-        { _id: userId },
-        { $set: { refreshSessions: nextSessions }, $unset: { activeRefreshJti: "" } },
+      const nextSessions = rotateRefreshSession(
+        {
+          refreshSessions: user.refreshSessions,
+          activeRefreshJti: user.activeRefreshJti,
+        },
+        p.jti,
+        newJti,
       );
+      if (!nextSessions) {
+        return reply
+          .status(401)
+          .send({ error: "Invalid or expired refresh token" });
+      }
+      await db()
+        .update(users)
+        .set({
+          refreshSessions: nextSessions.map((s) => ({
+            jti: s.jti,
+            createdAt: s.createdAt.toISOString(),
+          })),
+          activeRefreshJti: null,
+        })
+        .where(eq(users.id, p.sub));
       const sessionVariant = p.mcp === true ? "mcp" : "default";
       const lastActiveOrgId =
         typeof user.lastActiveOrgId === "string" && user.lastActiveOrgId.length > 0
@@ -305,14 +351,12 @@ export function registerRoutes(
           : undefined);
       let refreshedActiveSpaceId: string | undefined;
       if (refreshedActiveOrgId) {
-        // Read-only default-space lookup — avoids silently enrolling the
-        // caller as Space Owner when refreshing into an invited org.
         const fallbackSpaceId =
-          (await getDefaultSpaceIdForOrg(refreshedActiveOrgId)) ?? undefined;
+          (await getDefaultSpaceIdForOrg(refreshedActiveOrgId)) ?? "";
         const resolved = await resolveSessionSpaceId(
           user,
           refreshedActiveOrgId,
-          fallbackSpaceId ?? "",
+          fallbackSpaceId,
         );
         refreshedActiveSpaceId = resolved.length > 0 ? resolved : undefined;
       } else if (
@@ -339,48 +383,53 @@ export function registerRoutes(
       );
       return reply.send({ token, refreshToken });
     } catch {
-      return reply.status(401).send({ error: "Invalid or expired refresh token" });
+      return reply
+        .status(401)
+        .send({ error: "Invalid or expired refresh token" });
     }
   });
 
+  // Legacy /sync/{push,pull} use the legacy `notes` table (0 rows in dump,
+  // schema preserved for round-tripping). Endpoints kept for back-compat.
   app.post("/sync/push", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const parsed = syncPushBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const userId = auth.sub;
-    const notes = getNotesCollection();
     const accepted: string[] = [];
-    const conflicts: Omit<SyncNoteDoc, "userId">[] = [];
+    const conflicts: Omit<typeof legacyNotes.$inferSelect, "userId">[] = [];
 
     for (const doc of parsed.data.documents) {
-      const filter = { id: doc.id, userId };
-      const existing = await notes.findOne(filter);
+      const existingRows = await db()
+        .select()
+        .from(legacyNotes)
+        .where(and(eq(legacyNotes.id, doc.id), eq(legacyNotes.userId, userId)))
+        .limit(1);
+      const existing = existingRows[0];
       if (existing && existing.updatedAt > doc.updatedAt) {
-        const { userId: _uid, ...rest } = existing;
+        const { userId: _u, ...rest } = existing;
+        void _u;
         conflicts.push(rest);
         continue;
       }
-      const toWrite: SyncNoteDoc = {
-        ...doc,
-        userId,
-      };
-      await notes.replaceOne(filter, toWrite, { upsert: true });
+      await db()
+        .insert(legacyNotes)
+        .values({ ...doc, userId })
+        .onConflictDoUpdate({
+          target: [legacyNotes.id, legacyNotes.userId],
+          set: { ...doc },
+        });
       accepted.push(doc.id);
     }
-
     return reply.send({ accepted, conflicts });
   });
 
   app.get("/sync/pull", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const q = z
       .object({
         collection: z.literal("notes"),
@@ -391,47 +440,44 @@ export function registerRoutes(
       return reply.status(400).send({ error: q.error.flatten() });
     }
     const userId = auth.sub;
-    const notes = getNotesCollection();
-    const since = q.data.since;
-    const cursor = notes.find({
-      userId,
-      updatedAt: { $gt: since },
+    const list = await db()
+      .select()
+      .from(legacyNotes)
+      .where(
+        and(eq(legacyNotes.userId, userId), gt(legacyNotes.updatedAt, q.data.since)),
+      )
+      .orderBy(legacyNotes.updatedAt);
+    const documents = list.map(({ userId: _u, ...rest }) => {
+      void _u;
+      return rest;
     });
-    const list = await cursor.sort({ updatedAt: 1 }).toArray();
-    const documents = list.map(({ userId: _u, ...rest }) => rest);
-    return reply.send({
-      documents,
-      lastSync: Date.now(),
-    });
+    return reply.send({ documents, lastSync: Date.now() });
   });
 
   app.get("/health", async (_request, reply) => {
     return reply.send({ ok: true, service: "archon-sync-api" });
   });
 
-  /** Debug: resolve user from JWT (same as sync auth). */
   app.get("/auth/me", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
-    const users = getUsersCollection();
+    if (!auth) return;
     let email = auth.email;
     let mustSetPassword = false;
     let lockedOrgId: string | null = null;
     let isMasterAdmin = false;
-    try {
-      const u = (await users.findOne({
-        _id: new ObjectId(auth.sub),
-      })) as UserDoc | null;
+    if (isUuid(auth.sub)) {
+      const userRows = await db()
+        .select()
+        .from(users)
+        .where(eq(users.id, auth.sub))
+        .limit(1);
+      const u = userRows[0];
       if (u) {
         email = u.email;
         mustSetPassword = u.mustSetPassword === true;
         lockedOrgId = u.lockedOrgId ?? null;
         isMasterAdmin = u.isMasterAdmin === true;
       }
-    } catch {
-      /* invalid ObjectId */
     }
     return reply.send({
       userId: auth.sub,
@@ -442,17 +488,9 @@ export function registerRoutes(
     });
   });
 
-  /**
-   * Authenticated password change. Required flow for accounts created via the
-   * admin Create-Member path, but also available to any user who wants to
-   * rotate their password. Verifies currentPassword, writes the new hash,
-   * and clears mustSetPassword.
-   */
   app.post("/auth/change-password", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) {
-      return;
-    }
+    if (!auth) return;
     const parsed = z
       .object({
         currentPassword: z.string().min(1).max(256),
@@ -462,14 +500,15 @@ export function registerRoutes(
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    let userOid: ObjectId;
-    try {
-      userOid = new ObjectId(auth.sub);
-    } catch {
+    if (!isUuid(auth.sub)) {
       return reply.status(401).send({ error: "Invalid user id" });
     }
-    const users = getUsersCollection();
-    const user = (await users.findOne({ _id: userOid })) as UserDoc | null;
+    const userRows = await db()
+      .select()
+      .from(users)
+      .where(eq(users.id, auth.sub))
+      .limit(1);
+    const user = userRows[0];
     if (!user) {
       return reply.status(404).send({ error: "User not found" });
     }
@@ -483,10 +522,10 @@ export function registerRoutes(
         .send({ error: "New password must differ from current password" });
     }
     const passwordHash = await bcrypt.hash(parsed.data.newPassword, 12);
-    await users.updateOne(
-      { _id: userOid },
-      { $set: { passwordHash, mustSetPassword: false } },
-    );
+    await db()
+      .update(users)
+      .set({ passwordHash, mustSetPassword: false })
+      .where(eq(users.id, auth.sub));
     return reply.send({ ok: true, mustSetPassword: false });
   });
 }

@@ -1,5 +1,6 @@
 import jwt, { type SignOptions } from "jsonwebtoken";
 import type { FastifyReply, FastifyRequest } from "fastify";
+import { verifyAndTranslateAccess } from "./auth-translate.js";
 
 const ACCESS_EXPIRES =
   (typeof process.env.ARCHON_JWT_ACCESS_EXPIRES === "string" &&
@@ -20,6 +21,16 @@ const MCP_REFRESH_EXPIRES =
     process.env.ARCHON_JWT_MCP_REFRESH_EXPIRES.trim()) ||
   "7d";
 
+/**
+ * Realtime principal block. Every post-cutover access token carries one;
+ * pre-cutover tokens leave it absent and the verifier falls back to
+ * `mcp?: boolean`.
+ */
+export type Principal = {
+  type: "user" | "mcp";
+  metadata?: Record<string, unknown>;
+};
+
 export type JwtPayload = {
   sub: string;
   email: string;
@@ -28,6 +39,8 @@ export type JwtPayload = {
   jti?: string;
   /** MCP-issued tokens carry this so /auth/refresh keeps MCP access + refresh TTLs. */
   mcp?: boolean;
+  /** Canonical realtime identity. Optional for backward compatibility. */
+  principal?: Principal;
   /** Active organization context (Phase 1). May be absent on legacy tokens. */
   activeOrgId?: string;
   /** Active space context (Phase 2). May be absent on legacy tokens. */
@@ -140,7 +153,7 @@ export async function requireAuth(
     return null;
   }
   try {
-    return verifyAccessToken(jwtSecret, token);
+    return await verifyAndTranslateAccess(jwtSecret, token);
   } catch {
     await reply.status(401).send({ error: "Invalid or expired token" });
     return null;

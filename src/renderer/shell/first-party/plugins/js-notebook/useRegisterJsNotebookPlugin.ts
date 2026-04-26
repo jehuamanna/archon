@@ -38,17 +38,19 @@ export function useRegisterJsNotebookPlugin(): void {
       }),
     );
 
-    disposers.push(
-      regs.menuRail.registerItem({
-        id: "plugin.js-notebook.rail",
-        title: "JS notebook",
-        icon: "◉",
-        order: 18,
-        tabTypeId: TAB_NOTEBOOK,
-        tabReuseKey: "plugin.js-notebook",
-        expandChrome: { menuRail: true },
-      }),
-    );
+    // JS notebook (Observable-style) rail icon hidden — still reachable via
+    // the command palette and `archon.jsNotebook.open` command.
+    // disposers.push(
+    //   regs.menuRail.registerItem({
+    //     id: "plugin.js-notebook.rail",
+    //     title: "JS notebook",
+    //     icon: "◉",
+    //     order: 18,
+    //     tabTypeId: TAB_NOTEBOOK,
+    //     tabReuseKey: "plugin.js-notebook",
+    //     expandChrome: { menuRail: true },
+    //   }),
+    // );
 
     disposers.push(
       contrib.registerCommand({

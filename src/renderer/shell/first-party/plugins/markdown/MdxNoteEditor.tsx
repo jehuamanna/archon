@@ -1,10 +1,11 @@
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
-import type { AppDispatch } from "../../../../store";
+import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
+import { useYjsBodyShadow } from "./useYjsBodyShadow";
 import { MdxRenderer } from "../../../../components/renderers/MdxRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -13,6 +14,7 @@ import {
   isSameProjectRelativeVfsPath,
   markdownVfsNoteHref,
   markdownVfsNoteHrefSameProjectRelative,
+  resolveNoteIdByCanonicalVfsPath,
   resolveSameProjectRelativeVfsToCanonical,
   resolveTreeRelativeVfsPath,
 } from "../../../../../shared/note-vfs-path";
@@ -31,6 +33,7 @@ import {
 import { useArchonNoteModeLine } from "../../../useArchonNoteModeLine";
 import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
+import { useShellNavigation } from "../../../useShellNavigation";
 import { isShellNoteEditorTabType } from "../../shellWorkspaceIds";
 import type { ShellNoteTabState } from "../../../shellTabUrlSync";
 import { fetchWpnNoteLinkIndex, filterWpnNoteLinkRows, type WpnNoteLinkRow } from "./wpnNoteLinkIndex";
@@ -45,11 +48,14 @@ function lineColAt(text: string, offset: number): { line: number; col: number } 
   return { line, col };
 }
 
-const MDX_AUTOSAVE_DEBOUNCE_MS = 500;
+const MDX_AUTOSAVE_DEBOUNCE_MS = 150;
+const MDX_AUTOSAVE_MAX_WAIT_MS = 750;
 
 /**
  * MDX note editor: CodeMirror + debounced live MDX preview (same React tree as the shell).
- * Persists via debounced writes: one save after typing idles for {@link MDX_AUTOSAVE_DEBOUNCE_MS}, plus immediate flush on blur and when leaving the note.
+ * Persists via debounced writes: one save after typing idles for {@link MDX_AUTOSAVE_DEBOUNCE_MS},
+ * with a hard cap of {@link MDX_AUTOSAVE_MAX_WAIT_MS} so continuous typing still flushes
+ * regularly. Plus immediate flush on blur and when leaving the note.
  */
 export function MdxNoteEditor({
   note,
@@ -68,6 +74,7 @@ export function MdxNoteEditor({
   const [caretHead, setCaretHead] = useState(0);
   const latestRef = useRef(note.content ?? "");
   const flushTimerRef = useRef<number | null>(null);
+  const firstScheduledAtRef = useRef<number | null>(null);
   const persistRef = useRef(persist);
   const noteIdRef = useRef(note.id);
   const previewScrollRef = useRef<HTMLDivElement | null>(null);
@@ -90,6 +97,15 @@ export function MdxNoteEditor({
   const onBlurRef: MdxNoteOnBlurRef = useRef(null);
 
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  const [linkPickerExclude, setLinkPickerExclude] = useState<string>("");
+  // Set when an SDK component (e.g. <Slideshow>) opened the picker via
+  // shell context. The modal's onPick checks this first; if set, the
+  // picked row is converted to `{ label, href }` and forwarded — the
+  // outer source editor is not touched. If null, the legacy behavior
+  // (insert into the outer source CodeMirror via insertMdxNoteLink) runs.
+  const pickerCallbackRef = useRef<
+    ((link: { label: string; href: string }) => void) | null
+  >(null);
   const [sel, setSel] = useState({ start: 0, end: 0 });
   const [wikiDismissed, setWikiDismissed] = useState(false);
   const [wikiRows, setWikiRows] = useState<WpnNoteLinkRow[]>([]);
@@ -290,6 +306,10 @@ export function MdxNoteEditor({
       const id = typeof d?.noteId === "string" ? d.noteId : "";
       if (!id || id !== noteIdRef.current) return;
       if (readOnly) return;
+      // Clear any SDK-supplied callback so the modal falls back to
+      // `insertMdxNoteLink` (the source-pane behavior).
+      pickerCallbackRef.current = null;
+      setLinkPickerExclude("");
       setLinkPickerOpen(true);
     };
     window.addEventListener(ARCHON_MARKDOWN_OPEN_NOTE_LINK_PICKER_EVENT, onOpenPicker as EventListener);
@@ -439,12 +459,26 @@ export function MdxNoteEditor({
     };
   }, [wikiRows, note.id]);
 
+  // When the realtime body-collab WS is open for this note, flushes ride
+  // the Yjs binary diff frame instead of a full-content HTTP PATCH. The
+  // server's `onStoreDocument` bridges Y.Text → `wpn_notes.content` so
+  // legacy HTTP read endpoints stay in sync. Falls back to the HTTP path
+  // when the standalone sync-api isn't reachable.
+  const activeSpaceId = useSelector(
+    (s: RootState) => s.spaceMembership.activeSpaceId,
+  );
+  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  const yjsBodyRef = useRef(yjsBody);
+  yjsBodyRef.current = yjsBody;
+
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
     }
+    firstScheduledAtRef.current = null;
     if (!persistRef.current) return;
+    if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
     void dispatch(
       saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
     );
@@ -452,13 +486,36 @@ export function MdxNoteEditor({
 
   const scheduleBatchedFlush = useCallback(() => {
     if (!persistRef.current) return;
+    const now = Date.now();
+    // Hard cap: if the first pending edit has been waiting MAX_WAIT_MS, flush immediately
+    // so continuous typing can't starve the save indefinitely.
+    if (
+      firstScheduledAtRef.current !== null &&
+      now - firstScheduledAtRef.current >= MDX_AUTOSAVE_MAX_WAIT_MS
+    ) {
+      if (flushTimerRef.current !== null) {
+        window.clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      firstScheduledAtRef.current = null;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      void dispatch(
+        saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
+      );
+      return;
+    }
+    if (firstScheduledAtRef.current === null) {
+      firstScheduledAtRef.current = now;
+    }
     // Debounce: reset the idle timer on every keystroke so only the trailing save fires.
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
     }
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
+      firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -472,11 +529,14 @@ export function MdxNoteEditor({
         window.clearTimeout(flushTimerRef.current);
         flushTimerRef.current = null;
       }
-      if (persistRef.current) {
-        void dispatch(
-          saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
-        );
-      }
+      firstScheduledAtRef.current = null;
+      if (!persistRef.current) return;
+      // On unmount the Yjs provider is about to be destroyed too; push
+      // synchronously and only fall back to HTTP if the WS isn't open.
+      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      void dispatch(
+        saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
+      );
     };
   }, [note.id, dispatch]);
 
@@ -547,6 +607,114 @@ export function MdxNoteEditor({
     const base = ex ? wikiRows.filter((r) => r.noteId !== ex) : wikiRows;
     return filterWpnNoteLinkRows(base, wikiTrig?.filter ?? "");
   }, [wikiRows, wikiTrig?.filter, note.id]);
+
+  // Build a `{ label, href }` for a wiki-rows row. Always uses the full
+  // canonical `Workspace/Project/Title` form (not the same-project
+  // `./Title` shorthand the source-editor picker prefers). SDK components
+  // store their content as project-state, so a deck may outlive the
+  // editing context — the relative form would silently break if the
+  // slide deck is later viewed from a note in a different project.
+  const buildSdkNoteLink = useCallback(
+    (row: WpnNoteLinkRow): { label: string; href: string } => {
+      const vfsPath = canonicalVfsPathFromLinkRow(row);
+      return {
+        label: row.title.trim() || "Untitled",
+        href: markdownVfsNoteHref(vfsPath),
+      };
+    },
+    [],
+  );
+
+  // Drop-payload resolver injected into the MDX shell context so SDK
+  // components (e.g. <Slideshow>) can decode WPN-explorer drag drops into
+  // a markdown link without re-implementing the wiki-rows lookup.
+  const resolveWpnNoteLink = useCallback(
+    ({ noteId }: { projectId: string; noteId: string }): { label: string; href: string } | null => {
+      const row = wikiRows.find((r) => r.noteId === noteId);
+      if (!row) return null;
+      return buildSdkNoteLink(row);
+    },
+    [wikiRows, buildSdkNoteLink],
+  );
+
+  // Click-driven picker opener for SDK components. Stores the callback
+  // and opens the existing `<MarkdownNoteLinkPickerModal>` — the modal's
+  // onPick branches on `pickerCallbackRef` to route to the SDK consumer
+  // instead of the outer source editor.
+  const openWpnNoteLinkPicker = useCallback(
+    (
+      onPick: (link: { label: string; href: string }) => void,
+      options?: { excludeNoteId?: string },
+    ) => {
+      pickerCallbackRef.current = onPick;
+      setLinkPickerExclude(options?.excludeNoteId ?? note.id);
+      setLinkPickerOpen(true);
+    },
+    [note.id],
+  );
+
+  // Open an internal note link (`#/w/...` or note-id form) in a NEW
+  // Archon shell tab — not a new browser tab. Used by SDK components
+  // like <Slideshow> whose rendered links should stay inside the
+  // workbench. Resolves vfs forms to a noteId via the wikiRows / rawNotes
+  // cache; falls back to noting "couldn't resolve" silently (the click
+  // is preventDefault'd, so nothing happens — better than navigating
+  // the current tab away from the deck).
+  const { openNoteById } = useShellNavigation();
+  const openInternalNoteLinkInNewTab = useCallback(
+    (link: InternalMarkdownNoteLink): void => {
+      const slug = link.markdownHeadingSlug;
+      if (link.kind === "noteId") {
+        const row = wikiRows.find((r) => r.noteId === link.noteId);
+        openNoteById(link.noteId, {
+          newTab: true,
+          ...(row?.title ? { title: row.title } : {}),
+          ...(slug ? { markdownHeadingSlug: slug } : {}),
+        });
+        return;
+      }
+      // vfs kind — resolve via the link index. Try canonical first, then
+      // tree-relative or same-project shorthands.
+      const rawNotes = rawNotesCacheRef.current ?? [];
+      const vfs = link.vfsPath;
+      let canonical: string | null = null;
+      let resolvedId: string | null = null;
+      if (vfs.startsWith("..") && rawNotes.length > 0) {
+        canonical = resolveTreeRelativeVfsPath(vfs, note.id, rawNotes);
+      } else if (isSameProjectRelativeVfsPath(vfs)) {
+        const selfRow = wikiRows.find((r) => r.noteId === note.id);
+        if (selfRow) {
+          canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
+            workspace_name: selfRow.workspaceName,
+            project_name: selfRow.projectName,
+          });
+        }
+      } else {
+        canonical = vfs;
+      }
+      if (canonical) {
+        // Match canonical against rawNotes; fall back to wikiRows-derived path.
+        if (rawNotes.length > 0) {
+          resolvedId = resolveNoteIdByCanonicalVfsPath(rawNotes, canonical);
+        }
+        if (!resolvedId) {
+          const row = wikiRows.find(
+            (r) => canonicalVfsPathFromLinkRow(r) === canonical,
+          );
+          resolvedId = row?.noteId ?? null;
+        }
+      }
+      if (!resolvedId) return;
+      const resolvedRow = wikiRows.find((r) => r.noteId === resolvedId);
+      openNoteById(resolvedId, {
+        newTab: true,
+        ...(resolvedRow?.title ? { title: resolvedRow.title } : {}),
+        ...(canonical ? { canonicalVfsPath: canonical } : {}),
+        ...(slug ? { markdownHeadingSlug: slug } : {}),
+      });
+    },
+    [openNoteById, note.id, wikiRows],
+  );
 
   const wikiSelectedClamped = Math.min(
     wikiSelected,
@@ -671,7 +839,14 @@ export function MdxNoteEditor({
             <button
               type="button"
               className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted/40"
-              onClick={() => setLinkPickerOpen(true)}
+              onClick={() => {
+                // Source-pane button: clear any prior SDK callback so the
+                // modal's onPick uses `insertMdxNoteLink` (writes into the
+                // outer source CodeMirror).
+                pickerCallbackRef.current = null;
+                setLinkPickerExclude("");
+                setLinkPickerOpen(true);
+              }}
             >
               Link to note (path)
             </button>
@@ -724,7 +899,13 @@ export function MdxNoteEditor({
               ref={previewScrollRef}
               data-archon-md-preview
             >
-              <MdxRenderer note={previewNote} isLinkTargetValid={isLinkTargetValid} />
+              <MdxRenderer
+                note={previewNote}
+                isLinkTargetValid={isLinkTargetValid}
+                resolveWpnNoteLink={resolveWpnNoteLink}
+                openWpnNoteLinkPicker={openWpnNoteLinkPicker}
+                openInternalNoteLinkInNewTab={openInternalNoteLinkInNewTab}
+              />
             </div>
           </div>
         ) : null}
@@ -732,9 +913,20 @@ export function MdxNoteEditor({
 
       <MarkdownNoteLinkPickerModal
         open={linkPickerOpen}
-        onClose={() => setLinkPickerOpen(false)}
-        excludeNoteId={note.id}
-        onPick={(row) => insertMdxNoteLink(row)}
+        onClose={() => {
+          setLinkPickerOpen(false);
+          pickerCallbackRef.current = null;
+        }}
+        excludeNoteId={linkPickerExclude || note.id}
+        onPick={(row) => {
+          const cb = pickerCallbackRef.current;
+          if (cb) {
+            cb(buildSdkNoteLink(row));
+            pickerCallbackRef.current = null;
+          } else {
+            insertMdxNoteLink(row);
+          }
+        }}
       />
 
       <MarkdownNoteLinkAutocompletePopover

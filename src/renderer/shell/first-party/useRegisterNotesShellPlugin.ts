@@ -134,15 +134,18 @@ export function useRegisterNotesShellPlugin(): void {
       }),
     );
 
-    disposers.push(
-      regs.menuRail.registerItem({
-        id: "shell.rail.scratchMarkdown",
-        title: "Scratch",
-        icon: "M",
-        order: 17,
-        commandId: "archon.notes.openScratchMarkdownTab",
-      }),
-    );
+    // Scratch rail icon hidden — still reachable via the command palette
+    // (`archon.notes.openScratchMarkdownTab`) and the explorer's Scratch
+    // bucket. Re-enable by uncommenting if discoverability becomes an issue.
+    // disposers.push(
+    //   regs.menuRail.registerItem({
+    //     id: "shell.rail.scratchMarkdown",
+    //     title: "Scratch",
+    //     icon: "M",
+    //     order: 17,
+    //     commandId: "archon.notes.openScratchMarkdownTab",
+    //   }),
+    // );
 
     disposers.push(
       contrib.registerCommand({

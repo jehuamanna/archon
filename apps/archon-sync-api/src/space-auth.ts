@@ -1,64 +1,92 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
-import { ObjectId } from "mongodb";
+import { eq, and } from "drizzle-orm";
 import type { JwtPayload } from "./auth.js";
-import {
-  getOrgMembershipsCollection,
-  getSpaceMembershipsCollection,
-  getSpacesCollection,
-} from "./db.js";
-import type { SpaceDoc, SpaceMembershipDoc, SpaceRole } from "./org-schemas.js";
+import { getDb } from "./pg.js";
+import { orgMemberships, spaceMemberships, spaces } from "./db/schema.js";
+import type { SpaceRole } from "./org-schemas.js";
 import { effectiveRoleInSpace } from "./permission-resolver.js";
+import {
+  ensureUuid,
+  isObjectIdHex,
+  isUuid,
+} from "./db/legacy-id-map.js";
+
+/** PG-row shape replacing Mongo SpaceDoc for return types. */
+export type SpaceRow = typeof spaces.$inferSelect;
+export type SpaceMembershipRow = typeof spaceMemberships.$inferSelect;
 
 export type SpaceContext = {
-  space: SpaceDoc;
+  space: SpaceRow;
   role: SpaceRole;
 };
 
 export async function getSpaceMembership(
-  userIdHex: string,
-  spaceIdHex: string,
-): Promise<SpaceMembershipDoc | null> {
-  return getSpaceMembershipsCollection().findOne({
-    spaceId: spaceIdHex,
-    userId: userIdHex,
-  });
+  userId: string,
+  spaceId: string,
+): Promise<SpaceMembershipRow | null> {
+  const rows = await getDb()
+    .select()
+    .from(spaceMemberships)
+    .where(
+      and(
+        eq(spaceMemberships.spaceId, spaceId),
+        eq(spaceMemberships.userId, userId),
+      ),
+    )
+    .limit(1);
+  return rows[0] ?? null;
 }
 
 export async function listSpaceMembershipsForUser(
-  userIdHex: string,
-): Promise<SpaceMembershipDoc[]> {
-  return getSpaceMembershipsCollection().find({ userId: userIdHex }).toArray();
-}
-
-function isObjectIdHex(s: string): boolean {
-  return /^[a-f0-9]{24}$/i.test(s);
-}
-
-async function loadSpace(spaceIdHex: string): Promise<SpaceDoc | null> {
-  if (!isObjectIdHex(spaceIdHex)) {
-    return null;
-  }
-  return getSpacesCollection().findOne({ _id: new ObjectId(spaceIdHex) });
+  userId: string,
+): Promise<SpaceMembershipRow[]> {
+  return getDb()
+    .select()
+    .from(spaceMemberships)
+    .where(eq(spaceMemberships.userId, userId));
 }
 
 /**
- * Resolves the space + the caller's effective role (direct membership ∪
- * team grants). Sends a response and returns `null` on failure — handlers
- * must early-return on `null`.
+ * Tolerant id resolver for callers that may still pass a legacy ObjectId hex
+ * via URL params. Returns the canonical UUID, or null if the input is neither
+ * a UUID nor a known legacy id.
  */
+async function resolveSpaceId(spaceId: string): Promise<string | null> {
+  if (isUuid(spaceId)) return spaceId;
+  if (isObjectIdHex(spaceId)) {
+    try {
+      return await ensureUuid("spaces", spaceId);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function loadSpace(spaceId: string): Promise<SpaceRow | null> {
+  const canonical = await resolveSpaceId(spaceId);
+  if (!canonical) return null;
+  const rows = await getDb()
+    .select()
+    .from(spaces)
+    .where(eq(spaces.id, canonical))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function requireSpaceRole(
   request: FastifyRequest,
   reply: FastifyReply,
   auth: JwtPayload,
-  spaceIdHex: string,
+  spaceId: string,
   required: SpaceRole,
 ): Promise<SpaceContext | null> {
-  const space = await loadSpace(spaceIdHex);
+  const space = await loadSpace(spaceId);
   if (!space) {
     await reply.status(404).send({ error: "Space not found" });
     return null;
   }
-  const role = await effectiveRoleInSpace(auth.sub, spaceIdHex);
+  const role = await effectiveRoleInSpace(auth.sub, space.id);
   if (!role) {
     await reply.status(404).send({ error: "Space not found" });
     return null;
@@ -74,49 +102,45 @@ export async function requireSpaceMember(
   request: FastifyRequest,
   reply: FastifyReply,
   auth: JwtPayload,
-  spaceIdHex: string,
+  spaceId: string,
 ): Promise<SpaceContext | null> {
-  return requireSpaceRole(request, reply, auth, spaceIdHex, "member");
+  return requireSpaceRole(request, reply, auth, spaceId, "member");
 }
 
-/**
- * Authorize a management action on a space: caller must be the space `owner`
- * OR an `admin` of the parent org. Org admins get implicit CRUD + member
- * management over every space in their org, regardless of direct space
- * membership. Sends 404/403 on failure.
- */
+/** Space owner OR org admin (implicit cross-space CRUD). */
 export async function requireSpaceManage(
   request: FastifyRequest,
   reply: FastifyReply,
   auth: JwtPayload,
-  spaceIdHex: string,
+  spaceId: string,
 ): Promise<SpaceContext | null> {
-  const space = await loadSpace(spaceIdHex);
+  const space = await loadSpace(spaceId);
   if (!space) {
     await reply.status(404).send({ error: "Space not found" });
     return null;
   }
-  const spaceRole = await effectiveRoleInSpace(auth.sub, spaceIdHex);
+  const spaceRole = await effectiveRoleInSpace(auth.sub, space.id);
   if (spaceRole === "owner") {
     return { space, role: spaceRole };
   }
-  const orgMembership = await getOrgMembershipsCollection().findOne({
-    orgId: space.orgId,
-    userId: auth.sub,
-  });
-  if (orgMembership?.role === "admin") {
+  const orgRows = await getDb()
+    .select({ role: orgMemberships.role })
+    .from(orgMemberships)
+    .where(
+      and(
+        eq(orgMemberships.orgId, space.orgId),
+        eq(orgMemberships.userId, auth.sub),
+      ),
+    )
+    .limit(1);
+  if (orgRows[0]?.role === "admin") {
     return { space, role: spaceRole ?? "owner" };
   }
   await reply.status(403).send({ error: "Space owner role required" });
   return null;
 }
 
-/**
- * Active space resolution priority:
- *   1. `X-Archon-Space` header
- *   2. JWT `activeSpaceId` claim (Phase 2.x)
- *   3. caller's default space in active org (callers do this lookup)
- */
+/** Active space resolution priority: header → JWT claim → caller's default. */
 export function resolveActiveSpaceId(
   request: FastifyRequest,
   auth: JwtPayload,

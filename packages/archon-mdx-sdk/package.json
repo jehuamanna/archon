@@ -1,26 +1,52 @@
 {
-  "name": "@archon/mdx-sdk",
-  "private": true,
-  "version": "0.1.0",
+  "name": "@nodex-studio/mdx-sdk",
+  "version": "0.1.1",
   "type": "module",
-  "description": "Authoring SDK for Archon MDX mini-app notes: hooks + built-in components.",
+  "description": "Schema and validation rules for Archon MDX mini-app notes. Components/hooks live in @archon/mdx-sdk-runtime.",
+  "keywords": [
+    "archon",
+    "mdx",
+    "schema",
+    "json-schema"
+  ],
+  "license": "UNLICENSED",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
-    },
-    "./components": {
-      "types": "./src/components.tsx",
-      "import": "./src/components.tsx"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./prop-specs": {
-      "types": "./src/prop-specs.ts",
-      "import": "./src/prop-specs.ts"
+      "types": "./dist/prop-specs.d.ts",
+      "import": "./dist/prop-specs.js"
+    },
+    "./validation": {
+      "types": "./dist/validation.d.ts",
+      "import": "./dist/validation.js"
+    },
+    "./json-schema": {
+      "types": "./dist/json-schema.d.ts",
+      "import": "./dist/json-schema.js"
+    },
+    "./system-prompt": {
+      "types": "./dist/system-prompt.d.ts",
+      "import": "./dist/system-prompt.js"
     }
   },
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
-  "peerDependencies": {
-    "react": "^19.0.0"
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

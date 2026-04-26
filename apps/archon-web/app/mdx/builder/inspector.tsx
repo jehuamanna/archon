@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { PROP_SPECS } from "@archon/mdx-sdk";
+import { PROP_SPECS } from "@nodex-studio/mdx-sdk";
 import type { BuilderNode, EditableNode } from "./ast.js";
 
 export interface InspectorProps {
