@@ -46,6 +46,57 @@ export async function _shutdownYjsServerForTests(): Promise<void> {
   }
 }
 
+/**
+ * Apply a server-side rewrite of `Y.Text("content")` for `noteId` so that
+ * REST writes (e.g. `PATCH /wpn/notes/:id` from the MCP tool) reach the
+ * live Yjs document instead of being clobbered by the next autosave.
+ *
+ * Without this, `onStoreDocument` periodically flushes the connected
+ * editor's *current* in-memory Y.Doc state back to `wpn_notes.content`,
+ * silently overwriting any HTTP PATCH that landed in between.
+ *
+ * Routing the REST write through `openDirectConnection` instead:
+ *   - loads the Y.Doc (from `yjs_state` snapshot or the seeded `content`),
+ *   - replaces `Y.Text("content")` inside one transaction,
+ *   - causes Hocuspocus to broadcast the diff to every connected editor,
+ *   - schedules the bridge in `onStoreDocument` to write the matching
+ *     content to `wpn_notes.content` (so the persisted snapshot and the
+ *     row stay in sync).
+ *
+ * No-ops when the Hocuspocus server isn't configured (the same process
+ * may host non-realtime API instances or run in tests that don't mount
+ * `/v1/ws/yjs`). Errors are swallowed: a failed direct-doc update must
+ * not fail the underlying REST PATCH that already succeeded against
+ * `wpn_notes`.
+ */
+export async function applyContentToYjsDoc(
+  noteId: string,
+  content: string,
+): Promise<void> {
+  if (!_sharedServer) return;
+  try {
+    const conn = await _sharedServer.openDirectConnection(noteId);
+    try {
+      await conn.transact((document) => {
+        const ytext = document.getText("content");
+        const current = ytext.toString();
+        if (current === content) return;
+        ytext.delete(0, ytext.length);
+        if (content.length > 0) ytext.insert(0, content);
+      });
+    } finally {
+      await conn.disconnect();
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[yjs-ws] applyContentToYjsDoc failed:",
+      noteId,
+      (err as Error).message,
+    );
+  }
+}
+
 async function resolveSpaceForNote(noteId: string): Promise<string | null> {
   const noteRows = await getDb()
     .select({ projectId: wpnNotes.project_id, spaceId: wpnNotes.spaceId })
