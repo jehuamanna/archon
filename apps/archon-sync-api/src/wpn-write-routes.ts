@@ -78,6 +78,7 @@ import {
 import type { NoteMovePlacement } from "./wpn-tree.js";
 import { isUuid } from "./db/legacy-id-map.js";
 import { clientOpStore } from "./realtime/notify.js";
+import { applyContentToYjsDoc } from "./realtime/yjs-ws.js";
 
 /**
  * Read the client-op id header and run `fn` inside an AsyncLocalStorage
@@ -1304,6 +1305,12 @@ export function registerWpnWriteRoutes(
       }));
       if (!note) {
         return reply.status(404).send({ error: "Note not found" });
+      }
+      // Push the new content into the live Yjs doc so an open editor's
+      // next autosave doesn't silently revert this PATCH (Bug-8fa027).
+      // Failures are logged inside the helper — never surface to the writer.
+      if (patch.content !== undefined) {
+        await applyContentToYjsDoc(id, note.content);
       }
       if (
         updateVfsDependentLinks &&
