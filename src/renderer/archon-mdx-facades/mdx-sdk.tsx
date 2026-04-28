@@ -1713,6 +1713,175 @@ export function Slideshow({
 }
 
 /**
+ * Fetch markdown children of a parent note by listing the project's flat
+ * note tree (`GET /wpn/projects/:projectId/notes`, which returns each row's
+ * `parent_id`, `type`, and `sibling_index`) and filtering to the requested
+ * parent. Used by `<DeckPicker>` so a Welcome-screen author can drop a deck
+ * collection in without hard-coding individual deck note ids.
+ */
+function useMarkdownChildren(
+  parentNoteId: string | undefined,
+  projectId: string | null,
+): {
+  decks: Array<{ id: string; title: string }>;
+  loading: boolean;
+  error?: string;
+} {
+  const [state, setState] = React.useState<{
+    decks: Array<{ id: string; title: string }>;
+    loading: boolean;
+    error?: string;
+  }>({ decks: [], loading: !!(parentNoteId && projectId) });
+
+  React.useEffect(() => {
+    if (!parentNoteId || !projectId) {
+      setState({ decks: [], loading: false });
+      return;
+    }
+    let cancelled = false;
+    setState((prev) => ({ ...prev, loading: true, error: undefined }));
+    void (async () => {
+      try {
+        const res = await fetch(
+          `${syncBase()}/wpn/projects/${encodeURIComponent(projectId)}/notes`,
+          { headers: authHeaders(), credentials: "omit" },
+        );
+        if (!res.ok) {
+          if (!cancelled)
+            setState({ decks: [], loading: false, error: `GET ${res.status}` });
+          return;
+        }
+        const body = (await res.json()) as {
+          notes?: Array<{
+            id: string;
+            title: string;
+            type: string;
+            parent_id: string | null;
+            sibling_index: number;
+          }>;
+        };
+        const matches = (body.notes ?? [])
+          .filter((n) => n.parent_id === parentNoteId && n.type === "markdown")
+          .sort((a, b) => a.sibling_index - b.sibling_index)
+          .map((n) => ({ id: n.id, title: n.title }));
+        if (!cancelled) setState({ decks: matches, loading: false });
+      } catch (e) {
+        if (!cancelled)
+          setState({ decks: [], loading: false, error: (e as Error).message });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [parentNoteId, projectId]);
+
+  return state;
+}
+
+/**
+ * `<DeckPicker>` — pick one of the markdown children of `parentNoteId` and
+ * render it through `<Slideshow>`. Lets the Welcome screen carry several
+ * audience-tailored decks without re-editing the note each time a new deck
+ * is added — drop a markdown note under the parent and it shows up here.
+ *
+ * Selection is local React state (resets on reload). Pass `selectedKey` to
+ * persist the chosen deck id across reloads via `useProjectState`.
+ */
+export function DeckPicker({
+  parentNoteId,
+  selectedKey,
+  emptyLabel,
+}: {
+  parentNoteId?: string;
+  selectedKey?: string;
+  emptyLabel?: string;
+}): React.ReactElement {
+  const projectId = useProjectId();
+  const { decks, loading, error } = useMarkdownChildren(parentNoteId, projectId);
+
+  const [persistedId, setPersistedId] = useProjectState<string>(
+    selectedKey || "__deckpicker_unbound",
+    "",
+  );
+  const [localId, setLocalId] = React.useState<string>("");
+  const usePersisted = !!selectedKey;
+  const selectedRaw = usePersisted ? persistedId : localId;
+
+  // Default to the first deck once the list loads. If the persisted id no
+  // longer matches any child (deck deleted or renamed), fall back too.
+  const selectedId = React.useMemo(() => {
+    if (decks.length === 0) return "";
+    const present = decks.some((d) => d.id === selectedRaw);
+    return present ? selectedRaw : decks[0]!.id;
+  }, [decks, selectedRaw]);
+
+  const select = React.useCallback(
+    (id: string): void => {
+      if (usePersisted) setPersistedId(id);
+      else setLocalId(id);
+    },
+    [usePersisted, setPersistedId],
+  );
+
+  if (!parentNoteId) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-3 text-[13px] text-muted-foreground">
+        DeckPicker: <code>parentNoteId</code> is required.
+      </div>
+    );
+  }
+  if (loading) {
+    return (
+      <div className="rounded-md border border-border p-3 text-[13px] text-muted-foreground">
+        Loading decks…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div className="rounded-md border border-border p-3 text-[13px] text-red-600">
+        DeckPicker error: {error}
+      </div>
+    );
+  }
+  if (decks.length === 0) {
+    return (
+      <div className="rounded-md border border-dashed border-border p-3 text-[13px] text-muted-foreground">
+        {emptyLabel || "No decks yet — add a markdown child note under the collection."}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="Pick a deck">
+        {decks.map((d) => {
+          const active = d.id === selectedId;
+          return (
+            <button
+              key={d.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => select(d.id)}
+              className={
+                "rounded-full border px-3 py-1 text-[13px] font-medium transition-colors " +
+                (active
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-border bg-background text-foreground hover:bg-muted/40")
+              }
+            >
+              {d.title}
+            </button>
+          );
+        })}
+      </div>
+      <Slideshow noteId={selectedId} />
+    </div>
+  );
+}
+
+/**
  * Tag name → component map for the `@archon/mdx-sdk` facade. Extends the
  * existing `@archon/ui` map via composition in `component-map.ts`.
  */
@@ -1735,5 +1904,6 @@ export function getArchonMdxSdkFacadeComponentMap(): Record<
     Markdown,
     Code,
     Slideshow,
+    DeckPicker,
   } as unknown as Record<string, React.ComponentType<Record<string, unknown>>>;
 }

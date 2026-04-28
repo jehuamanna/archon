@@ -53,13 +53,129 @@ function useAdminSelection(): AdminSelection {
   );
 }
 
+type IconProps = { className?: string };
+
+const iconBase =
+  "h-3.5 w-3.5 shrink-0 text-muted-foreground/80";
+
+function svgProps(extra?: string): React.SVGProps<SVGSVGElement> {
+  return {
+    width: 14,
+    height: 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.75,
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+    className: extra ? `${iconBase} ${extra}` : iconBase,
+  } as React.SVGProps<SVGSVGElement>;
+}
+
+function CogIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
+  );
+}
+
+function BuildingIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <rect x="4" y="3" width="16" height="18" rx="1.5" />
+      <path d="M9 7h.01M13 7h.01M9 11h.01M13 11h.01M9 15h.01M13 15h.01" />
+      <path d="M10 21v-3h4v3" />
+    </svg>
+  );
+}
+
+function UserIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <circle cx="12" cy="8" r="3.25" />
+      <path d="M5 20a7 7 0 0 1 14 0" />
+    </svg>
+  );
+}
+
+function UsersIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <circle cx="9" cy="9" r="3" />
+      <path d="M3 19a6 6 0 0 1 12 0" />
+      <circle cx="17" cy="8" r="2.25" />
+      <path d="M16 13a5 5 0 0 1 5 5" />
+    </svg>
+  );
+}
+
+function ActivityIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M3 12h4l3-7 4 14 3-7h4" />
+    </svg>
+  );
+}
+
+function FolderIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
+  );
+}
+
+function FolderOpenIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H3z" />
+      <path d="M3 9h18l-2 8a2 2 0 0 1-2 1.5H5A2 2 0 0 1 3 17z" />
+    </svg>
+  );
+}
+
+function EyeOffIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M3 3l18 18" />
+      <path d="M10.6 6.1A11 11 0 0 1 12 6c5 0 9 4 10 6a13 13 0 0 1-3 3.5" />
+      <path d="M6.5 7.5A13 13 0 0 0 2 12c1 2 5 6 10 6a11 11 0 0 0 4-.7" />
+      <path d="M9.5 9.5a3 3 0 0 0 4.2 4.2" />
+    </svg>
+  );
+}
+
+function KeyIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <circle cx="8" cy="15" r="3" />
+      <path d="M10.1 12.9 21 2" />
+      <path d="M16 7l3 3" />
+      <path d="M19 4l2 2" />
+    </svg>
+  );
+}
+
+function FileTextIcon({ className }: IconProps): React.ReactElement {
+  return (
+    <svg {...svgProps(className)}>
+      <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+      <path d="M14 3v6h6" />
+      <path d="M8 13h8M8 17h6" />
+    </svg>
+  );
+}
+
 type TreeRowProps = {
   depth: number;
   expandable?: boolean;
   expanded?: boolean;
   onToggle?: () => void;
   label: React.ReactNode;
-  icon?: string;
+  icon?: React.ReactNode;
   active?: boolean;
   onClick?: () => void;
   trailing?: React.ReactNode;
@@ -264,7 +380,7 @@ export function AdminSidebarView(
             <div className={groupHeader}>Platform</div>
             <TreeRow
               depth={0}
-              icon="⚙"
+              icon={<CogIcon />}
               label="Master console"
               active={isActive({ kind: "master" })}
               onClick={() => select({ kind: "master" })}
@@ -277,7 +393,7 @@ export function AdminSidebarView(
             <div className={groupHeader}>Organization</div>
             <TreeRow
               depth={0}
-              icon="🏢"
+              icon={<BuildingIcon />}
               label={activeOrg.name}
               expandable
               expanded={orgExpanded}
@@ -288,21 +404,21 @@ export function AdminSidebarView(
               <>
                 <TreeRow
                   depth={1}
-                  icon="📋"
+                  icon={<UserIcon />}
                   label="People"
                   active={isActive({ kind: "org-people" })}
                   onClick={() => select({ kind: "org-people" })}
                 />
                 <TreeRow
                   depth={1}
-                  icon="👥"
+                  icon={<UsersIcon />}
                   label="Teams"
                   active={isActive({ kind: "org-teams" })}
                   onClick={() => select({ kind: "org-teams" })}
                 />
                 <TreeRow
                   depth={1}
-                  icon="📜"
+                  icon={<ActivityIcon />}
                   label="Activity"
                   active={isActive({ kind: "org-activity" })}
                   onClick={() => select({ kind: "org-activity" })}
@@ -340,7 +456,7 @@ export function AdminSidebarView(
                       >
                       <TreeRow
                         depth={1}
-                        icon={isHidden ? "🙈" : "📁"}
+                        icon={isHidden ? <EyeOffIcon /> : <FolderIcon />}
                         label={
                           <span>
                             {sp.name}
@@ -377,7 +493,7 @@ export function AdminSidebarView(
                               title="Open space settings"
                               data-testid={`space-settings-trigger-${sp.spaceId}`}
                             >
-                              ⚙
+                              <CogIcon />
                             </button>
                           ) : null
                         }
@@ -386,7 +502,7 @@ export function AdminSidebarView(
                         <>
                           <TreeRow
                             depth={2}
-                            icon="👥"
+                            icon={<UsersIcon />}
                             label="Members"
                             active={isActive({
                               kind: "space-members",
@@ -440,7 +556,7 @@ export function AdminSidebarView(
                                     <React.Fragment key={ws.id}>
                                       <TreeRow
                                         depth={2}
-                                        icon="📂"
+                                        icon={<FolderOpenIcon />}
                                         label={ws.name}
                                         expandable
                                         expanded={wsExpanded}
@@ -451,7 +567,7 @@ export function AdminSidebarView(
                                         <>
                                           <TreeRow
                                             depth={3}
-                                            icon="🔑"
+                                            icon={<KeyIcon />}
                                             label="Shares"
                                             active={isActive({
                                               kind: "workspace-shares",
@@ -481,7 +597,7 @@ export function AdminSidebarView(
                                               <React.Fragment key={pr.id}>
                                                 <TreeRow
                                                   depth={3}
-                                                  icon="📄"
+                                                  icon={<FileTextIcon />}
                                                   label={pr.name}
                                                   expandable
                                                   expanded={false}

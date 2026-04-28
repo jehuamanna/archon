@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -23,7 +25,7 @@ import {
   DEFAULT_MAX_BYTES as GET_IMAGE_NOTE_DEFAULT_MAX_BYTES,
   handleGetImageNote,
 } from "./get-image-note.js";
-import { installSkill, writeAgentsMd } from "./install-skill.js";
+import { installSkill } from "./install-skill.js";
 import { extractReferencedLinksFromMarkdown } from "./note-link-extract.js";
 import {
   canonicalVfsPathFromRow,
@@ -359,8 +361,9 @@ const installSkillInput = z.object({
     ),
   repoPath: z
     .string()
-    .optional()
-    .describe("Absolute path to the repo root. Defaults to the MCP server's process.cwd()."),
+    .describe(
+      "Absolute path to the caller's project repo root. Required. Skills are written under this path into the provider dot-dirs (`.claude/skills`, `.cursor/rules`, `.windsurf/rules`, `.github/instructions`, `.agents/skills`, `.opencode/agents`). The MCP server runs as a long-lived global process and cannot infer the caller's cwd — pass the agent's current working directory.",
+    ),
   providers: z
     .array(
       z.enum([
@@ -370,19 +373,11 @@ const installSkillInput = z.object({
         "copilot",
         "antigravity",
         "opencode",
-        "pi",
-        "codex",
       ]),
     )
     .optional()
     .describe(
-      "Subset of providers to install for. Default: all 8. Canonical `skills/<name>/SKILL.md` is always written regardless of this list. `pi` and `codex` are no-op provider flags that simply acknowledge coverage via repo-root AGENTS.md.",
-    ),
-  skipAgentsMd: z
-    .boolean()
-    .optional()
-    .describe(
-      "When true, do not create or touch <repoPath>/AGENTS.md. Default: false. Incompatible with `providers` that include only `codex` or only `pi`, since those depend on AGENTS.md for discovery.",
+      "Editors/IDEs to install the skill for. Available options: \"claude\" (.claude/skills), \"cursor\" (.cursor/rules), \"windsurf\" (.windsurf/rules), \"copilot\" (.github/instructions), \"antigravity\" (.agents/skills), \"opencode\" (.opencode/agents). If OMITTED, the tool returns a `needsUserInput` response listing the editor options — the agent must surface those options to the user in chat, get their pick, and re-invoke with `providers` set. Default-on-no-preference is [\"claude\"]. Pass an array to target multiple editors at once.",
     ),
 });
 
@@ -948,31 +943,72 @@ export function createArchonMcpServer(
     "archon_install_skill",
     {
       description:
-        "Install skills from Archon into the local repo. Default (no args): resolve Space \"Archon\" → Workspace \"Archon\" → Project \"Skills\" → Note \"SKILLS.md\" and install every direct child. If that canonical path is missing or empty, the tool returns a guided error telling the user how to populate it (no migration, no fallback). Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes canonical `skills/<name>/SKILL.md` plus 6 provider dot-dirs (`.claude/skills`, `.cursor/rules`, `.windsurf/rules`, `.github/instructions`, `.agents/skills`, `.opencode/agents`); `pi` and `codex` are covered via repo-root AGENTS.md (written once per run unless `skipAgentsMd: true`). Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
+        "Install skills from Archon into the caller's local repo. Caller must pass `repoPath` (absolute path to their project repo root); the MCP server runs as a long-lived global process and does not know the caller's cwd. IMPORTANT — interactive editor pick: if `providers` is OMITTED on the call, the tool short-circuits and returns `{ ok: false, needsUserInput: true, field: \"providers\", question, options[] }`. When the agent receives that response it MUST present the options to the user in chat (claude / cursor / windsurf / copilot / antigravity / opencode), let them pick one or more, and then re-invoke with `providers: [...]`. The default if the user has no preference is `[\"claude\"]`. Only when `providers` is set does the tool actually install. Default scan path (no scan args): Space \"Archon\" → Workspace \"Archon\" → Project \"Skills\" → Note \"SKILLS.md\" and install every direct child. If that canonical path is missing or empty, the tool returns a guided error telling the user how to populate it (no migration, no fallback). Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes the SKILL.md content into each selected provider's dot-directory (`.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, `.windsurf/rules/<name>.md`, `.github/instructions/<name>.instructions.md`, `.agents/skills/<name>/SKILL.md`, `.opencode/agents/<name>.md`). No canonical `<repo>/skills/` source and no repo-root `AGENTS.md` are written. Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
       inputSchema: installSkillInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const repoPath = args.repoPath ?? process.cwd();
-        const skipAgentsMd = args.skipAgentsMd === true;
-
-        // Reject skipAgentsMd + providers that rely exclusively on AGENTS.md.
-        if (skipAgentsMd && Array.isArray(args.providers) && args.providers.length > 0) {
-          const agentsMdOnly = args.providers.every(
-            (p) => p === "codex" || p === "pi",
+        const repoPath = path.resolve(args.repoPath);
+        const home = path.resolve(os.homedir());
+        const fsRoot = path.parse(repoPath).root;
+        if (repoPath === home || repoPath === fsRoot) {
+          throw new Error(
+            `archon_install_skill: refusing to install into ${repoPath}. Pass repoPath as your project repo root, not your home directory or filesystem root.`,
           );
-          if (agentsMdOnly) {
-            throw new Error(
-              `archon_install_skill: skipAgentsMd=true is incompatible with providers=[${args.providers.join(", ")}] — those providers have no dot-directory and depend on AGENTS.md for discovery. Drop skipAgentsMd or include at least one dot-dir provider.`,
-            );
-          }
+        }
+
+        // Elicit-in-chat: when the caller did not specify `providers`, return a
+        // structured "needs user input" response so the LLM asks the user which
+        // editor(s) to install for. The LLM then re-invokes this tool with the
+        // chosen providers. Default-on-no-preference is ["claude"].
+        if (args.providers === undefined) {
+          return jsonResult({
+            ok: false as const,
+            needsUserInput: true as const,
+            field: "providers",
+            question:
+              "Which editor(s) should this skill be installed for? Pick one or more.",
+            options: [
+              {
+                value: "claude",
+                label: "Claude Code",
+                path: ".claude/skills/<name>/SKILL.md",
+                default: true,
+              },
+              {
+                value: "cursor",
+                label: "Cursor",
+                path: ".cursor/rules/<name>.mdc",
+              },
+              {
+                value: "windsurf",
+                label: "Windsurf",
+                path: ".windsurf/rules/<name>.md",
+              },
+              {
+                value: "copilot",
+                label: "GitHub Copilot",
+                path: ".github/instructions/<name>.instructions.md",
+              },
+              {
+                value: "antigravity",
+                label: "Google Antigravity",
+                path: ".agents/skills/<name>/SKILL.md",
+              },
+              {
+                value: "opencode",
+                label: "OpenCode",
+                path: ".opencode/agents/<name>.md",
+              },
+            ],
+            instruction:
+              "Present the above options to the user in chat. Ask which editor(s) they want this skill installed for. After they answer, re-invoke `archon_install_skill` with `providers` set to an array of the chosen `value`s (e.g. [\"claude\"], [\"claude\",\"cursor\"]). If the user has no preference or asks for the default, pass [\"claude\"].",
+          });
         }
 
         // Branch 1: explicit noteId — install that one note, bypass scan.
-        // Does NOT touch AGENTS.md (single-note installs are targeted; the running
-        // index is only rebuilt by the default/scan branch).
         if (args.noteId && args.noteId.length > 0) {
           const note = await client.getNote(args.noteId);
           if (typeof note.content !== "string" || note.content.length === 0) {
@@ -1169,25 +1205,11 @@ export function createArchonMcpServer(
             }
           }
 
-          // Rebuild the Archon-managed block inside <repoPath>/AGENTS.md with
-          // the full list of skills we just installed. Idempotent.
-          const agentsMd =
-            !skipAgentsMd && installed.length > 0
-              ? writeAgentsMd(
-                  repoPath,
-                  installed.map((r) => ({
-                    name: r.skillName,
-                    description: r.description,
-                  })),
-                )
-              : null;
-
           return jsonResult({
             ok: true as const,
             mode: (args.skillName ? "filtered" : "scan") as
               | "filtered"
               | "scan",
-            agentsMd,
             resolved: {
               spaceName,
               spaceId: targetSpaceId,

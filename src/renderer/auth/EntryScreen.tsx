@@ -193,10 +193,11 @@ function MarketingHome({
               </div>
             </div>
             <div className={card}>
-              <div className="text-[12px] font-semibold">Solo builders & thinkers</div>
+              <div className="text-[12px] font-semibold">Individual builders & thinkers</div>
               <div className="mt-1 text-[12px] leading-5 text-muted-foreground">
-                Founders, designers, researchers, writers — anyone whose work lives in notes and
-                wants a serious tool for it.
+                CEOs, CTOs, Directors, Engineering, Sales, Marketing, HR, Finance, Operations — any
+                decision-maker whose work lives in notes and wants a serious tool that talks to
+                agents.
               </div>
             </div>
           </div>

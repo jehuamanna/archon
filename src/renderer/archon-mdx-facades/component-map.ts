@@ -7,7 +7,7 @@ import { getArchonMdxSdkFacadeComponentMap } from "./mdx-sdk";
  * JSX tags available in MDX. Three virtual import facades resolve here:
  * - `@archon/ui`      → self-contained widgets with local React state (Alert, Badge, Counter, Disclosure, Separator, TextInput, Tabs…)
  * - `@archon/date`    → date formatting helper `<ArchonFormatIso>`.
- * - `@archon/mdx-sdk` → project-state-backed components (Input, Select, Checkbox, PushButton, Value, List, Table, Chart, NoteEmbed, Markdown, Form, Code, Slideshow, Button state-counter).
+ * - `@archon/mdx-sdk` → project-state-backed components (Input, Select, Checkbox, PushButton, Value, List, Table, Chart, NoteEmbed, Markdown, Form, Code, Slideshow, DeckPicker, Button state-counter).
  *
  * `@archon/mdx-sdk`'s `Button` subsumes `@archon/ui`'s — a string `onClick=…`
  * makes it a project-state counter, otherwise it behaves as the old plain button.
