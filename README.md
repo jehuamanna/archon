@@ -1,6 +1,6 @@
 # Archon
 
-A programmable knowledge system that unifies notes, code, and data into a single workspace. Archon ships as an Electron desktop app, a Next.js web client, and a Fastify + MongoDB sync API — all driven by a pluggable plugin runtime and exposed to AI assistants via the Model Context Protocol (MCP).
+A programmable knowledge system that unifies notes, code, and data into a single workspace. Archon ships as an Electron desktop app, a Next.js web client, and a Fastify + Postgres sync API — all driven by a pluggable plugin runtime and exposed to AI assistants via the Model Context Protocol (MCP).
 
 **Status:** experimental / proof of concept (`v0.0.0-experimental.5`).
 
@@ -46,7 +46,7 @@ This is an npm **workspaces** monorepo.
 ```
 apps/
   archon-web/            Next.js web client (App Router, React 19)
-  archon-sync-api/       Fastify + MongoDB sync API (auth, workspaces, notes, assets)
+  archon-sync-api/       Fastify + Postgres sync API (auth, workspaces, notes, assets)
 packages/
   archon-platform/       Platform ports: RemoteApi, LocalStore, DesktopHost
   archon-mcp/            MCP server (stdio / SSE / Streamable HTTP) — @archon-studio/mcp
@@ -76,7 +76,7 @@ Top-level Electron Forge config lives in `forge.config.js`; webpack configs unde
 
 **Web:** Next.js (App Router), React 19, Tailwind CSS 4, RxDB, Dexie (IndexedDB).
 
-**Backend:** Fastify 5, MongoDB 6, JWT auth, AWS S3 (optional asset storage), Multer/multipart uploads.
+**Backend:** Fastify 5, Postgres 16, Drizzle ORM, JWT auth, AWS S3 (optional asset storage), Multer/multipart uploads.
 
 **AI/Agents:** Model Context Protocol SDK (`@modelcontextprotocol/sdk`), stdio + SSE + Streamable HTTP transports.
 
@@ -90,9 +90,9 @@ Top-level Electron Forge config lives in `forge.config.js`; webpack configs unde
 
 - **Node.js** 20+ (22 LTS recommended).
 - **npm** 10+.
-- **MongoDB** 6+ running locally, or a MongoDB Atlas connection string. The sync API needs it; pure desktop mode does not.
+- **Postgres** 14+ running locally, or a hosted Postgres connection string. The sync API needs it; pure desktop mode does not.
 - **Python**, **make**, a **C/C++ toolchain** — required by `electron-rebuild` for native modules (`bcrypt`, etc.). On Debian/Ubuntu: `sudo apt install build-essential python3`.
-- **Docker** + Docker Compose (optional) — for the containerized stack, local MongoDB, and CI.
+- **Docker** + Docker Compose (optional) — for the containerized stack, local Postgres, and CI.
 
 On Linux, Electron also needs a few system libraries (`libnss3`, `libgbm1`, `libasound2`, …). The `scripts/install-linux-deb.js` helper can install the packaged `.deb` with dependencies resolved.
 
@@ -108,7 +108,7 @@ npm install
 cp .env.example .env
 
 # 3. Start the pieces you want (each in its own terminal)
-npm run sync-api       # Fastify API on :4010 (needs MongoDB reachable)
+npm run sync-api       # Fastify API on :4010 (needs Postgres reachable)
 npm run dev:web        # Next.js web client on :3000
 npm start              # Electron desktop shell (loads the web client in dev)
 ```
@@ -130,8 +130,8 @@ Rebuild native modules later with `npm run rebuild:electron`.
 ### Sync API (`@archon/sync-api`)
 
 ```bash
-npm run sync-api                 # dev mode, reads MONGODB_URI from .env
-npm run sync-api:local           # forces MONGODB_URI=mongodb://127.0.0.1:27017
+npm run sync-api                 # dev mode, reads DATABASE_URL from .env
+npm run sync-api:local           # forces DATABASE_URL=postgres://archon:archon@localhost:5432/archon_sync
 npm run sync-api:start           # production-style start (NODE_ENV=production)
 ```
 
@@ -178,8 +178,7 @@ Key variables:
 
 | Variable | Purpose |
 |---|---|
-| `MONGODB_URI` | Mongo connection string. Default: `mongodb://127.0.0.1:27017` |
-| `MONGODB_DB` | Database name. Default: `archon_sync` |
+| `DATABASE_URL` | Postgres connection string. Default: `postgres://archon:archon@localhost:5432/archon_sync` |
 | `JWT_SECRET` | Signing key. **Minimum 32 chars in production** |
 | `PORT` / `HOST` | Sync API listener. Defaults: `4010` / `0.0.0.0` |
 | `CORS_ORIGIN` | Sync API CORS. `true` = permissive (dev only) |
@@ -206,7 +205,7 @@ npm run test:e2e                 # Playwright end-to-end (web)
 npm run test:e2e:ci              # Same, with chromium install
 ```
 
-The sync API integration tests (`apps/archon-sync-api/src/integration-*.test.ts`) expect a reachable MongoDB; point `MONGODB_URI` at a test DB before running.
+The sync API integration tests (`apps/archon-sync-api/src/integration-*.test.ts`) expect a reachable Postgres; point `DATABASE_URL` (or `ARCHON_TEST_DATABASE_URL`) at a test DB before running.
 
 Lint:
 
@@ -243,7 +242,7 @@ Local container workflow:
 
 ```bash
 npm run docker:api:build         # build sync-api image
-npm run docker:api:up            # compose up with local MongoDB profile
+npm run docker:api:up            # compose up with local Postgres profile
 npm run docker:api:down          # tear it down
 npm run docker:logs              # follow compose logs
 ```

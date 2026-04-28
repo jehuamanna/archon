@@ -1,74 +1,35 @@
-# Gap Analysis — Current Note Pipeline vs. MDX Mini-App Plugin
+# MDX Mini-App — Implementation Map
 
-Baseline: `current-features.md`. Target: decisions table in the Prompts note.
+The original gap analysis (closed as v1) mapped each missing capability to the file that would deliver it. v1 has shipped; this doc is now an index from each capability to where it lives in the tree. Pair with `current-features.md` for the full inventory.
 
-## Target-by-target table
+## Capability → implementation
 
-| Target capability | What exists today | Delta for v1 |
-|---|---|---|
-| New note type `mdx` dispatched alongside `markdown`/`image` | Electron renderer has a stub (`src/core/register-builtin-mdx-note-type.ts:17`); `WpnNoteDoc.type` is open-string (`db.ts:77`). Web-side dispatch is thin. | Add a web-side note-type registry in `apps/archon-web/app/mdx/` that mounts the runtime for `type === "mdx"`. |
-| Client-side MDX compile with content-hash cache | `@mdx-js/mdx@^3.1.1` present; no compile wiring on the web. | New `apps/archon-web/lib/mdx/compile-cache.ts` using `dexie@^4.4.2`. |
-| Expression sandbox (no `fetch`, no `window`, etc.) | `ses@^1.15.0` in deps; not used for MDX today. | New `apps/archon-web/lib/mdx/sandbox.ts` using SES `Compartment`. |
-| SDK: `useProjectState`, `useNote`, `useQuery`, etc. | None. Existing `archon-mdx-facades` (Electron) has `@archon/ui`, `@archon/date` — good pattern to mirror. | New virtual module `@archon/mdx-sdk` surfaced to MDX compile. |
-| Per-project KV state (chunked) in Mongo | Mongo pool, idempotent-migration system, auth middleware, permission resolver all exist. | New collections `mdx_state_head` + `mdx_state_chunks`. New `registerMdxStateRoutes(app)`. |
-| Live updates via Change Streams → WebSocket | No WebSocket layer in Fastify. | Add `@fastify/websocket` (or raw `ws`) and a new ws handler that tails `mdx_state_head` change streams. |
-| Drag-and-drop builder with human-readable MDX round-trip | `@dnd-kit/*` + `@uiw/react-codemirror` in deps; no builder code. | New `apps/archon-web/app/mdx/builder/*`. |
-| Owner-only authoring | `permission-resolver.ts` + `space-auth.ts` already compute owner role. | Consume the same helpers from the new note-create flow and the builder mount gate. |
-| State excluded from v2 bundles | `wpn-import-export-routes.ts` handles bundle IO; it does not touch state collections. | No change needed — state layer simply doesn't participate. |
-| Read-only-on-import for non-owners | Import flow assigns `userId` to the importer; no readOnly flag today. | Add `metadata.readOnlyForImporter: true` when a non-owner imports `mdx` notes; the builder refuses to mount when set. |
+| Capability | Where it lives |
+|---|---|
+| Web-side note-type dispatch for `mdx` | `apps/archon-web/app/` (note-type registry) — `wpnNotes.type` in `apps/archon-sync-api/src/db/schema.ts:376` is open-string, so no schema change was needed |
+| Client-side MDX compile with content-hash cache | `apps/archon-web/lib/mdx/compile.ts` + `compile-cache.ts` (sha256-keyed, IndexedDB via `dexie`) |
+| Expression sandbox (no `fetch`, no `window`) | `apps/archon-web/lib/mdx/sandbox.ts` (SES `Compartment`) |
+| `useProjectState`, `useNote`, `useQuery` SDK | `packages/archon-mdx-sdk-runtime/src/hooks.ts` + `index.ts`; schema in `packages/archon-mdx-sdk` (npm `@nodex-studio/mdx-sdk`); facade name `@archon/mdx-sdk` enforced by the renderer |
+| Per-project KV state on Postgres | `mdxStateHead` (`apps/archon-sync-api/src/db/schema.ts:511`) and `mdxStateChunks` (`schema.ts:534`); service in `apps/archon-sync-api/src/mdx-state/service.ts` |
+| Live updates over WebSocket | `pg_notify('mdx:<projectId>', …)` in `mdx-state/notify.ts:35`; refcounted `LISTEN` channel manager in `mdx-state/ws.ts`; routes registered at `routes.ts:143` (`registerMdxStateWsRoutes`) |
+| HTTP state routes | `mdx-state/routes.ts` (`registerMdxStateRoutes` — `routes.ts:142`) |
+| Drag-and-drop builder with MDX round-trip | `apps/archon-web/app/mdx/builder/` (uses `@dnd-kit/*` + `@uiw/react-codemirror`) |
+| Owner-only authoring gate | Reuses `permission-resolver.ts` + `space-auth.ts` from the existing WPN flow |
+| Exclude state from v2 bundles | `wpn-import-export-routes.ts` does not touch the `mdx_state_*` tables |
+| Read-only-on-import for non-owners | `metadata.readOnlyForImporter: true` is set on import; the builder refuses to mount when present |
 
-## Dependency graph
+## Reusable building blocks (referenced above)
 
-```mermaid
-graph TD
-  A[Prompt 1: audit] --> B[Prompt 3: SDK API]
-  A --> C[Prompt 7: builder UX]
-  A --> D[Prompt 4: Mongo schema]
-  D --> E[Prompt 5: storage impl]
-  B --> F[Prompt 6: MDX runtime]
-  E --> F
-  F --> G[Prompt 8: builder impl]
-  B --> G
-  C --> G
-  E --> H[Prompt 9: security review]
-  F --> H
-  G --> H
-  E --> I[Prompt 10: rollout]
-  F --> I
-  B --> J[Prompt 11: docs]
-  E --> J
-```
+- **Auth** — `apps/archon-sync-api/src/auth.ts`: `signToken` (`auth.ts:57`), `signAccessToken` (`auth.ts:69`), `verifyToken` (`auth.ts:103`), `requireAuth` (`auth.ts:145`).
+- **Postgres pool** — `apps/archon-sync-api/src/pg.ts`: `ensurePgConnected` (`pg.ts:41`), `getDb` (`pg.ts:64`), `withTx` (`pg.ts:84`), `acquireDedicatedClient` (`pg.ts:96`) for `LISTEN`.
+- **Schema + migrations** — `apps/archon-sync-api/src/db/schema.ts` and `apps/archon-sync-api/src/db/migrations/*.sql` (Drizzle-kit owns state).
+- **Permission resolver** — `apps/archon-sync-api/src/permission-resolver.ts`.
+- **Route aggregation** — `apps/archon-sync-api/src/routes.ts:120` (`registerRoutes`).
+- **App build** — `apps/archon-sync-api/src/build-app.ts:36` (`buildSyncApiApp`); `@fastify/websocket` is registered there.
+- **Virtual-module facade pattern** — `src/renderer/archon-mdx-facades/` (Electron prior art mirrored for the web).
 
-Build order:
+## Operational caveats (carried forward from v1 review)
 
-1. **SDK API + Mongo schema + builder UX** — can run in parallel; independent.
-2. **MDX runtime + storage impl** — depend on 1.
-3. **Builder impl** — depends on runtime + storage + UX spec.
-4. **Security review** — audits everything produced in 1–3.
-5. **Rollout + docs** — last, after everything else is stable.
-
-## Reusable inventory
-
-- **Auth**: `auth.ts:44-148` — token mint/verify, `requireAuth` middleware.
-- **Mongo pool**: `db.ts:142` — single client, `getActiveDb()`.
-- **Migration system**: `db.ts:303` (`_migrations` table) — add new `m_00x_mdx_state_indexes` here.
-- **Permission resolver**: `permission-resolver.ts` — owner/reader/writer resolution.
-- **Route aggregation**: `routes.ts:119` — add `registerMdxStateRoutes(app, …)` in that list.
-- **App build**: `build-app.ts:19` — the place to register `@fastify/websocket`.
-- **Virtual-module facade pattern**: `src/renderer/archon-mdx-facades/*` — mirror for web SDK.
-- **SES**: already in deps; no install.
-- **Bundle zip IO**: `archiver`, `unzipper`, `adm-zip` — state doesn't travel in bundles so we do nothing here.
-
-## Conflict flags
-
-- **No WebSocket layer in the sync-api today.** Fastify apps often deploy behind proxies that need sticky sessions for WS; flag for ops review.
-- **Electron MDX stub vs. web MDX runtime.** Different surfaces, different owners. v1 diverges deliberately; unify in a later cleanup.
-- **Web app thinness.** `apps/archon-web` today hosts only auth/invite/health. Adding a full builder + runtime roughly doubles that surface. Acceptable but worth flagging.
-- **Replica-set assumption.** Change Streams + transactions require a replica set. If production Mongo is single-node, phase 3+ blocks.
-
-## Review checkpoint
-
-Human must confirm before Phase 3:
-- Production Mongo is a replica set.
-- Adding `@fastify/websocket` (or a `ws` adapter) to `apps/archon-sync-api` is acceptable.
-- The `plugins/system/mdx-mini-app/` directory is the right home for the plugin manifest.
+- **Sticky sessions for WebSocket.** `@fastify/websocket` works behind any proxy that supports `Upgrade`; horizontal scaling needs sticky sessions or a pub/sub layer above `pg_notify`.
+- **Postgres reachability is hard required.** sync-api fails fast at boot if `DATABASE_URL` doesn't accept a `SELECT 1`.
+- **Non-owner imports of `mdx` notes** land read-only by design; the builder mount gate consumes the import metadata, not a separate flag.

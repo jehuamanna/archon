@@ -11,12 +11,7 @@ import { isUuid } from "./db/legacy-id-map.js";
 
 type NotificationRow = typeof notifications.$inferSelect;
 
-/**
- * Cursor parity with the legacy Mongo behavior: paginated newest-first by
- * createdAt. The Mongo route used `_id`-based cursors (ObjectId comparable
- * via createdAt prefix). On PG we use `created_at` directly which is
- * identical in ordering and cleaner across legacy/new ids.
- */
+/** Paginated newest-first by createdAt. */
 function serialize(d: NotificationRow): Record<string, unknown> {
   return {
     id: d.id,

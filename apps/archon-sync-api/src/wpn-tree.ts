@@ -1,5 +1,5 @@
 /**
- * Tree move logic (port of `src/core/wpn/wpn-note-move.ts`) for Mongo WPN writes.
+ * Tree move logic for WPN writes.
  */
 export type NoteMovePlacement = "before" | "after" | "into";
 

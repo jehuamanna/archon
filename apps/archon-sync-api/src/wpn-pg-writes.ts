@@ -1,10 +1,7 @@
 /**
- * Postgres counterpart of `wpn-mongo-writes.ts`. Mirrors the export surface so
- * route handlers can swap mongo* → pg* with a one-line change. All
- * multi-statement operations run inside a single `withTx` so partial failures
- * don't leave the tree in a corrupt state.
+ * Postgres WPN writes. All multi-statement operations run inside a single
+ * `withTx` so partial failures don't leave the tree in a corrupt state.
  *
- * Key differences vs the Mongo version:
  *   - All ids are uuid; cycle prevention for tree moves runs as a recursive
  *     CTE inside the same transaction (no app-side guards).
  *   - On every note write (create/update/delete subtree) the helper
@@ -31,7 +28,7 @@ import {
 } from "./wpn-tree.js";
 import { notifyRealtime } from "./realtime/notify.js";
 
-// ---------- public surface (kept identical to wpn-mongo-writes.ts) ----------
+// ---------- public surface ----------
 
 export const WPN_DUPLICATE_NOTE_TITLE_MESSAGE =
   "Note title already exists. Try a different title.";
@@ -110,7 +107,7 @@ function collectSubtreePreorder(rows: NoteRow[], rootId: string): string[] {
   return out;
 }
 
-/** Public projection (same shape Mongo writers returned). */
+/** Public projection. */
 function publicWorkspace(w: typeof wpnWorkspaces.$inferSelect): {
   id: string;
   orgId?: string;

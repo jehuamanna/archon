@@ -109,7 +109,7 @@ export function createLocalVaultWindow(): BrowserWindow {
   return createBrowserWindowWithBackend("file");
 }
 
-/** Mongo/sync-api WPN in renderer; must not use file vault IPC for WPN mutations. */
+/** Cloud (sync-api) WPN in renderer; must not use file vault IPC for WPN mutations. */
 export function createCloudWpnWindow(): BrowserWindow {
   return createBrowserWindowWithBackend("cloud");
 }

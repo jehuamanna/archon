@@ -7,7 +7,7 @@
  * service.ts + rate-limit.ts + the routes layer share.
  */
 
-/** Thresholds — mirror `docs/mdx-notes/mongo-schema.md`. */
+/** Size thresholds for inline vs chunked mdx-state values. */
 export const INLINE_THRESHOLD_BYTES = 4 * 1024 * 1024;
 export const CHUNK_SIZE_BYTES = 8 * 1024 * 1024;
 export const KEY_MAX_BYTES = 256 * 1024 * 1024;
@@ -55,13 +55,4 @@ export interface MdxStateWsCursorRow {
  */
 export function serializedSize(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value ?? null), "utf8");
-}
-
-/**
- * Compatibility stub — db.ts (legacy Mongo path) imports this for its
- * connect-time index ensurer. drizzle-kit owns PG schema/index state, so
- * this is a no-op on PG. Removed when db.ts is deleted in cleanup.
- */
-export async function ensureMdxStateIndexes(_db: unknown): Promise<void> {
-  // No-op on Postgres — drizzle migrations create the indexes.
 }

@@ -1,5 +1,5 @@
 /**
- * pg_notify wrapper — replaces Mongo Change Streams for the mdx-state WS.
+ * pg_notify wrapper for the mdx-state WS.
  *
  * Channel naming: `mdx:<projectId>` (lowercase letters, digits, underscore,
  * hyphen — uuid-shaped, safe for PG identifiers without quoting). Payload

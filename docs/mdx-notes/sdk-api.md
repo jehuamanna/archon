@@ -23,7 +23,7 @@ No `workspace` handle. No `note` write handle.
 ## Hooks
 
 ```ts
-// Primary state primitive — each key is its own Mongo doc.
+// Primary state primitive — each key is its own row in mdx_state_head.
 export function useProjectState<T>(
   key: string,
   initial?: T,

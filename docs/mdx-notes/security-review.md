@@ -30,7 +30,7 @@ None identified. The surfaces most likely to be High (`fetch` credentials, MDX i
 
 - **M-3. In-memory rate limit does not survive horizontal scaling.**
   `rate-limit.ts`'s `buckets` Map lives in the process. Running multiple sync-api instances behind a load balancer multiplies the effective budget by the instance count. Not a security hole per se, but effectively turns the 50-burst cap into `50 × N`.
-  **Fix:** back the bucket state with Mongo (collection `mdx_state_rate_buckets`) for v1.1, or a Redis counter.
+  **Fix:** back the bucket state with a `mdx_state_rate_buckets` table in Postgres for v1.1, or a Redis counter.
 
 ### Low
 

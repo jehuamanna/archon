@@ -1,14 +1,11 @@
 /**
- * Auth boundary translation (Q1=B resolution).
+ * Auth boundary translation.
  *
- * Pre-cutover JWTs and MCP device tokens carry 24-char Mongo ObjectId hex in
- * `sub`, `activeOrgId`, `activeSpaceId`. Post-cutover, every entity has a
- * freshly minted `uuid` PK and a permanent `legacy_object_id_map` entry that
- * lets the boundary translate the legacy form to its UUID equivalent.
- *
- * `verifyAndTranslate` wraps `verifyToken` from `auth.ts` and post-processes
- * the payload — handlers downstream of this point only see UUIDs. Tokens
- * issued post-cutover (already UUID `sub`) skip translation; the LRU in
+ * Some pre-existing JWTs and MCP device tokens carry 24-char legacy hex IDs
+ * in `sub`, `activeOrgId`, `activeSpaceId`. Each entity has a UUID PK and a
+ * permanent `legacy_object_id_map` entry that lets the boundary translate
+ * the legacy form to its UUID equivalent so handlers downstream see UUIDs
+ * only. Tokens issued with UUID `sub` skip translation; an LRU in
  * `legacy-id-map.ts` keeps the warm-cache path cheap.
  */
 import { verifyToken, type JwtPayload, type RefreshJwtPayload } from "./auth.js";

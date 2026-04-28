@@ -1,5 +1,5 @@
 /**
- * When the web app uses sync-api for WPN (Mongo) and the user has cloud sync tokens,
+ * When the web app uses sync-api for WPN and the user has cloud sync tokens,
  * we treat that as a signed-in cloud session. If the browser is offline, WPN mutations
  * and durable chrome persistence are blocked (read-only until online).
  */
@@ -27,7 +27,7 @@ function syncWpnUsesSyncApiEnv(): boolean {
 
 const resolveSyncBase = createSyncBaseUrlResolver();
 
-/** Web UI configured for Mongo WPN via sync-api and user has an access token. */
+/** Web UI configured for cloud WPN via sync-api and user has an access token. */
 export function isSignedInCloudWpnWeb(): boolean {
   if (typeof window === "undefined") {
     return false;

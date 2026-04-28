@@ -7,7 +7,7 @@
  * silently misses them — which is how the `jehu` note's embedder failed
  * to show up in `archon_backlinks`.
  *
- * This helper is pure (no Mongo, no Fastify) so the wpn-routes module can
+ * This helper is pure (no DB, no Fastify) so the wpn-routes module can
  * pre-compute a per-target lookup once and then call `contentReferencesTargetViaVfs`
  * on each candidate note's markdown content.
  *

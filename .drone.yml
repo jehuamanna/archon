@@ -1,6 +1,6 @@
 # Drone pipelines for Archon (local drone-runner-docker; GitHub as Git + OAuth provider).
 # Default: lint + unit tests on push/PR to main.
-# Mongo service: sync-api integration test (integration-auth-wpn.test.ts) runs instead of skipping.
+# Postgres service: sync-api integration tests run instead of skipping.
 # Tags v*: same CI gate; full multi-OS releases stay in .github/workflows/release.yml unless you add runners.
 
 kind: pipeline
@@ -16,16 +16,20 @@ trigger:
     - master
 
 services:
-  - name: mongo
-    image: mongo:7
+  - name: postgres
+    image: postgres:16
+    environment:
+      POSTGRES_USER: archon
+      POSTGRES_PASSWORD: archon
+      POSTGRES_DB: archon_sync
     ports:
-      - 27017
+      - 5432
 
 steps:
   - name: install-lint-test
     image: node:22-bookworm
     environment:
-      MONGODB_URI: mongodb://mongo:27017
+      DATABASE_URL: postgres://archon:archon@postgres:5432/archon_sync
     commands:
       - apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates git
       - sleep 5
@@ -45,16 +49,20 @@ trigger:
     - refs/tags/v*
 
 services:
-  - name: mongo
-    image: mongo:7
+  - name: postgres
+    image: postgres:16
+    environment:
+      POSTGRES_USER: archon
+      POSTGRES_PASSWORD: archon
+      POSTGRES_DB: archon_sync
     ports:
-      - 27017
+      - 5432
 
 steps:
   - name: install-lint-test
     image: node:22-bookworm
     environment:
-      MONGODB_URI: mongodb://mongo:27017
+      DATABASE_URL: postgres://archon:archon@postgres:5432/archon_sync
     commands:
       - apt-get update && apt-get install -y --no-install-recommends python3 make g++ ca-certificates git
       - sleep 5

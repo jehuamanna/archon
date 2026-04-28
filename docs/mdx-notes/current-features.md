@@ -1,90 +1,86 @@
-# Current-Feature Audit — Note Pipeline (Baseline for MDX Mini-App Plugin)
+# Current-Feature Inventory — Note Pipeline
 
-Audit of the `markdown` / `image` / `mdx` note pipeline as it exists today. The new MDX mini-app plugin will slot in alongside. Every claim below cites `path:line`.
+Snapshot of the `markdown` / `image` / `mdx` note pipeline as it stands today. Every claim cites `path:line`. The MDX mini-app described in earlier planning docs has shipped end-to-end and is reflected here as a current feature, not a gap.
 
-## 1. Note storage (backend: Fastify + MongoDB)
+## 1. Note storage (backend: Fastify + Postgres)
 
-| Feature | Entry points | Capability | Extension points | Limitations |
+| Feature | Entry points | Capability | Extension points | Notes |
 |---|---|---|---|---|
-| Mongo client pool | `apps/archon-sync-api/src/db.ts:142` (`connectMongo`) — `apps/archon-sync-api/src/db.ts:166` (`ensureMongoConnected`) | Single `MongoClient` singleton; pool size 100 (10 serverless). | `getActiveDb()` at `db.ts:787`; per-collection getters from `db.ts:581` onward. | Replica set status not asserted at connect; required for Change Streams / transactions (R3-Qc, R4-Qb). |
-| Idempotent migrations | `db.ts:303` (`runIdempotentMigrations`) | Keyed in `_migrations` collection (`db.ts:291`); backfills run on every startup. | Add a new `m_00x_*` fn + call site. | No down-migrations. |
-| Notes collection (WPN) | `db.ts:77` (`WpnNoteDoc`) — indexes at `db.ts:198-201` | Per-user note doc: `type: string`, `content`, `title`, `parent_id`, `project_id`. | `type` is open-string, so a new `mdx` type requires no schema change. | `type` enum enforced only at the API layer; backend accepts any string. |
-| AuthN: JWT bearer | `auth.ts:44` (`signToken`) — `auth.ts:122` (`authBearerHeader`) — `auth.ts:132` (`requireAuth`) | HS256 access + refresh. Secret from `ARCHON_JWT_SECRET`. | Call `signAccessToken(jwtSecret, payload)` to mint tokens for other purposes (e.g. WS tokens). | Single shared secret — no key rotation story. |
-| AuthZ: project access | `permission-resolver.ts` (whole file) + `space-auth.ts`, `org-auth.ts` | Resolves `{ canRead, canWrite, canManage }` for `(user, project)`. | Re-use in a new state-service middleware. | — |
-| App bootstrap | `build-app.ts:19` (`buildSyncApiApp`) | Registers CORS + all route modules; `app.ready()` before listen. | Add a new `registerMdxStateRoutes(app, …)` call in `routes.ts`. | — |
-| Route registry | `routes.ts:119` (`registerRoutes`) | Central aggregation of all `register*Routes(app, {jwtSecret})` calls. | Same pattern for any new router module. | — |
+| Postgres pool | `apps/archon-sync-api/src/pg.ts:41` (`ensurePgConnected`) — `pg.ts:64` (`getDb`) — `pg.ts:84` (`withTx`) | Singleton `pg.Pool` (size 100; 10 on serverless via `ARCHON_SYNC_API_SERVERLESS=1`). Drizzle ORM on top. | Acquire a dedicated `pg.Client` via `acquireDedicatedClient()` (`pg.ts:96`) for `LISTEN`. | Connection-string read from `DATABASE_URL`; fail-fast `SELECT 1` at boot. |
+| Schema + migrations | `apps/archon-sync-api/src/db/schema.ts` (Drizzle), `apps/archon-sync-api/src/db/migrations/*.sql` | Drizzle-kit owns the schema; migrations apply on deploy. | Add a Drizzle table in `schema.ts` and run `drizzle-kit generate`. | Forward-only migrations; rollback via a new migration. |
+| WPN tables | `wpnWorkspaces` (`schema.ts:316`), `wpnProjects` (`schema.ts:343`), `wpnNotes` (`schema.ts:376`) | UUID PKs, `type: text`, `content`, `title`, `parent_id`, `project_id`. | `type` is open-string, so a new note `type` requires no schema change. | `type` enum enforced at the API layer. |
+| AuthN: JWT bearer | `auth.ts:57` (`signToken`) — `auth.ts:69` (`signAccessToken`) — `auth.ts:103` (`verifyToken`) — `auth.ts:145` (`requireAuth`) | HS256 access + refresh. Secret from `JWT_SECRET`. | Call `signAccessToken(jwtSecret, payload)` for ad-hoc tokens (e.g. WS tokens). | Single shared secret; no key rotation story yet. |
+| AuthZ: project access | `permission-resolver.ts` + `space-auth.ts` + `org-auth.ts` | Resolves `{ canRead, canWrite, canManage }` for `(user, project)`. | Reuse from any new route handler. | — |
+| App bootstrap | `build-app.ts:36` (`buildSyncApiApp`) | Registers `@fastify/websocket` + CORS + all route modules. | Add `register*Routes(app, …)` calls in `routes.ts`. | — |
+| Route registry | `routes.ts:120` (`registerRoutes`) | Central aggregation of all `register*Routes(app, {jwtSecret})` calls. | Same pattern for any new router module. | — |
 
 ## 2. Note read/write API
 
 | Feature | Entry points | Notes |
 |---|---|---|
-| WPN read routes | `wpn-routes.ts` (see `registerWpnReadRoutes` in `routes.ts:126`) | Tree listing, single-note GET. Used for `useNote()` in MDX SDK. |
-| WPN write routes | `wpn-write-routes.ts` (`routes.ts:127`) | PATCH/POST notes; owner check upstream. Only workspace owners can create/update MDX notes per R1-5 — enforce in the existing owner path. |
-| Batch endpoint | `wpn-batch-routes.ts` (`routes.ts:128`) | Bulk writes — MDX mini-app state should **not** piggyback on this (separate collection). |
+| WPN read routes | `wpn-routes.ts` (`registerWpnReadRoutes` — `routes.ts:128`) | Tree listing, single-note GET. Powers `useNote()` in the MDX SDK. |
+| WPN write routes | `wpn-write-routes.ts` (`routes.ts:129`) | PATCH/POST notes; owner check enforced upstream. |
+| Batch endpoint | `wpn-batch-routes.ts` (`routes.ts:130`) | Bulk writes. MDX mini-app state stays out of this path (separate tables). |
 | Backlinks | `note-backlinks-vfs.ts` | Backlinks query used by `useBacklinks()` in the SDK. |
-| Image assets | `me-assets-routes.ts`, `image-asset-path.ts`, `image-note-metadata.ts`, plus `r2-client.ts` for R2/S3 | Existing image note type infrastructure; referenced as comparable complexity for MDX mini-app. |
+| Image assets | `me-assets-routes.ts`, `image-asset-path.ts`, `image-note-metadata.ts`, `r2-client.ts` for R2/S3 | Image note type infrastructure. |
 
-## 3. Existing MDX support (Electron renderer only — no web runtime yet)
+## 3. MDX support — web runtime + Electron
 
 | Feature | Entry points | Status |
 |---|---|---|
-| `mdx` note type registration (main process) | `src/core/register-builtin-mdx-note-type.ts:17` | Renders MDX as escaped pre-text — **placeholder**, no real compile. |
-| MDX virtual-module facades | `src/renderer/archon-mdx-facades/registry.ts:5` (`ARCHON_MDX_FACADE_IMPORTS = ["@archon/ui","@archon/date"]`) | Electron-renderer-only; resolved via `component-map.ts` / `ui.tsx`. **Good prior art to mirror for the web `@archon/mdx-sdk` module.** |
-| Plugin system | `packages/archon-plugin-ui/src/index.ts:33` (`PluginModuleDefinition` with `noteTypes?: string[]`) | Plugins can contribute new note types via `definePlugin(...)`. MDX mini-app will be a plugin contribution. |
-| SES sandbox | `ses@^1.15.0` in `package.json:173` | Already a dependency — available for expression-sandboxing on the web. |
+| Web MDX runtime | `apps/archon-web/lib/mdx/{compile,compile-cache,sandbox,renderer}.{ts,tsx}` | Compile-in-browser via `@mdx-js/mdx`, sha256-keyed cache in IndexedDB (`dexie`), expression sandbox via SES `Compartment`. |
+| Web MDX builder | `apps/archon-web/app/mdx/builder/` | Drag-and-drop builder using `@dnd-kit/*` + `@uiw/react-codemirror` with human-readable MDX round-trip. |
+| MDX SDK package | `packages/archon-mdx-sdk` (npm `@nodex-studio/mdx-sdk`), `packages/archon-mdx-sdk-runtime` (private `@archon/mdx-sdk-runtime`) | Authors import as `@archon/mdx-sdk`; the renderer enforces the facade name. Schema package and runtime are separate by design. |
+| MDX virtual-module facades (Electron) | `src/renderer/archon-mdx-facades/registry.ts:5` (`ARCHON_MDX_FACADE_IMPORTS = ["@archon/ui","@archon/date"]`) | Electron-renderer-only; resolved via `component-map.ts` / `ui.tsx`. Pattern mirrored on the web side. |
+| Plugin system | `packages/archon-plugin-ui/src/index.ts:33` (`PluginModuleDefinition` with `noteTypes?: string[]`) | Plugins contribute new note types via `definePlugin(...)`. |
+| SES sandbox | `ses` in root `package.json` | Dependency available for expression-sandboxing on the web. |
 
-## 4. Export / import (v2 bundles)
+## 4. mdx-state service (per-project KV with live updates)
 
 | Feature | Entry points | Notes |
 |---|---|---|
-| v2 bundle export | `wpn-import-export-routes.ts`, `archiver` (see `routes.ts:141`) | Streams project notes into a ZIP. State collection will be **excluded** (R2-Q9a). |
-| Conflict policy (image notes) | Commits `91f713a` + `38415d5`; see `image-note-metadata.ts` | `skip | overwrite | rename` enum; the per-key state layer mirrors this pattern on re-import. |
-| Import route | Same file. | Non-workspace-owner importing an `mdx` note produces a read-only marker per R3-Qe. |
+| Schema | `mdxStateHead` (`schema.ts:511`), `mdxStateChunks` (`schema.ts:534`) | Inline values up to `INLINE_THRESHOLD_BYTES` (4 MiB); larger values are chunked at `CHUNK_SIZE_BYTES` (8 MiB) with `headVersion`-filtered reads to avoid torn state. |
+| Service | `mdx-state/service.ts` | Inline + chunked write paths share one `withTx`. Each successful put fires `pg_notify('mdx:<projectId>', …)`. |
+| Notify | `mdx-state/notify.ts:35` (`notifyMdxState`) | `pg_notify` fanout; channel naming is `mdx:<projectId>`. |
+| HTTP routes | `mdx-state/routes.ts` (`registerMdxStateRoutes` — `routes.ts:142`) | Per-key get/put/delete with permission checks via `permission-resolver.ts`. |
+| WebSocket | `mdx-state/ws.ts` (`registerMdxStateWsRoutes` — `routes.ts:143`) | Refcounted `LISTEN` channel manager; one dedicated `pg.Client` per channel; clients receive payloads and re-fetch the head row. |
+| SDK hook | `packages/archon-mdx-sdk-runtime/src/hooks.ts` (`useProjectState`) | Optimistic local echo; reconciles on server ack. |
 
-## 5. Frontend surfaces
+## 5. Export / import (v2 bundles)
 
-| Surface | Where | Relevance to MDX plugin |
+| Feature | Entry points | Notes |
 |---|---|---|
-| **Electron renderer** (desktop) | `src/renderer/` | Has `archon-mdx-facades/` prior art. Out of scope per "forget Electron" (R1-6) but good reference. |
-| **Web app** (Next.js 16) | `apps/archon-web/` | `apps/archon-web/package.json:13` (`next: ^16.2.3`). **Target surface for this plugin.** |
-| Web app shell | `apps/archon-web/app/client-shell.tsx`, `client-shell-loader.tsx` | Mounts the `@archon/shell-ui` package. |
-| Shared shell UI | `packages/archon-shell-ui/src/index.tsx` (117 lines) | Entry point — note rendering dispatch lives here (or is a hole to add). |
+| v2 bundle export | `wpn-import-export-routes.ts`, `archiver` | Streams project notes into a ZIP. mdx-state tables are deliberately excluded. |
+| Conflict policy | `image-note-metadata.ts` and helpers in `export-import-helpers.ts` | `skip | overwrite | rename` enum applied uniformly. |
+| Import route | Same module | Non-owner imports of `mdx` notes land with a read-only marker; the builder refuses to mount in that state. |
+
+## 6. Frontend surfaces
+
+| Surface | Where | Notes |
+|---|---|---|
+| **Web app** (Next.js) | `apps/archon-web/` | Primary surface for note rendering, including the MDX runtime + builder. |
+| Web app shell | `apps/archon-web/app/` + `packages/archon-shell-ui` | Mounts the shared shell UI; note-type dispatch lives here. |
 | Plugin UI package | `packages/archon-plugin-ui/src/index.ts` | Plugin author API for slots, commands, note types. |
+| **Electron renderer** (desktop) | `src/renderer/` | Same plugin runtime; uses the `archon-mdx-facades/` virtual modules. |
 
-## 6. Dependencies already available (no new installs needed)
+## 7. Notable dependencies
 
-From `package.json`:
-- `@mdx-js/mdx@^3.1.1`, `@mdx-js/react@^3.1.1`, `remark-mdx@^3.1.1` — compile-in-browser ready
-- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/modifiers` — for the builder
-- `@codemirror/*` + `@uiw/react-codemirror` — for the Code toggle
-- `dexie@^4.4.2` — IndexedDB wrapper for the compile cache
-- `dompurify@^3.3.3`, `rehype-sanitize@^6.0.0` — for `<Markdown>` sanitization
-- `ses@^1.15.0` — hardened JS for expression sandbox
-- `@babel/standalone@^7.29.2` — available for fallback transforms
-- `jsonwebtoken@^9.0.3` — WS token minting
-- `mongodb@^6.12.0` — driver; supports Change Streams + transactions (requires replica set)
+From the root `package.json`:
+- `@mdx-js/mdx`, `@mdx-js/react`, `remark-mdx` — MDX compile in the browser
+- `@dnd-kit/core`, `@dnd-kit/sortable`, `@dnd-kit/modifiers` — the builder
+- `@codemirror/*` + `@uiw/react-codemirror` — code-edit toggle
+- `dexie` — IndexedDB wrapper for the compile cache
+- `dompurify`, `rehype-sanitize` — `<Markdown>` sanitization
+- `ses` — hardened JS for expression sandbox
+- `@babel/standalone` — fallback transforms
+- `jsonwebtoken` — token minting (HTTP + WS)
+- `pg` + `drizzle-orm` (in `apps/archon-sync-api`) — Postgres driver and query layer; `pg_notify` powers fanout, ordinary `BEGIN…COMMIT` covers transactions
 
-## 7. Gaps / preconditions for the mini-app plugin
+## 8. Runtime preconditions
 
 | Precondition | Status |
 |---|---|
-| Replica-set Mongo | **Unverified** — `db.ts` does not assert. If single-node, `Change Streams` and `session.withTransaction` will fail. Mark as runtime prereq. |
-| WebSocket layer (R4-Qc) | **None** — Fastify app has HTTP routes only. To be added under `registerMdxStateWsRoutes` using Fastify's `ws` ecosystem (or raw `ws` adapter). |
-| `useProjectState` layer | **None** — per-project KV store is new. |
-| Web-side MDX compile | **None** — Electron renderer has a stub; web has no MDX runtime. |
-| Drag-and-drop builder | **None** — `@dnd-kit` deps present but no builder code. |
-| Owner-only authoring gate | **Indirect** — owner checks live in `space-auth.ts` / `permission-resolver.ts`; new code should reuse these helpers. |
-
-## 8. Integration points for the mini-app plugin
-
-1. **State service** → new files under `apps/archon-sync-api/src/mdx-state/*`, wired from `routes.ts:119` via a new `registerMdxStateRoutes(app, {jwtSecret})`.
-2. **WebSocket** → new `apps/archon-sync-api/src/mdx-state-ws.ts` mounted in `build-app.ts`.
-3. **Web renderer** → new `apps/archon-web/app/mdx/` (runtime, SDK, builder) + a plugin manifest under `plugins/system/mdx-mini-app/`.
-4. **Note-type dispatch (web)** → extend the existing web shell renderer (a small dispatch table; today only `markdown` is wired web-side).
-5. **Feature flag** → add `featureFlags.mdxMiniApp` consulted in both create-note UI and render dispatch.
-
-## 9. Conflict flags
-
-- **No existing WS layer.** Adds deployment complexity (sticky sessions / horizontal scaling considerations) — flag for human review.
-- **Electron has a different MDX stub.** Web-side does not need to unify with it in v1; flagged to avoid divergence drift.
-- **Web app is thin.** Most UI today is in `src/renderer/` for Electron; the web app only hosts auth/invite/health. The builder will roughly double the web app surface area — flag for capacity.
+| Postgres reachable at `DATABASE_URL` | sync-api fails fast at boot if the pool can't `SELECT 1`. |
+| WebSocket layer | `@fastify/websocket` registered in `build-app.ts:42`. Sticky-session note for proxy deployments. |
+| MDX SDK virtual module | `@archon/mdx-sdk` resolved at compile time; authors import the facade name and `mdx-sdk-runtime` ships the implementation. |
+| Owner-only authoring | `permission-resolver.ts` + `space-auth.ts` enforce; the builder mount gate consumes the same helpers. |

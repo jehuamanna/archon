@@ -11,7 +11,7 @@ export type OrgContext = {
   role: OrgRole;
 };
 
-/** PG-row shape replacing the Mongo OrgMembershipDoc for return types. */
+/** PG-row shape for org membership records used as return types. */
 export type OrgMembershipRow = typeof orgMemberships.$inferSelect;
 
 export async function getOrgMembership(

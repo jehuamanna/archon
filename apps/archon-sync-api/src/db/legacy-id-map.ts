@@ -1,24 +1,22 @@
 /**
- * Legacy ObjectId → UUID translation (Q1=B resolution).
+ * Legacy 24-char hex id → UUID translation.
  *
- * Pre-cutover JWTs and MCP device tokens carry 24-char Mongo ObjectId hex in
+ * Some pre-existing JWTs and MCP device tokens carry 24-char hex ids in
  * fields like `sub`, `activeOrgId`, `activeSpaceId`, audit `targetId`, etc.
- * Post-cutover, every entity has a freshly minted `uuid` PK; the legacy hex is
- * stored permanently in `legacy_object_id_map(scope, legacy_id, new_id)`.
+ * Each entity has a UUID PK; the legacy hex is stored permanently in
+ * `legacy_object_id_map(scope, legacy_id, new_id)`.
  *
  * This module is the only place that knows about that translation. Auth and
  * MCP boundary code goes through `translateLegacyId(scope, legacyId)`; once
  * the payload is rewritten, handlers see UUIDs end-to-end.
  *
- * Cached via a simple LRU (size 1024) keyed on `${scope}:${legacyId}`. The map
- * is small in practice (the existing dump has ~100 ObjectId-keyed rows total)
- * so cache hit-rate is near 100% after warmup.
+ * Cached via a simple LRU (size 1024) keyed on `${scope}:${legacyId}`.
  */
 import { eq, and } from "drizzle-orm";
 import { getDb } from "../pg.js";
 import { legacyObjectIdMap } from "./schema.js";
 
-/** Recognised scopes — one per ObjectId-keyed Mongo collection. */
+/** Recognised scopes — one per legacy hex-id-keyed entity. */
 export type LegacyIdScope =
   | "users"
   | "organizations"

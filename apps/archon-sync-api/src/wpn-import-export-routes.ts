@@ -361,7 +361,7 @@ export async function registerWpnImportExportRoutes(
     }
 
     // Collision scope: caller's workspaces in the destination space (or all
-    // legacy/no-space ones) — same as Mongo path.
+    // legacy/no-space ones).
     const existingWs = await (auth.activeSpaceId
       ? db()
           .select()

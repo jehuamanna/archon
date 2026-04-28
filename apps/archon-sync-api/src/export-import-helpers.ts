@@ -1,7 +1,7 @@
 /**
  * PLAN-06 slice 4a — pure helpers for the v2 export/import pipeline.
  *
- * Kept free of Fastify / Mongo / R2 side-effects so they're easy to
+ * Kept free of Fastify / DB / R2 side-effects so they're easy to
  * unit-test without infrastructure. The sync-api routes (slice 4b + 4c)
  * compose these with the I/O edges.
  */
@@ -364,7 +364,7 @@ export type ImportPlan = {
  * should be applied to markdown content so in-bundle `#/w/<ws>/<proj>/<title>`
  * links keep resolving post-import when the workspace was renamed.
  *
- * Pure: no Mongo, no R2.
+ * Pure: no DB, no R2.
  */
 export function planImportWorkspaces(args: {
   bundle: WpnExportMetadata;
@@ -436,7 +436,7 @@ export function planImportWorkspaces(args: {
 
 /**
  * Build a v2 export manifest + the list of image-asset streams the caller
- * needs to write into the ZIP. Pure: no I/O, no Mongo, no R2.
+ * needs to write into the ZIP. Pure: no I/O, no DB, no R2.
  *
  * Each image note with a usable `r2Key` + `mimeType` + `sizeBytes` trio
  * contributes one `assets[]` entry in the manifest and one `AssetStreamPlan`

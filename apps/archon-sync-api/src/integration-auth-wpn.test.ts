@@ -11,7 +11,7 @@ const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 /**
  * End-to-end HTTP flow against a disposable DB: register → JWT → shell layout,
  * WPN workspace/project/note CRUD surface, built-in plugin render.
- * Skips when Mongo is not running (local dev without docker).
+ * Skips when Postgres is not running (local dev without docker).
  */
 test(
   "sign-in, shell layout persist, WPN note create, builtin markdown render",

@@ -6,7 +6,7 @@
 # Optional: --stop-old  remove the inactive container after reload (saves RAM; allows image prune).
 #
 # Prerequisites:
-#   - Stack running: mongo-sync, archon-sync-api, archon-web-blue, archon-gateway
+#   - Stack running: postgres, archon-sync-api, archon-web-blue, archon-gateway
 #   - For green: docker compose --profile green up -d archon-web-green (or this script starts it)
 
 set -euo pipefail

@@ -11,7 +11,7 @@ import {
   isUuid,
 } from "./db/legacy-id-map.js";
 
-/** PG-row shape replacing Mongo SpaceDoc for return types. */
+/** PG-row shape for space records used as return types. */
 export type SpaceRow = typeof spaces.$inferSelect;
 export type SpaceMembershipRow = typeof spaceMemberships.$inferSelect;
 

@@ -5,7 +5,7 @@ import { getDb } from "./pg.js";
 import { users } from "./db/schema.js";
 import { isUuid } from "./db/legacy-id-map.js";
 
-/** PG-row shape replacing the Mongo UserDoc (used for return type). */
+/** PG-row shape for users used as return types. */
 export type AdminAuthUser = typeof users.$inferSelect;
 
 /**
