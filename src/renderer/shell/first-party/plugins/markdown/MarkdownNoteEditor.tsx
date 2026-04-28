@@ -1,5 +1,6 @@
-import CodeMirror from "@uiw/react-codemirror";
+import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
+import { EditorState } from "@codemirror/state";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
@@ -476,6 +477,13 @@ export function MarkdownNoteEditor({
     const update = (): void => {
       const next = ytext.toString();
       if (latestRef.current === next) return;
+      // Y.Text starts empty before the Hocuspocus sync arrives. If the
+      // editor already has REST-loaded content, don't blank it — wait
+      // for the seeded state to land and the observer to fire with the
+      // real content. Without this guard, the React mirror clobbers
+      // `latestRef` to "" and the HTTP-fallback save can persist that
+      // empty value, permanently erasing wpn_notes.content.
+      if (next === "" && latestRef.current.length > 0) return;
       latestRef.current = next;
       setValue(next);
       setPreviewContent(next);
@@ -485,7 +493,7 @@ export function MarkdownNoteEditor({
     return () => {
       ytext.unobserve(update);
     };
-  }, [yjsBody.yText]);
+  }, [yjsBody.yText, note.id]);
 
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
@@ -668,15 +676,43 @@ export function MarkdownNoteEditor({
       onBlurRef,
       imagePasteCtxRef,
     });
-    // When the body Y.Text is live, bind CodeMirror to it directly. yCollab
-    // owns the doc: remote diffs (other tabs, MCP, etc.) flow into the view
-    // without React intermediation, and local edits are committed to Y.Text
-    // with the right transaction origin so they don't echo back as remote.
-    if (yjsBody.yText) {
+    // @uiw/react-codemirror's value-effect occasionally dispatches an
+    // `ExternalChange`-annotated transaction with `insert: ""` (a stale
+    // forceUpdate closure capturing an empty `value` prop). When yCollab
+    // is bound, that transaction propagates through ySyncPlugin and wipes
+    // Y.Text — which the server then persists, destroying the note. Drop
+    // any ExternalChange transaction that would clear non-empty doc to
+    // empty; the editor can still receive real edits via yCollab.
+    ext.push(
+      EditorState.transactionFilter.of((tr) => {
+        if (tr.annotation(ExternalChange) !== true) return tr;
+        if (!tr.docChanged) return tr;
+        const startLen = tr.startState.doc.length;
+        const newLen = tr.newDoc.length;
+        if (startLen > 0 && newLen === 0) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[md-editor] dropped ExternalChange empty-out tx",
+            { noteId: note.id, startLen, newLen },
+          );
+          return [];
+        }
+        return tr;
+      }),
+    );
+    // Bind yCollab only after Hocuspocus has synced the seeded Y.Text from
+    // the server. Y.Text starts empty when the hook returns; binding too
+    // early lets yCollab clear CodeMirror to match the empty Y.Text and the
+    // editor goes blank until sync arrives. Gating on `connected` keeps the
+    // editor controlled by the REST-loaded `value` until Y.Text actually
+    // holds content. yCollab still owns the doc once connected: remote
+    // diffs flow into the view without React intermediation, and local
+    // edits are committed to Y.Text with the right transaction origin.
+    if (yjsBody.yText && yjsBody.connected) {
       ext.push(yCollab(yjsBody.yText, null));
     }
     return ext;
-  }, [readOnly, resolvedDark, yjsBody.yText]);
+  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.connected, note.id]);
 
   useEffect(() => {
     const host = cmHostRef.current;
@@ -795,13 +831,14 @@ export function MarkdownNoteEditor({
             </div>
             <div ref={cmHostRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <CodeMirror
-                // When yCollab is bound (yText present), pass undefined so
-                // @uiw/react-codemirror skips its prop-driven dispatch and
-                // doesn't fight the binding for control of the doc. The
-                // initial doc content is seeded by yCollab from Y.Text on
-                // mount; the yText.observe effect above mirrors changes
-                // into React state for non-CodeMirror consumers.
-                value={yjsBody.yText ? undefined : value}
+                // While yCollab isn't bound yet (Hocuspocus hasn't synced),
+                // keep CodeMirror controlled by `value` so the editor shows
+                // the REST-loaded content. Once `connected` flips and
+                // yCollab is added to extensions, hand control over by
+                // passing undefined — yCollab then drives the doc and the
+                // yText.observe effect mirrors changes into React state
+                // for non-CodeMirror consumers.
+                value={yjsBody.yText && yjsBody.connected ? undefined : value}
                 height="100%"
                 theme="none"
                 basicSetup={false}
