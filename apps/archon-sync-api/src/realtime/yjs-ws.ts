@@ -15,12 +15,15 @@
  * `wpn_notes.content` so the first editor sees the body they expect.
  */
 import type { FastifyInstance } from "fastify";
+import { randomUUID } from "node:crypto";
 import { Server } from "@hocuspocus/server";
+import { Redis as RedisExtension } from "@hocuspocus/extension-redis";
+import IORedis from "ioredis";
 import * as Y from "yjs";
 import { eq } from "drizzle-orm";
 import { verifyAndTranslate } from "../auth-translate.js";
 import { effectiveRoleInSpace } from "../permission-resolver.js";
-import { getDb } from "../pg.js";
+import { getDb, withTx } from "../pg.js";
 import { wpnNotes, wpnProjects, wpnWorkspaces } from "../db/schema.js";
 import { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";
 
@@ -30,12 +33,32 @@ export function getYjsAdapter(): YjsPgAdapter {
   return _sharedAdapter;
 }
 
+const REVOKE_REVERIFY_INTERVAL_MS = 10_000;
+
+/**
+ * Per-connection revoke-reverify timers, keyed by Hocuspocus socketId. The
+ * `connected` hook attaches an interval that re-checks `effectiveRoleInSpace`
+ * and force-closes the connection when role disappears; `onDisconnect` clears
+ * it so closed sockets don't leak timers.
+ */
+const revokeReverifyTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Per-user open Yjs WS sockets, keyed by user id → socketId set. Bounded
+ * by `ARCHON_YJS_MAX_CONNS_PER_USER` so a single account can't tie up an
+ * unbounded slice of the Hocuspocus instance with parallel tabs.
+ */
+const userConnections = new Map<string, Set<string>>();
+
 let _sharedServer: ReturnType<typeof Server.configure> | null = null;
 /**
  * Test helper: tear down the shared Hocuspocus server so its internal
  * timers stop and the test process can exit cleanly.
  */
 export async function _shutdownYjsServerForTests(): Promise<void> {
+  for (const t of revokeReverifyTimers.values()) clearInterval(t);
+  revokeReverifyTimers.clear();
+  userConnections.clear();
   if (_sharedServer) {
     try {
       await _sharedServer.destroy();
@@ -141,10 +164,47 @@ export function registerYjsWsRoutes(
   const maxDebounceMs = Number(
     process.env.ARCHON_YJS_AUTOSAVE_MAX_DEBOUNCE_MS ?? 1500,
   );
+  const maxConnsPerUser = Number(
+    process.env.ARCHON_YJS_MAX_CONNS_PER_USER ?? 20,
+  );
+  // 5 MB Y.Text upper bound. Pasting a megabyte-scale doc is the realistic
+  // upper edge; anything above this is almost always a runaway / abuse
+  // signal. Configurable so support can raise it for one-off cases.
+  const maxDocBytes = Number(
+    process.env.ARCHON_YJS_MAX_DOC_BYTES ?? 5 * 1024 * 1024,
+  );
+
+  // Cross-replica fanout: if REDIS_URL is set, the Hocuspocus Redis extension
+  // pub/subs Yjs updates and awareness across every sync-api replica. Without
+  // it (single-process deployments, dev, tests), Hocuspocus runs in-memory
+  // only — clients on the same replica still collaborate, but two clients on
+  // different replicas would split-brain.
+  const extensions: import("@hocuspocus/server").Extension[] = [];
+  const redisUrl = process.env.REDIS_URL;
+  if (redisUrl) {
+    const replicaId =
+      process.env.ARCHON_REPLICA_ID || `archon-sync-${randomUUID()}`;
+    const prefix = process.env.ARCHON_YJS_REDIS_PREFIX || "archon-yjs";
+    extensions.push(
+      new RedisExtension({
+        identifier: replicaId,
+        prefix,
+        // ioredis honors connection strings (redis://, rediss://, with auth).
+        // We pass createClient so the extension can spin its own pub + sub
+        // duplexes from the same URL.
+        createClient: () => new IORedis(redisUrl, { lazyConnect: false }),
+      }),
+    );
+    app.log.info(
+      { replicaId, prefix },
+      "realtime: Hocuspocus Redis pub/sub enabled",
+    );
+  }
 
   _sharedServer = Server.configure({
     debounce: debounceMs,
     maxDebounce: maxDebounceMs,
+    extensions,
     async onAuthenticate({ token, documentName }) {
       const payload = await verifyAndTranslate(jwtSecret, token);
       if (payload.typ !== "spaceWs") {
@@ -156,7 +216,74 @@ export function registerYjsWsRoutes(
       }
       const role = await effectiveRoleInSpace(payload.sub, spaceId);
       if (!role) throw new Error("no access to space");
-      return { user: { id: payload.sub, email: payload.email, role } };
+      // Stash spaceId in the connection context so the `connected` hook can
+      // attach a periodic revocation check tied to the same role evaluation.
+      return {
+        user: { id: payload.sub, email: payload.email, role },
+        spaceId,
+      };
+    },
+    async connected({ context, socketId, connectionInstance }) {
+      // Mid-session permission revocation. Mirrors the 10s reverify loop in
+      // `ws-skeleton.ts` for the space WS so a user removed from a space
+      // mid-edit can't keep writing through their open Yjs socket until the
+      // browser disconnects on its own.
+      const ctx = context as
+        | { user?: { id?: string }; spaceId?: string }
+        | undefined;
+      const userId = ctx?.user?.id;
+      const spaceId = ctx?.spaceId;
+      if (!userId || !spaceId) return;
+      // Per-user connection cap. Closing here (rather than in `onAuthenticate`)
+      // is intentional: socketId is allocated by Hocuspocus on accept, so we
+      // can only key the user's slot table reliably once the connection has
+      // crossed the auth boundary. Tabs over the cap get 4429.
+      let userSet = userConnections.get(userId);
+      if (!userSet) {
+        userSet = new Set<string>();
+        userConnections.set(userId, userSet);
+      }
+      if (userSet.size >= maxConnsPerUser) {
+        connectionInstance.close({
+          code: 4429,
+          reason: "too many connections",
+        });
+        return;
+      }
+      userSet.add(socketId);
+      const interval = setInterval(() => {
+        void (async () => {
+          try {
+            const role = await effectiveRoleInSpace(userId, spaceId);
+            if (!role) {
+              connectionInstance.close({
+                code: 4403,
+                reason: "access revoked",
+              });
+            }
+          } catch {
+            /* ignore — reverify failures shouldn't tear the socket down */
+          }
+        })();
+      }, REVOKE_REVERIFY_INTERVAL_MS);
+      interval.unref?.();
+      revokeReverifyTimers.set(socketId, interval);
+    },
+    async onDisconnect({ socketId, context }) {
+      const t = revokeReverifyTimers.get(socketId);
+      if (t) {
+        clearInterval(t);
+        revokeReverifyTimers.delete(socketId);
+      }
+      const userId = (context as { user?: { id?: string } } | undefined)?.user
+        ?.id;
+      if (userId) {
+        const set = userConnections.get(userId);
+        if (set) {
+          set.delete(socketId);
+          if (set.size === 0) userConnections.delete(userId);
+        }
+      }
     },
     async onLoadDocument({ documentName, document }) {
       const noteId = documentName;
@@ -206,10 +333,25 @@ export function registerYjsWsRoutes(
         }
       }
       const fullState = Buffer.from(Y.encodeStateAsUpdate(document));
-      await adapter.storeDoc(noteId, fullState);
-      // Bridge Yjs body state → `wpn_notes.content` so the legacy HTTP
-      // detail / list / export endpoints (which read from `wpn_notes`,
-      // not `yjs_state`) stay in sync.
+      if (fullState.byteLength > maxDocBytes) {
+        // Refuse to persist a runaway document. Yjs CRDT state grows with
+        // history, so this catches both genuine large docs and pathological
+        // edit storms. We log loudly because hitting the cap silently would
+        // strand edits in memory; raising the cap or compacting is an ops
+        // decision, not a protocol-level recovery.
+        // eslint-disable-next-line no-console
+        console.warn("[yjs-ws] doc exceeds size cap — not persisting", {
+          noteId,
+          bytes: fullState.byteLength,
+          cap: maxDocBytes,
+        });
+        return;
+      }
+      // Persist the Yjs snapshot AND the materialised `wpn_notes.content`
+      // view in a single transaction. If either side fails, both roll back
+      // and the next debounced `onStoreDocument` tick retries cleanly —
+      // preventing a silent split where `yjs_state` advances but the legacy
+      // HTTP readers (detail / list / export) keep returning stale text.
       try {
         const editorUserId =
           (context as { user?: { id?: string } } | undefined)?.user?.id;
@@ -219,14 +361,18 @@ export function registerYjsWsRoutes(
           updated_at_ms: t,
         };
         if (editorUserId) setFields.updated_by_user_id = editorUserId;
-        await getDb()
-          .update(wpnNotes)
-          .set(setFields)
-          .where(eq(wpnNotes.id, noteId));
+        await withTx(async (tx) => {
+          await adapter.storeDoc(noteId, fullState, tx);
+          await tx
+            .update(wpnNotes)
+            .set(setFields)
+            .where(eq(wpnNotes.id, noteId));
+        });
       } catch (err) {
         // eslint-disable-next-line no-console
         console.warn(
-          "[yjs-ws] bridge wpn_notes.content failed:",
+          "[yjs-ws] persist tx failed (will retry on next debounce):",
+          noteId,
           (err as Error).message,
         );
       }
