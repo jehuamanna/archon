@@ -14,7 +14,7 @@
  *     of `_next/static/*` is left as a follow-up — the immediate UX win
  *     is from the update banner, not from offline coverage.
  */
-const BUILD_ID = "fcbeba8";
+const BUILD_ID = "__ARCHON_BUILD_ID__";
 const CACHE = `archon-pwa-shell-${BUILD_ID}`;
 const APP_SHELL = ["/favicon.svg", "/manifest.webmanifest"];
 
