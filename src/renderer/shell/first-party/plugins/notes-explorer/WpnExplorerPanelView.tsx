@@ -76,7 +76,10 @@ import {
   pushUndoEntry,
   type WpnUndoEntry,
 } from "../../../../store/wpnUndoSlice";
-import { isNoteVisibleInTree } from "./wpnExplorerTreeVisibility";
+import {
+  isNoteVisibleInTree,
+  pruneExpandedNoteParents,
+} from "./wpnExplorerTreeVisibility";
 
 type ShellViewComponentProps = {
   viewId: string;
@@ -191,18 +194,6 @@ function collectAncestorNoteIds(noteId: string, parentMap: Map<string, string | 
     cur = parentMap.get(cur) ?? null;
   }
   return out;
-}
-
-function mergeWpnExpandedNoteParents(
-  prev: Set<string>,
-  serverExpandedIds: string[],
-  noteIds: Set<string>,
-): Set<string> {
-  const merged = new Set([...prev].filter((id) => noteIds.has(id)));
-  for (const id of serverExpandedIds) {
-    if (noteIds.has(id)) merged.add(id);
-  }
-  return merged;
 }
 
 function optimisticWpnNotesAfterMove(
@@ -803,19 +794,19 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     setIsLoadingTree(true);
     beginWpnSync();
     try {
-      const [{ notes: n }, { expanded_ids }] = await Promise.all([
-        getArchon().wpnListNotes(projectId),
-        getArchon().wpnGetExplorerState(projectId),
-      ]);
+      // Bug-fdcaf4: deliberately do NOT fetch `wpnGetExplorerState` here.
+      // Refresh / reload must start with the tree fully collapsed and rely
+      // on the auto-reveal effect to expand only the path of the
+      // currently-open note. The local set is still pruned so ids whose
+      // notes have been deleted don't linger forever.
+      const { notes: n } = await getArchon().wpnListNotes(projectId);
       if (selectedProjectIdRef.current !== projectId) {
         markWpnSyncOk();
         return;
       }
       const noteIds = new Set(n.map((x) => x.id));
       setNotes(n);
-      setExpandedNoteParents((prev) =>
-        mergeWpnExpandedNoteParents(prev, expanded_ids, noteIds),
-      );
+      setExpandedNoteParents((prev) => pruneExpandedNoteParents(prev, noteIds));
       markWpnSyncOk();
     } catch (e) {
       markWpnSyncError(e);
@@ -905,13 +896,14 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     // Consume once so a later external rename or poll still falls through to a fresh fetch.
     const cache = fullTreeCacheRef.current;
     const cachedNotes = cache?.notesByProjectId[selectedProjectId];
-    const cachedExpanded = cache?.explorerStateByProjectId[selectedProjectId]?.expanded_ids;
-    if (cachedNotes && cachedExpanded !== undefined) {
+    if (cachedNotes) {
+      // Bug-fdcaf4: discard the cached server-persisted `expanded_ids`.
+      // We still serve the prefetched notes synchronously to skip the
+      // RTT, but the tree starts collapsed on refresh and the
+      // auto-reveal effect handles the currently-open note's path.
       const noteIds = new Set(cachedNotes.map((x) => x.id));
       setNotes(cachedNotes);
-      setExpandedNoteParents((prev) =>
-        mergeWpnExpandedNoteParents(prev, cachedExpanded, noteIds),
-      );
+      setExpandedNoteParents((prev) => pruneExpandedNoteParents(prev, noteIds));
       if (cache) {
         delete cache.notesByProjectId[selectedProjectId];
         delete cache.explorerStateByProjectId[selectedProjectId];
@@ -962,8 +954,13 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
 
   const persistExpandedNotes = useCallback(
     async (projectId: string, next: Set<string>) => {
+      // Bug-fdcaf4: explorer expand state is intentionally session-local.
+      // We used to round-trip to `wpnSetExplorerState` here, but that
+      // persistence is no longer read on load (refresh = fully collapsed),
+      // so the write was pure overhead. `projectId` is kept in the
+      // signature so callers don't need to be touched.
+      void projectId;
       setExpandedNoteParents(next);
-      await getArchon().wpnSetExplorerState(projectId, [...next]);
     },
     [],
   );

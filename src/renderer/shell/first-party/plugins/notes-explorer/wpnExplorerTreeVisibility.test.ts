@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isNoteVisibleInTree } from "./wpnExplorerTreeVisibility.ts";
+import {
+  isNoteVisibleInTree,
+  pruneExpandedNoteParents,
+} from "./wpnExplorerTreeVisibility.ts";
 
 /**
  * Tree fixture used by every case below:
@@ -91,6 +94,34 @@ test("first space load with empty expanded set keeps all non-root notes hidden (
   assert.equal(isNoteVisibleInTree("a", parents, expanded), false);
   assert.equal(isNoteVisibleInTree("b", parents, expanded), false);
   assert.equal(isNoteVisibleInTree("c", parents, expanded), false);
+});
+
+test("Bug-fdcaf4 — pruneExpandedNoteParents drops ids that no longer exist in the project tree", () => {
+  // After a refresh+fetch (or a delete) the local set may carry ids whose
+  // notes are gone; prune drops those without re-introducing any other ids.
+  const prev = new Set(["a", "b", "c", "stale-1", "stale-2"]);
+  const noteIds = new Set(["a", "b", "c", "d"]);
+  const out = pruneExpandedNoteParents(prev, noteIds);
+  assert.deepEqual([...out].sort(), ["a", "b", "c"]);
+});
+
+test("Bug-fdcaf4 — pruneExpandedNoteParents does NOT add ids that aren't already in `prev`", () => {
+  // The whole point of replacing the old merge helper: stop seeding the
+  // local state from external sources (server / cache). Even if `noteIds`
+  // contains many candidate parents, prune only keeps existing entries.
+  const prev = new Set<string>();
+  const noteIds = new Set(["a", "b", "c"]);
+  const out = pruneExpandedNoteParents(prev, noteIds);
+  assert.equal(out.size, 0);
+});
+
+test("Bug-fdcaf4 — pruneExpandedNoteParents returns a fresh Set (caller can mutate without aliasing prev)", () => {
+  const prev = new Set(["a"]);
+  const noteIds = new Set(["a"]);
+  const out = pruneExpandedNoteParents(prev, noteIds);
+  assert.notStrictEqual(out, prev);
+  out.add("b");
+  assert.equal(prev.has("b"), false);
 });
 
 test("defensive: a cycle in the parent map returns false rather than spinning", () => {
