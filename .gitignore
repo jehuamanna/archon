@@ -24,6 +24,7 @@ plugin-sources/**/*.zip
 .DS_Store
 Thumbs.db
 mongodump-pre-cutover-20260425-162501/
+backups/
 # IDE
 .vscode/
 .idea/
