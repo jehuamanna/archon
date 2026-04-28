@@ -8,6 +8,12 @@ export type ShellMenuRailItem = {
   /** Optional icon (emoji/string); real icons can come later. */
   icon?: string;
   /**
+   * Optional React component rendered in place of the string {@link icon}. When
+   * present, takes precedence so plugins can ship monochrome SVGs that inherit
+   * `currentColor` from the rail button.
+   */
+  IconComponent?: React.ComponentType<{ className?: string }>;
+  /**
    * Optional React component rendered as a small overlay on the rail button
    * (e.g. unread-count badge). Returning `null` renders nothing. The component
    * manages its own reactivity (e.g. via Redux selectors).

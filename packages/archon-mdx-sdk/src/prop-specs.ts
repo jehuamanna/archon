@@ -168,6 +168,25 @@ export const PROP_SPECS: Record<string, ComponentPropSpec> = {
         "How to split the source into slides. `hr`: split on lines containing only `---`. `h1`: each `# ` heading starts a new slide.",
     },
   },
+  DeckPicker: {
+    parentNoteId: {
+      type: "noteId",
+      required: true,
+      semantic:
+        "Note id whose markdown children become the selectable decks. Children are sorted by sibling order.",
+    },
+    selectedKey: {
+      type: "stateKey",
+      semantic:
+        "Optional state key persisting the selected deck id across reloads. Local-only when omitted.",
+    },
+    emptyLabel: {
+      type: "string",
+      default: "",
+      semantic:
+        "Override message shown when the parent note has no markdown children.",
+    },
+  },
   PushButton: {
     label: { type: "string", required: true, semantic: "Button label." },
     fromKey: {

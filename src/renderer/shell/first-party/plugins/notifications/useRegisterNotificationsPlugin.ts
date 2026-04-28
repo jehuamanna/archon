@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import React, { useEffect } from "react";
 import { useArchonContributionRegistry } from "../../../ArchonContributionContext";
 import { useShellLayoutStore } from "../../../layout/ShellLayoutContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -6,6 +6,28 @@ import { useShellViewRegistry } from "../../../views/ShellViewContext";
 import { NotificationsBadge } from "./NotificationsBadge";
 import { NotificationsMainView } from "./NotificationsMainView";
 import { NotificationsSidebarView } from "./NotificationsSidebarView";
+
+function BellRailIcon({ className }: { className?: string }): React.ReactElement {
+  return React.createElement(
+    "svg",
+    {
+      className,
+      width: 16,
+      height: 16,
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: 1.75,
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": true,
+    },
+    React.createElement("path", {
+      d: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9",
+    }),
+    React.createElement("path", { d: "M10 21a2 2 0 0 0 4 0" }),
+  );
+}
 import {
   NOTIFICATIONS_CMD_OPEN,
   NOTIFICATIONS_PLUGIN_ID,
@@ -59,7 +81,7 @@ export function useRegisterNotificationsPlugin(): void {
       regs.menuRail.registerItem({
         id: "plugin.notifications.rail",
         title: "Notifications",
-        icon: "\u{1F514}",
+        IconComponent: BellRailIcon,
         order: 40,
         placement: "bottom",
         tabTypeId: NOTIFICATIONS_TAB,

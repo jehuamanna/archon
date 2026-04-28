@@ -323,6 +323,7 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
   const { openFromRailItem, openNoteById, invokeCommand, deps: shellNavDeps } = useShellNavigation();
   const [panelMenuOpen, setPanelMenuOpen] = useState(false);
   const [appMenuOpen, setAppMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const appMenuWrapRef = useRef<HTMLDivElement>(null);
   const lastSyncedHash = useRef<string>("");
   const initialHashApplied = useRef(false);
@@ -785,22 +786,16 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
             <button
               type="button"
               className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-muted/20 text-[12px] font-semibold hover:bg-muted/40"
-              title="App menu — Welcome and shell actions"
+              title="App menu — Welcome and About"
               aria-expanded={appMenuOpen}
               aria-haspopup="menu"
-              onClick={() => {
-                if (appMenuItems.length === 0) {
-                  store.toggle("sidebarPanel");
-                  return;
-                }
-                setAppMenuOpen((v) => !v);
-              }}
+              onClick={() => setAppMenuOpen((v) => !v)}
             >
               <span className="text-primary">
                 <ArchonLogo className="h-4 w-4" title="Archon" />
               </span>
             </button>
-            {appMenuOpen && appMenuItems.length > 0 ? (
+            {appMenuOpen ? (
               <div
                 className="absolute left-0 top-full z-50 mt-1 min-w-[13rem] overflow-hidden rounded-md border border-border bg-background py-1 shadow-lg"
                 role="menu"
@@ -819,13 +814,28 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
                 >
                   Welcome
                 </button>
-                <div className="my-1 border-t border-border" role="separator" />
-                <ShellAppMenuList
-                  items={appMenuItems}
-                  depth={0}
-                  invokeCommand={invokeCommand}
-                  onDone={() => setAppMenuOpen(false)}
-                />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="block w-full px-3 py-2 text-left text-[11px] text-foreground hover:bg-muted/40"
+                  onClick={() => {
+                    setAppMenuOpen(false);
+                    setAboutOpen(true);
+                  }}
+                >
+                  About
+                </button>
+                {appMenuItems.length > 0 ? (
+                  <>
+                    <div className="my-1 border-t border-border" role="separator" />
+                    <ShellAppMenuList
+                      items={appMenuItems}
+                      depth={0}
+                      invokeCommand={invokeCommand}
+                      onDone={() => setAppMenuOpen(false)}
+                    />
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -996,7 +1006,11 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
                       title={it.title}
                       onClick={() => openFromRailItem(it)}
                     >
-                      {it.icon ?? "•"}
+                      {it.IconComponent ? (
+                        <it.IconComponent className="h-4 w-4" />
+                      ) : (
+                        (it.icon ?? "•")
+                      )}
                       {Badge ? <Badge /> : null}
                     </button>
                   );
@@ -1169,6 +1183,57 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
           </PanelGroup>
         </div>
       </div>
+      {aboutOpen ? (
+        <div
+          className="fixed inset-0 z-[200] flex items-center justify-center bg-foreground/30 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="archon-about-title"
+          onClick={() => setAboutOpen(false)}
+        >
+          <div
+            className="mx-4 w-full max-w-lg rounded-2xl border border-border bg-background p-6 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <h2
+                id="archon-about-title"
+                className="text-[18px] font-semibold tracking-tight"
+              >
+                About Archon
+              </h2>
+              <button
+                type="button"
+                className="rounded-md px-2 py-0.5 text-[14px] text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                aria-label="Close"
+                onClick={() => setAboutOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="mt-3 space-y-3 text-[13px] leading-[1.6] text-foreground/90">
+              <p>
+                Archon is currently being developed and maintained by{" "}
+                <span className="font-semibold">Jehu Shalom Amanna</span>.
+              </p>
+              <p>
+                It began as a small side project for managing context and notes
+                efficiently — a knowledge base that didn't get in the way of
+                thinking.
+              </p>
+              <p>
+                It is growing into a full autonomous{" "}
+                <span className="font-semibold">AI-driven SDLC</span> platform:
+                one workspace humans and agents both read from, where specs,
+                plans, and decisions stay close to the code they shape.
+              </p>
+              <p className="text-muted-foreground">
+                Code serves specifications. Archon serves both.
+              </p>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

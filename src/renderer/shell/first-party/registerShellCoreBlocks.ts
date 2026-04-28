@@ -58,24 +58,6 @@ export function useRegisterShellCoreBlocks(): void {
       });
     }
 
-    disposers.push(
-      regs.appMenu.registerItems([
-        {
-          id: "shell.menu.shell",
-          title: "Shell",
-          order: 0,
-          children: [
-            { id: "shell.menu.shell.palette", title: "Command palette", commandId: "archon.shell.openPalette" },
-            { id: "shell.menu.shell.minibuffer", title: "Mini buffer (M-x)", commandId: "archon.shell.openMiniBar" },
-            { id: "shell.menu.shell.toggleActivityBar", title: "Toggle activity bar", commandId: "archon.shell.toggle.menuRail" },
-            { id: "shell.menu.shell.toggleSidebar", title: "Toggle side panel", commandId: "archon.shell.toggle.sidebarPanel" },
-            { id: "shell.menu.shell.toggleCompanion", title: "Toggle companion", commandId: "archon.shell.toggle.companion" },
-            { id: "shell.menu.shell.toggleBottom", title: "Toggle bottom dock", commandId: "archon.shell.toggle.bottomDock" },
-          ],
-        },
-      ]),
-    );
-
     return () => {
       for (const d of disposers) d();
     };
