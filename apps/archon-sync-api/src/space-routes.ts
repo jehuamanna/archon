@@ -575,11 +575,28 @@ export function registerSpaceRoutes(
     if (!isUuid(auth.sub)) {
       return reply.status(401).send({ error: "Invalid session" });
     }
+    // Persist the per-org pin alongside the global last-active. `/auth/refresh`
+    // resolves the next access token's `activeSpaceId` from
+    // `lastActiveSpaceByOrg[orgId]` *before* `lastActiveSpaceId` (Bug-0ae7ee),
+    // so without this update an older pin for the same org would silently win
+    // every refresh and revert the user's selection back to the default space.
+    const userRows = await db()
+      .select({ lastActiveSpaceByOrg: users.lastActiveSpaceByOrg })
+      .from(users)
+      .where(eq(users.id, auth.sub))
+      .limit(1);
+    const nextLastActiveSpaceByOrg = {
+      ...((userRows[0]?.lastActiveSpaceByOrg as
+        | Record<string, string>
+        | null) ?? {}),
+      [ctx.space.orgId]: ctx.space.id,
+    };
     await db()
       .update(users)
       .set({
         lastActiveOrgId: ctx.space.orgId,
         lastActiveSpaceId: ctx.space.id,
+        lastActiveSpaceByOrg: nextLastActiveSpaceByOrg,
       })
       .where(eq(users.id, auth.sub));
     const token = signAccessToken(jwtSecret, {
