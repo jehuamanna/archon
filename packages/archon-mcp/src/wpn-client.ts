@@ -95,6 +95,15 @@ export class WpnHttpClient {
     return this.holder;
   }
 
+  /**
+   * The HTTP base URL the client was configured with (already includes the
+   * `/api/v1` v1 prefix for cloud sessions). Exposed so callers can derive
+   * the matching Yjs WS URL via `deriveYjsWsUrl`.
+   */
+  getBaseUrl(): string {
+    return this.baseUrl;
+  }
+
   /** Clear notes-with-context cache (e.g. after logout). */
   invalidateNotesWithContextCache(): void {
     this.notesWithContextCache = null;
@@ -468,6 +477,32 @@ export class WpnHttpClient {
       fromSpaceId,
       toSpaceId: this.holder.activeSpaceId,
     };
+  }
+
+  /**
+   * Mint a short-TTL `spaceWs` JWT for the given space via
+   * `POST /realtime/ws-token`. Used by `archon_write_note` to open a
+   * Hocuspocus client connection for content updates. Returns null when the
+   * caller has no access to the space (403) — caller should fall back to
+   * REST-only and let the in-process bridge handle the broadcast.
+   */
+  async mintSpaceWsToken(spaceId: string): Promise<string | null> {
+    const { res, text, body } = await this.fetchWpn(
+      "/realtime/ws-token",
+      "POST",
+      "WPN mint ws-token",
+      { spaceId },
+    );
+    if (res.status === 403 || res.status === 404) return null;
+    if (!res.ok) {
+      const err = (body as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`POST /realtime/ws-token failed (${res.status}): ${err}`);
+    }
+    const b = body as { token?: unknown };
+    if (typeof b.token !== "string" || !b.token.trim()) {
+      throw new Error("POST /realtime/ws-token: missing token");
+    }
+    return b.token;
   }
 
   async getNote(noteId: string): Promise<WpnNoteDetail> {

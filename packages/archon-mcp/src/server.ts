@@ -18,6 +18,7 @@ import {
   type WpnNoteListItem,
   type WpnNoteWithContextRow,
 } from "./wpn-client.js";
+import { deriveYjsWsUrl, writeNoteContentViaYjs } from "./yjs-write.js";
 import {
   DEFAULT_MAX_BYTES as GET_IMAGE_NOTE_DEFAULT_MAX_BYTES,
   handleGetImageNote,
@@ -2191,6 +2192,40 @@ export function createArchonMcpServer(
           }
           if (args.metadata !== undefined) {
             patch.metadata = args.metadata;
+          }
+          // Push content through the live Yjs doc first so an open editor's
+          // next autosave can't silently revert this write. The sync-api
+          // PATCH path also has a defensive in-process bridge
+          // (`applyContentToYjsDoc`), but that only fires when the editor
+          // and the REST hit the same process — going through a real WS
+          // client survives multi-instance deployments. Cloud sessions
+          // only; the local Electron file-vault has no Yjs at all.
+          if (
+            patch.content !== undefined &&
+            runtime.mode !== "local" &&
+            client.getHolder().activeSpaceId
+          ) {
+            const wsToken = await client
+              .mintSpaceWsToken(client.getHolder().activeSpaceId!)
+              .catch(() => null);
+            if (wsToken) {
+              try {
+                await writeNoteContentViaYjs({
+                  wsUrl: deriveYjsWsUrl(client.getBaseUrl()),
+                  wsToken,
+                  noteId: args.noteId!,
+                  content: patch.content,
+                });
+              } catch (err) {
+                // Don't fail the whole tool — fall through to REST PATCH
+                // and let the in-process bridge cover us.
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[archon_write_note] Yjs WS write failed, falling back to REST:",
+                  (err as Error).message,
+                );
+              }
+            }
           }
           const note = await client.patchNote(args.noteId!, patch);
           return jsonResult(withScopeSwitched({ ok: true as const, note }, switched));

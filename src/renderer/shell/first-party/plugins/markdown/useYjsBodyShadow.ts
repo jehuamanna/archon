@@ -97,11 +97,23 @@ export interface YjsBodyShadow {
 export function useYjsBodyShadow(
   noteId: string | null,
   spaceId: string | null,
+  onRemoteChange?: (text: string) => void,
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
   const docRef = useRef<Y.Doc | null>(null);
   const providerRef = useRef<HocuspocusProvider | null>(null);
   const lastPushedRef = useRef<string | null>(null);
+  // Sentinel used as the Y.Transaction origin for our own pushLatest writes
+  // so the observer (below) can ignore them. Anything else — diffs the WS
+  // applies on remote updates, including out-of-band writes from MCP — comes
+  // through with a different origin and reaches `onRemoteChange`.
+  const localOriginRef = useRef<symbol>(Symbol("yjs-body-shadow-local"));
+  const onRemoteChangeRef = useRef(onRemoteChange);
+  onRemoteChangeRef.current = onRemoteChange;
+  const observerRef = useRef<{
+    ytext: Y.Text;
+    observer: (event: Y.YTextEvent, txn: Y.Transaction) => void;
+  } | null>(null);
 
   useEffect(() => {
     if (!noteId || !spaceId) {
@@ -169,6 +181,34 @@ export function useYjsBodyShadow(
       provider.on("status", onStatus);
       provider.on("synced", onStatus);
       onStatus();
+
+      // Observe remote diffs (including out-of-band writes from MCP) and
+      // pump them up to the host editor so its React/CodeMirror state stays
+      // in sync. Without this, the editor stays empty after a remote write
+      // and its next pushLatest clobbers the live Y.Doc with the stale
+      // local text — silently reverting MCP / cross-tab edits.
+      const ytext = doc.getText("content");
+      const observer = (_event: Y.YTextEvent, txn: Y.Transaction): void => {
+        if (cancelled) return;
+        if (txn.origin === localOriginRef.current) return;
+        const next = ytext.toString();
+        lastPushedRef.current = next;
+        onRemoteChangeRef.current?.(next);
+      };
+      ytext.observe(observer);
+      observerRef.current = { ytext, observer };
+
+      // Fire once on initial sync so the editor adopts whatever the server
+      // already had (handles the case where MCP wrote before the editor
+      // connected).
+      const fireSyncedOnce = (): void => {
+        if (cancelled) return;
+        const next = ytext.toString();
+        lastPushedRef.current = next;
+        onRemoteChangeRef.current?.(next);
+      };
+      if (provider.synced) fireSyncedOnce();
+      else provider.on("synced", fireSyncedOnce);
     })();
 
     return () => {
@@ -176,9 +216,18 @@ export function useYjsBodyShadow(
       setConnected(false);
       const p = providerRef.current;
       const d = docRef.current;
+      const obs = observerRef.current;
       providerRef.current = null;
       docRef.current = null;
+      observerRef.current = null;
       lastPushedRef.current = null;
+      if (obs) {
+        try {
+          obs.ytext.unobserve(obs.observer);
+        } catch {
+          /* noop */
+        }
+      }
       if (p) {
         try {
           p.disconnect();
@@ -211,11 +260,14 @@ export function useYjsBodyShadow(
           return true;
         }
         try {
-          // One Yjs transaction → one diff frame on the wire.
+          // One Yjs transaction → one diff frame on the wire. The origin
+          // sentinel lets our remote-diff observer (above) skip this write
+          // so we don't echo our own text back into the editor's React
+          // state.
           doc.transact(() => {
             ytext.delete(0, ytext.length);
             ytext.insert(0, text);
-          });
+          }, localOriginRef.current);
           lastPushedRef.current = text;
           return true;
         } catch {
