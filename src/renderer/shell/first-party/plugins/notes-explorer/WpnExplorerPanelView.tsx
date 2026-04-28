@@ -76,6 +76,7 @@ import {
   pushUndoEntry,
   type WpnUndoEntry,
 } from "../../../../store/wpnUndoSlice";
+import { isNoteVisibleInTree } from "./wpnExplorerTreeVisibility";
 
 type ShellViewComponentProps = {
   viewId: string;
@@ -2616,7 +2617,12 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const renderNoteRows = (projectId: string) => {
     const rows: React.ReactNode[] = [];
     for (const n of filteredNotes) {
-      if (n.depth > 0 && n.parent_id && !expandedNoteParents.has(n.parent_id)) {
+      // A descendant is visible only when *every* ancestor up to the root
+      // is expanded. Checking just the immediate parent (the pre-fix
+      // behaviour) leaked grandchildren when a higher ancestor was
+      // collapsed but mid-tree nodes were still in `expandedNoteParents`
+      // — Bug-f08b02.
+      if (n.depth > 0 && !isNoteVisibleInTree(n.id, noteParentsMap, expandedNoteParents)) {
         continue;
       }
       const hasKids = noteHasVisibleChildren(n.id);
