@@ -10,23 +10,43 @@ import { authedFetch } from "../../../../auth/auth-retry";
  * the live `Y.Text("content")` so the editor can bind a CodeMirror
  * extension (`yCollab(...)` from `y-codemirror.next`) directly to it.
  *
- * Why direct binding instead of the previous "shadow + push the latest
- * React text on every flush" approach: that pattern had React state
- * (CodeMirror value), `latestRef`, and `Y.Text` as three competing
- * sources of truth. Whenever a remote write arrived, our manual
- * `setValue` + `view.dispatch` + `onChange` round-trip raced with
- * `@uiw/react-codemirror`'s own value-prop reconciliation and could
- * leave React state stale, which a subsequent `pushLatest` then echoed
- * back to the server as a clobber. yCollab makes the Y.Text the single
- * source of truth and binds it to CodeMirror with the right transaction
- * origins so local edits never echo and remote edits land in the visible
- * editor without any React-state intermediation.
+ * yCollab makes the Y.Text the single source of truth and binds it to
+ * CodeMirror with the right transaction origins so local edits never echo
+ * and remote edits land in the visible editor without React intermediation.
  *
  * Server bridges Y.Text → `wpn_notes.content` in `onStoreDocument`, so
  * the legacy HTTP detail / list / export endpoints stay in sync.
  */
 
 const resolveSyncBase = createSyncBaseUrlResolver();
+
+/**
+ * Stable Y.Doc cache keyed by `noteId`. The hook's effect re-runs every
+ * time `spaceId` changes (e.g. on auth / membership flicker), and React
+ * StrictMode mounts effects twice in dev — both produce hook re-runs.
+ * If we created a fresh Y.Doc on every re-run, the editor's yCollab
+ * extension would briefly see a Y.Text whose `parent`/`doc` chain has
+ * been torn down while React was still rendering the previous one,
+ * crashing y-codemirror.next's ySync plugin with
+ * "Cannot read properties of null (reading 'parent')".
+ *
+ * Keeping one Y.Doc per noteId means yCollab always binds to a stable
+ * reference. The HocuspocusProvider attaches/detaches as the WS lifecycle
+ * dictates, but the underlying CRDT state and observers stay put. Memory
+ * cost: one Y.Doc per note touched in this session — small, and HMR
+ * resets the module, so dev iteration doesn't accumulate.
+ */
+const noteDocCache = new Map<string, { doc: Y.Doc; ytext: Y.Text }>();
+
+function getOrCreateNoteDoc(noteId: string): { doc: Y.Doc; ytext: Y.Text } {
+  const cached = noteDocCache.get(noteId);
+  if (cached) return cached;
+  const doc = new Y.Doc();
+  const ytext = doc.getText("content");
+  const entry = { doc, ytext };
+  noteDocCache.set(noteId, entry);
+  return entry;
+}
 
 function isLoopbackBrowserPage(): boolean {
   if (typeof window === "undefined") return true;
@@ -83,13 +103,13 @@ async function mintSpaceWsToken(
 }
 
 export interface YjsBodyShadow {
-  /** Live `Y.Text("content")` bound to this note. Pass to `yCollab()` as the
-   * first argument. Null while the hook is inert (no `noteId` / no `spaceId`)
-   * or before the WS handshake establishes the underlying `Y.Doc`. */
+  /** Live `Y.Text("content")` bound to this note. Stable across hook
+   * re-runs for the same noteId — pass to `yCollab()` as the first
+   * argument. Null while the hook is inert (no `noteId` / no `spaceId`). */
   yText: Y.Text | null;
-  /** True once the Hocuspocus handshake completes. Drives the editor's HTTP
-   * autosave fallback: when false, the editor saves via REST `saveNoteContent`
-   * because Y.Doc edits won't reach the server. */
+  /** True once the Hocuspocus handshake completes. Drives the editor's
+   * HTTP autosave fallback: when false, the editor saves via REST
+   * `saveNoteContent` because Y.Doc edits won't reach the server. */
   connected: boolean;
 }
 
@@ -105,7 +125,11 @@ export function useYjsBodyShadow(
   spaceId: string | null,
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
-  const [yText, setYText] = useState<Y.Text | null>(null);
+
+  // The Y.Text is derived directly from noteId via the stable cache —
+  // no useState, no re-render flicker. yCollab in the editor's extensions
+  // will bind to this same reference on every render until noteId changes.
+  const yText = noteId ? getOrCreateNoteDoc(noteId).ytext : null;
 
   useEffect(() => {
     if (!noteId || !spaceId) {
@@ -115,12 +139,10 @@ export function useYjsBodyShadow(
         spaceId: !!spaceId,
       });
       setConnected(false);
-      setYText(null);
       return;
     }
     let cancelled = false;
     let provider: HocuspocusProvider | null = null;
-    let doc: Y.Doc | null = null;
     (async () => {
       const syncBase = resolveSyncBase().trim().replace(/\/$/, "");
       if (!syncBase) {
@@ -137,11 +159,8 @@ export function useYjsBodyShadow(
         return;
       }
       const wsBase = resolveRealtimeWsBase(syncBase);
-      // Hocuspocus reads the document name from the protocol auth message,
-      // not from the URL path, so the base is just `/ws/yjs`.
       const wsUrl = `${wsBase.replace(/\/$/, "")}/ws/yjs`;
-      doc = new Y.Doc();
-      const ytext = doc.getText("content");
+      const { doc } = getOrCreateNoteDoc(noteId);
       provider = new HocuspocusProvider({
         url: wsUrl,
         name: noteId,
@@ -169,28 +188,15 @@ export function useYjsBodyShadow(
       provider.on("status", onStatus);
       provider.on("synced", onStatus);
       onStatus();
-      // Expose the live Y.Text — yCollab in the editor will bind to it
-      // for both initial sync and ongoing remote diffs.
-      if (!cancelled) setYText(ytext);
     })();
 
     return () => {
       cancelled = true;
       setConnected(false);
-      // IMPORTANT: do NOT call `doc.destroy()` here. The yCollab extension
-      // bound by the editor (`MarkdownNoteEditor.cmExtensions`) still holds
-      // this Y.Text; it only detaches when React re-renders and CodeMirror
-      // reconfigures the extension chain. Destroying the doc *before* that
-      // re-render fires causes y-codemirror.next's ySync plugin to crash
-      // ("Cannot read properties of null (reading 'parent')") because the
-      // ytext's parent gets nulled out while the plugin still references it.
-      //
-      // Setting `yText` to null below tells React to drop the yCollab
-      // extension on next render; the old Y.Doc then becomes unreachable
-      // and will be GC'd naturally — no explicit `destroy()` needed.
-      // Disconnecting the provider is enough to stop WS traffic and clean
-      // up its listeners.
-      setYText(null);
+      // Disconnect the WS only — leave the cached Y.Doc alone. The
+      // editor's yCollab extension may still hold the Y.Text reference
+      // until React reconciles, and the next mount of this hook (e.g.
+      // StrictMode re-mount, spaceId flicker) will reuse the same Doc.
       if (provider) {
         try {
           provider.disconnect();
@@ -200,7 +206,6 @@ export function useYjsBodyShadow(
         }
         provider = null;
       }
-      doc = null;
     };
   }, [noteId, spaceId]);
 
