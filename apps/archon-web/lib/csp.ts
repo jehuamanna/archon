@@ -32,8 +32,16 @@ function r2AssetSources(): string[] {
   return out;
 }
 
+function syncOriginAsWs(httpOrigin: string | null): string | null {
+  if (!httpOrigin) return null;
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice(8)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice(7)}`;
+  return null;
+}
+
 export function buildContentSecurityPolicy(): string {
   const syncOrigin = tryOrigin(process.env.NEXT_PUBLIC_ARCHON_SYNC_API_URL);
+  const syncWsOrigin = syncOriginAsWs(syncOrigin);
   const r2Sources = r2AssetSources();
 
   const connectParts = [
@@ -42,6 +50,7 @@ export function buildContentSecurityPolicy(): string {
     "blob:",
     "https://api.github.com",
     ...(syncOrigin ? [syncOrigin] : []),
+    ...(syncWsOrigin ? [syncWsOrigin] : []),
     ...r2Sources,
   ];
   if (process.env.NODE_ENV !== "production") {
