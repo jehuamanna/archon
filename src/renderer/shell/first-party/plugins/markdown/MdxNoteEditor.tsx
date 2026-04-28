@@ -30,6 +30,7 @@ import {
   type MdxNoteSelectionSyncRef,
   type MdxNoteWikiKeymapState,
 } from "./mdx-note-editor-codemirror";
+import { yCollab } from "y-codemirror.next";
 import { useArchonNoteModeLine } from "../../../useArchonNoteModeLine";
 import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -459,40 +460,37 @@ export function MdxNoteEditor({
     };
   }, [wikiRows, note.id]);
 
-  // When the realtime body-collab WS is open for this note, flushes ride
-  // the Yjs binary diff frame instead of a full-content HTTP PATCH. The
-  // server's `onStoreDocument` bridges Y.Text → `wpn_notes.content` so
-  // legacy HTTP read endpoints stay in sync. Falls back to the HTTP path
-  // when the standalone sync-api isn't reachable.
+  // Hocuspocus body-collab WS. When connected, the editor binds CodeMirror
+  // to `yText` directly via `yCollab(...)` (see cmExtensions below) and the
+  // server bridges Y.Text → wpn_notes.content. When not connected, the
+  // editor falls back to debounced HTTP PATCH.
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  // Adopt remote Yjs diffs (other tabs, MCP `archon_write_note`, etc.) into
-  // React state + CodeMirror so the editor doesn't push stale local text back
-  // and silently revert them. No-op when the remote text already matches the
-  // current value.
-  const applyRemoteText = useCallback((next: string) => {
-    if (latestRef.current === next) return;
-    latestRef.current = next;
-    setValue(next);
-    setPreviewContent(next);
-    const view = cmViewRef.current;
-    if (view) {
-      const cur = view.state.doc.toString();
-      if (cur !== next) {
-        view.dispatch({
-          changes: { from: 0, to: cur.length, insert: next },
-        });
-      }
-    }
-  }, []);
-  const yjsBody = useYjsBodyShadow(
-    persist ? note.id : null,
-    activeSpaceId,
-    applyRemoteText,
-  );
+  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
+
+  // Mirror the live Y.Text into React state for the components that read
+  // `value` / `previewContent` (preview, wiki autocomplete, mode line).
+  // The CodeMirror view itself is driven by yCollab; these mirrors are
+  // read-only consumers.
+  useEffect(() => {
+    const ytext = yjsBody.yText;
+    if (!ytext) return;
+    const update = (): void => {
+      const next = ytext.toString();
+      if (latestRef.current === next) return;
+      latestRef.current = next;
+      setValue(next);
+      setPreviewContent(next);
+    };
+    update();
+    ytext.observe(update);
+    return () => {
+      ytext.unobserve(update);
+    };
+  }, [yjsBody.yText]);
 
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
@@ -501,7 +499,8 @@ export function MdxNoteEditor({
     }
     firstScheduledAtRef.current = null;
     if (!persistRef.current) return;
-    if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+    // yCollab persists each keystroke through Y.Text → onStoreDocument.
+    if (yjsBodyRef.current.connected) return;
     void dispatch(
       saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
     );
@@ -509,9 +508,8 @@ export function MdxNoteEditor({
 
   const scheduleBatchedFlush = useCallback(() => {
     if (!persistRef.current) return;
+    if (yjsBodyRef.current.connected) return;
     const now = Date.now();
-    // Hard cap: if the first pending edit has been waiting MAX_WAIT_MS, flush immediately
-    // so continuous typing can't starve the save indefinitely.
     if (
       firstScheduledAtRef.current !== null &&
       now - firstScheduledAtRef.current >= MDX_AUTOSAVE_MAX_WAIT_MS
@@ -521,7 +519,6 @@ export function MdxNoteEditor({
         flushTimerRef.current = null;
       }
       firstScheduledAtRef.current = null;
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -530,7 +527,6 @@ export function MdxNoteEditor({
     if (firstScheduledAtRef.current === null) {
       firstScheduledAtRef.current = now;
     }
-    // Debounce: reset the idle timer on every keystroke so only the trailing save fires.
     if (flushTimerRef.current !== null) {
       window.clearTimeout(flushTimerRef.current);
     }
@@ -538,7 +534,7 @@ export function MdxNoteEditor({
       flushTimerRef.current = null;
       firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      if (yjsBodyRef.current.connected) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -554,9 +550,8 @@ export function MdxNoteEditor({
       }
       firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
-      // On unmount the Yjs provider is about to be destroyed too; push
-      // synchronously and only fall back to HTTP if the WS isn't open.
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      // yCollab persists each keystroke; only fall back to HTTP if WS is down.
+      if (yjsBodyRef.current.connected) return;
       void dispatch(
         saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
       );
@@ -755,17 +750,20 @@ export function MdxNoteEditor({
     [insertMdxNoteLink, sel.end, wikiTrig],
   );
 
-  const cmExtensions = useMemo(
-    () =>
-      mdxNoteEditorExtensions({
-        dark: resolvedDark,
-        readOnly,
-        wikiKeymapRef,
-        selectionSyncRef,
-        onBlurRef,
-      }),
-    [readOnly, resolvedDark],
-  );
+  const cmExtensions = useMemo(() => {
+    const ext = mdxNoteEditorExtensions({
+      dark: resolvedDark,
+      readOnly,
+      wikiKeymapRef,
+      selectionSyncRef,
+      onBlurRef,
+    });
+    // Bind CodeMirror to live Y.Text via yCollab when WS provides one.
+    if (yjsBody.yText) {
+      ext.push(yCollab(yjsBody.yText, null));
+    }
+    return ext;
+  }, [readOnly, resolvedDark, yjsBody.yText]);
 
   useEffect(() => {
     const host = cmHostRef.current;
@@ -891,7 +889,9 @@ export function MdxNoteEditor({
             </div>
             <div ref={cmHostRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <CodeMirror
-                value={value}
+                // When yCollab is bound, pass undefined so @uiw/react-codemirror
+                // skips its prop-driven dispatch — yCollab owns the doc.
+                value={yjsBody.yText ? undefined : value}
                 height="100%"
                 theme="none"
                 basicSetup={false}

@@ -48,8 +48,6 @@ const securityHeaders =
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   ...(staticExport ? { output: "export", assetPrefix: "./" } : {}),
-  /** Precompiled workspace package — keep external to avoid tracing the whole repo via bundled-docs `path` usage. */
-  serverExternalPackages: ["@archon/sync-api"],
   poweredByHeader: false,
   /**
    * Electron and some browsers load `http://127.0.0.1:3000` while dev defaults to `localhost`;
