@@ -29,6 +29,7 @@ import {
   type MarkdownNoteSelectionSyncRef,
   type MarkdownNoteWikiKeymapState,
 } from "./markdown-note-editor-codemirror";
+import { yCollab } from "y-codemirror.next";
 import { useArchonNoteModeLine } from "../../../useArchonNoteModeLine";
 import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -454,38 +455,37 @@ export function MarkdownNoteEditor({
     };
   }, [wikiRows, note.id]);
 
-  // Push debounced saves over the Hocuspocus body-collab WS when it's
-  // connected; fall back to HTTP PATCH when it isn't. See
-  // `useYjsBodyShadow.ts` for the protocol detail.
+  // Hocuspocus body-collab WS. When connected, the editor binds CodeMirror
+  // to `yText` directly via `yCollab(...)` (see cmExtensions below) and the
+  // server bridges Y.Text → wpn_notes.content. When not connected, the
+  // editor falls back to debounced HTTP PATCH.
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  // Adopt remote Yjs diffs (other tabs, MCP `archon_write_note`, etc.) into
-  // React state + CodeMirror so the editor doesn't push stale local text back
-  // and silently revert them. No-op when the remote text already matches the
-  // current value.
-  const applyRemoteText = useCallback((next: string) => {
-    if (latestRef.current === next) return;
-    latestRef.current = next;
-    setValue(next);
-    setPreviewContent(next);
-    const view = cmViewRef.current;
-    if (view) {
-      const cur = view.state.doc.toString();
-      if (cur !== next) {
-        view.dispatch({
-          changes: { from: 0, to: cur.length, insert: next },
-        });
-      }
-    }
-  }, []);
-  const yjsBody = useYjsBodyShadow(
-    persist ? note.id : null,
-    activeSpaceId,
-    applyRemoteText,
-  );
+  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
+
+  // Mirror the live Y.Text into React state for the components that read
+  // `value` / `previewContent` (preview pane, wiki-link autocomplete, mode
+  // line). The editor's own CodeMirror view is driven by yCollab — these
+  // mirrors are read-only consumers that don't write back to Y.Text.
+  useEffect(() => {
+    const ytext = yjsBody.yText;
+    if (!ytext) return;
+    const update = (): void => {
+      const next = ytext.toString();
+      if (latestRef.current === next) return;
+      latestRef.current = next;
+      setValue(next);
+      setPreviewContent(next);
+    };
+    update();
+    ytext.observe(update);
+    return () => {
+      ytext.unobserve(update);
+    };
+  }, [yjsBody.yText]);
 
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
@@ -494,7 +494,9 @@ export function MarkdownNoteEditor({
     }
     firstScheduledAtRef.current = null;
     if (!persistRef.current) return;
-    if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+    // When yCollab is bound, the WS path persists every keystroke through
+    // Y.Text → onStoreDocument → wpn_notes.content. No HTTP PATCH needed.
+    if (yjsBodyRef.current.connected) return;
     void dispatch(
       saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
     );
@@ -502,6 +504,8 @@ export function MarkdownNoteEditor({
 
   const scheduleBatchedFlush = useCallback(() => {
     if (!persistRef.current) return;
+    // Same rationale: yCollab handles persistence when WS is up.
+    if (yjsBodyRef.current.connected) return;
     const now = Date.now();
     // Hard cap: if the first pending edit has been waiting MAX_WAIT_MS, flush immediately
     // so continuous typing can't starve the save indefinitely.
@@ -514,7 +518,6 @@ export function MarkdownNoteEditor({
         flushTimerRef.current = null;
       }
       firstScheduledAtRef.current = null;
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -531,7 +534,7 @@ export function MarkdownNoteEditor({
       flushTimerRef.current = null;
       firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      if (yjsBodyRef.current.connected) return;
       void dispatch(
         saveNoteContent({ noteId: noteIdRef.current, content: latestRef.current }),
       );
@@ -548,7 +551,11 @@ export function MarkdownNoteEditor({
       }
       firstScheduledAtRef.current = null;
       if (!persistRef.current) return;
-      if (yjsBodyRef.current.pushLatest(latestRef.current)) return;
+      // yCollab persists each keystroke when WS is up; only fall back to
+      // HTTP if it isn't. (On unmount the provider is about to be destroyed
+      // anyway — the autosave debounce on the server side has already
+      // caught the latest Y.Text.)
+      if (yjsBodyRef.current.connected) return;
       void dispatch(
         saveNoteContent({ noteId: idWhenAttached, content: latestRef.current }),
       );
@@ -652,18 +659,24 @@ export function MarkdownNoteEditor({
     showToast,
   };
 
-  const cmExtensions = useMemo(
-    () =>
-      markdownNoteEditorExtensions({
-        dark: resolvedDark,
-        readOnly,
-        wikiKeymapRef,
-        selectionSyncRef,
-        onBlurRef,
-        imagePasteCtxRef,
-      }),
-    [readOnly, resolvedDark],
-  );
+  const cmExtensions = useMemo(() => {
+    const ext = markdownNoteEditorExtensions({
+      dark: resolvedDark,
+      readOnly,
+      wikiKeymapRef,
+      selectionSyncRef,
+      onBlurRef,
+      imagePasteCtxRef,
+    });
+    // When the body Y.Text is live, bind CodeMirror to it directly. yCollab
+    // owns the doc: remote diffs (other tabs, MCP, etc.) flow into the view
+    // without React intermediation, and local edits are committed to Y.Text
+    // with the right transaction origin so they don't echo back as remote.
+    if (yjsBody.yText) {
+      ext.push(yCollab(yjsBody.yText, null));
+    }
+    return ext;
+  }, [readOnly, resolvedDark, yjsBody.yText]);
 
   useEffect(() => {
     const host = cmHostRef.current;
@@ -782,7 +795,13 @@ export function MarkdownNoteEditor({
             </div>
             <div ref={cmHostRef} className="flex min-h-0 flex-1 flex-col overflow-hidden">
               <CodeMirror
-                value={value}
+                // When yCollab is bound (yText present), pass undefined so
+                // @uiw/react-codemirror skips its prop-driven dispatch and
+                // doesn't fight the binding for control of the doc. The
+                // initial doc content is seeded by yCollab from Y.Text on
+                // mount; the yText.observe effect above mirrors changes
+                // into React state for non-CodeMirror consumers.
+                value={yjsBody.yText ? undefined : value}
                 height="100%"
                 theme="none"
                 basicSetup={false}

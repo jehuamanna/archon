@@ -1,26 +1,29 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import { createSyncBaseUrlResolver } from "@archon/platform";
 import { authedFetch } from "../../../../auth/auth-retry";
 
 /**
- * Per-note Yjs shadow doc bound to the Hocuspocus body-collab WebSocket
- * (`/v1/ws/yjs/:noteId` on the standalone sync-api). Replaces per-keystroke
- * HTTP PATCH /wpn/notes/:id with binary Yjs updates over WS. The editor
- * remains plain-text in the local CodeMirror; we just maintain a shadow
- * `Y.Text("content")` and push the latest editor value into it on each
- * debounced flush — Yjs computes the minimal update and frames it over WS.
+ * Per-note Yjs body collaboration hook. Opens a Hocuspocus WebSocket
+ * connection (`/v1/ws/yjs/:noteId` on the standalone sync-api) and exposes
+ * the live `Y.Text("content")` so the editor can bind a CodeMirror
+ * extension (`yCollab(...)` from `y-codemirror.next`) directly to it.
  *
- * On `pushLatest(text)`:
- *   - If WS is connected: replace the Y.Text contents (Yjs diffs internally
- *     so only the changed bytes go on the wire), return true → caller
- *     suppresses its HTTP PATCH.
- *   - If WS is not connected: return false → caller falls back to its
- *     existing HTTP debounced save.
+ * Why direct binding instead of the previous "shadow + push the latest
+ * React text on every flush" approach: that pattern had React state
+ * (CodeMirror value), `latestRef`, and `Y.Text` as three competing
+ * sources of truth. Whenever a remote write arrived, our manual
+ * `setValue` + `view.dispatch` + `onChange` round-trip raced with
+ * `@uiw/react-codemirror`'s own value-prop reconciliation and could
+ * leave React state stale, which a subsequent `pushLatest` then echoed
+ * back to the server as a clobber. yCollab makes the Y.Text the single
+ * source of truth and binds it to CodeMirror with the right transaction
+ * origins so local edits never echo and remote edits land in the visible
+ * editor without any React-state intermediation.
  *
- * Server bridges Y.Text → `wpn_notes.content` in `onStoreDocument`, so the
- * legacy HTTP detail / list / export endpoints stay in sync.
+ * Server bridges Y.Text → `wpn_notes.content` in `onStoreDocument`, so
+ * the legacy HTTP detail / list / export endpoints stay in sync.
  */
 
 const resolveSyncBase = createSyncBaseUrlResolver();
@@ -80,52 +83,44 @@ async function mintSpaceWsToken(
 }
 
 export interface YjsBodyShadow {
-  /** Push the latest editor text into Y.Text("content"). Returns true if the
-   * push went on the wire (caller should skip its HTTP fallback). */
-  pushLatest(text: string): boolean;
-  /** True once the WS handshake completes. Drives the polling-fallback flag
-   * the same way `useRealtimeSpaceEvents` does for the explorer. */
+  /** Live `Y.Text("content")` bound to this note. Pass to `yCollab()` as the
+   * first argument. Null while the hook is inert (no `noteId` / no `spaceId`)
+   * or before the WS handshake establishes the underlying `Y.Doc`. */
+  yText: Y.Text | null;
+  /** True once the Hocuspocus handshake completes. Drives the editor's HTTP
+   * autosave fallback: when false, the editor saves via REST `saveNoteContent`
+   * because Y.Doc edits won't reach the server. */
   connected: boolean;
 }
 
 /**
- * Open a Hocuspocus connection for `noteId` while the hook is mounted.
- * `spaceId` is required for the ws-token mint; if either is null, the
- * hook stays inert and `connected` remains false (caller falls back to
- * HTTP).
+ * Open a Hocuspocus connection for `noteId` while the hook is mounted and
+ * expose the live `Y.Text("content")`. The editor binds it via
+ * `yCollab(yText, null)` in its CodeMirror extensions; remote diffs (other
+ * tabs, MCP `archon_write_note`, etc.) flow into the visible editor with no
+ * intermediate React state.
  */
 export function useYjsBodyShadow(
   noteId: string | null,
   spaceId: string | null,
-  onRemoteChange?: (text: string) => void,
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
-  const docRef = useRef<Y.Doc | null>(null);
-  const providerRef = useRef<HocuspocusProvider | null>(null);
-  const lastPushedRef = useRef<string | null>(null);
-  // Sentinel used as the Y.Transaction origin for our own pushLatest writes
-  // so the observer (below) can ignore them. Anything else — diffs the WS
-  // applies on remote updates, including out-of-band writes from MCP — comes
-  // through with a different origin and reaches `onRemoteChange`.
-  const localOriginRef = useRef<symbol>(Symbol("yjs-body-shadow-local"));
-  const onRemoteChangeRef = useRef(onRemoteChange);
-  onRemoteChangeRef.current = onRemoteChange;
-  const observerRef = useRef<{
-    ytext: Y.Text;
-    observer: (event: Y.YTextEvent, txn: Y.Transaction) => void;
-  } | null>(null);
+  const [yText, setYText] = useState<Y.Text | null>(null);
 
   useEffect(() => {
     if (!noteId || !spaceId) {
       // eslint-disable-next-line no-console
-      console.debug(
-        "[yjs-body] inert",
-        { noteId: !!noteId, spaceId: !!spaceId },
-      );
+      console.debug("[yjs-body] inert", {
+        noteId: !!noteId,
+        spaceId: !!spaceId,
+      });
       setConnected(false);
+      setYText(null);
       return;
     }
     let cancelled = false;
+    let provider: HocuspocusProvider | null = null;
+    let doc: Y.Doc | null = null;
     (async () => {
       const syncBase = resolveSyncBase().trim().replace(/\/$/, "");
       if (!syncBase) {
@@ -137,20 +132,17 @@ export function useYjsBodyShadow(
       const token = await mintSpaceWsToken(syncBase, spaceId);
       if (cancelled || !token) {
         // eslint-disable-next-line no-console
-        console.debug("[yjs-body] token mint failed", {
-          spaceId,
-          syncBase,
-        });
+        console.debug("[yjs-body] token mint failed", { spaceId, syncBase });
         setConnected(false);
         return;
       }
       const wsBase = resolveRealtimeWsBase(syncBase);
-      // Hocuspocus connects to `url` verbatim (it sends `name` in the auth
-      // protocol message, not in the URL path). The server route is mounted
-      // at `/api/v1/ws/yjs`, so the base must include `/ws/yjs`.
+      // Hocuspocus reads the document name from the protocol auth message,
+      // not from the URL path, so the base is just `/ws/yjs`.
       const wsUrl = `${wsBase.replace(/\/$/, "")}/ws/yjs`;
-      const doc = new Y.Doc();
-      const provider = new HocuspocusProvider({
+      doc = new Y.Doc();
+      const ytext = doc.getText("content");
+      provider = new HocuspocusProvider({
         url: wsUrl,
         name: noteId,
         document: doc,
@@ -163,12 +155,8 @@ export function useYjsBodyShadow(
           if (!cancelled) setConnected(false);
         },
       });
-      docRef.current = doc;
-      providerRef.current = provider;
-      // Wait until handshake completes — `synced` flips once the server
-      // sends the initial state. Until then, pushLatest() returns false.
       const onStatus = (): void => {
-        if (cancelled) return;
+        if (cancelled || !provider) return;
         const ok = provider.synced && provider.isConnected;
         // eslint-disable-next-line no-console
         console.debug("[yjs-body] status", {
@@ -181,100 +169,34 @@ export function useYjsBodyShadow(
       provider.on("status", onStatus);
       provider.on("synced", onStatus);
       onStatus();
-
-      // Observe remote diffs (including out-of-band writes from MCP) and
-      // pump them up to the host editor so its React/CodeMirror state stays
-      // in sync. Without this, the editor stays empty after a remote write
-      // and its next pushLatest clobbers the live Y.Doc with the stale
-      // local text — silently reverting MCP / cross-tab edits.
-      const ytext = doc.getText("content");
-      const observer = (_event: Y.YTextEvent, txn: Y.Transaction): void => {
-        if (cancelled) return;
-        if (txn.origin === localOriginRef.current) return;
-        const next = ytext.toString();
-        lastPushedRef.current = next;
-        onRemoteChangeRef.current?.(next);
-      };
-      ytext.observe(observer);
-      observerRef.current = { ytext, observer };
-
-      // Fire once on initial sync so the editor adopts whatever the server
-      // already had (handles the case where MCP wrote before the editor
-      // connected).
-      const fireSyncedOnce = (): void => {
-        if (cancelled) return;
-        const next = ytext.toString();
-        lastPushedRef.current = next;
-        onRemoteChangeRef.current?.(next);
-      };
-      if (provider.synced) fireSyncedOnce();
-      else provider.on("synced", fireSyncedOnce);
+      // Expose the live Y.Text — yCollab in the editor will bind to it
+      // for both initial sync and ongoing remote diffs.
+      if (!cancelled) setYText(ytext);
     })();
 
     return () => {
       cancelled = true;
       setConnected(false);
-      const p = providerRef.current;
-      const d = docRef.current;
-      const obs = observerRef.current;
-      providerRef.current = null;
-      docRef.current = null;
-      observerRef.current = null;
-      lastPushedRef.current = null;
-      if (obs) {
+      setYText(null);
+      if (provider) {
         try {
-          obs.ytext.unobserve(obs.observer);
+          provider.disconnect();
+          provider.destroy();
         } catch {
           /* noop */
         }
+        provider = null;
       }
-      if (p) {
+      if (doc) {
         try {
-          p.disconnect();
-          p.destroy();
+          doc.destroy();
         } catch {
           /* noop */
         }
-      }
-      if (d) {
-        try {
-          d.destroy();
-        } catch {
-          /* noop */
-        }
+        doc = null;
       }
     };
   }, [noteId, spaceId]);
 
-  return useMemo(
-    () => ({
-      connected,
-      pushLatest(text: string): boolean {
-        const doc = docRef.current;
-        if (!doc || !connected) return false;
-        if (lastPushedRef.current === text) return true; // no-op skip
-        const ytext = doc.getText("content");
-        const current = ytext.toString();
-        if (current === text) {
-          lastPushedRef.current = text;
-          return true;
-        }
-        try {
-          // One Yjs transaction → one diff frame on the wire. The origin
-          // sentinel lets our remote-diff observer (above) skip this write
-          // so we don't echo our own text back into the editor's React
-          // state.
-          doc.transact(() => {
-            ytext.delete(0, ytext.length);
-            ytext.insert(0, text);
-          }, localOriginRef.current);
-          lastPushedRef.current = text;
-          return true;
-        } catch {
-          return false;
-        }
-      },
-    }),
-    [connected],
-  );
+  return { yText, connected };
 }

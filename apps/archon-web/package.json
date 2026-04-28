@@ -9,13 +9,14 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@archon/sync-api": "*",
-    "@archon/platform": "*",
-    "@nodex-studio/mdx-sdk": "*",
     "@archon/mdx-sdk-runtime": "*",
+    "@archon/platform": "*",
+    "@archon/sync-api": "*",
+    "@nodex-studio/mdx-sdk": "*",
     "next": "^16.2.3",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "y-codemirror.next": "^0.3.5"
   },
   "devDependencies": {
     "@next/env": "16.2.3",
