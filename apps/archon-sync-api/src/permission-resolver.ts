@@ -1,13 +1,9 @@
 /**
- * Permission resolution against Postgres (item 9 of Plans-Phase-1).
+ * Permission resolution against Postgres.
  *
- * `getEffectiveSpaceRoles` was a two-step Mongo aggregation joining
- * `space_memberships` and `team_space_grants` via app-side `$in`. The PG
- * version is a single recursive-CTE-style UNION query — the planner does the
- * join, we fold by `(spaceId, role)` in JS picking owner > member > viewer.
- *
- * Public exports kept identical to the Mongo file so route handlers can
- * remain unchanged.
+ * `getEffectiveSpaceRoles` is a single UNION query joining `space_memberships`
+ * and `team_space_grants`; we fold by `(spaceId, role)` in JS picking owner >
+ * member > viewer.
  */
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { and, eq, sql } from "drizzle-orm";
@@ -27,9 +23,9 @@ import {
 } from "./db/schema.js";
 import type { SpaceRole } from "./org-schemas.js";
 
-/** Drizzle row shape for a workspace; replaces the Mongo `WpnWorkspaceDoc`. */
+/** Drizzle row shape for a workspace. */
 export type WorkspaceRow = typeof wpnWorkspaces.$inferSelect;
-/** Drizzle row shape for a project; replaces the Mongo `WpnProjectDoc`. */
+/** Drizzle row shape for a project. */
 export type ProjectRow = typeof wpnProjects.$inferSelect;
 
 /**

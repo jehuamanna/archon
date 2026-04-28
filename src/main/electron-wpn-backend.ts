@@ -1,7 +1,7 @@
 import type { WebContents } from "electron";
 
 /**
- * Per-renderer WPN backend: file vault (IPC + JSON on disk) vs cloud (Mongo via sync-api from renderer).
+ * Per-renderer WPN backend: file vault (IPC + JSON on disk) vs cloud (sync-api from renderer).
  * Registered when each BrowserWindow is created; defaults to file if unknown.
  * Call {@link setWebContentsWpnBackend} to switch a single window between file and logical cloud session.
  */

@@ -13,7 +13,7 @@ describe("mdx-state schema constants", () => {
     assert.equal(INLINE_THRESHOLD_BYTES, 4 * 1024 * 1024);
   });
 
-  test("chunk size is 8MB and under Mongo's 16MB hard cap", () => {
+  test("chunk size is 8MB and under the 16MB hard cap", () => {
     assert.equal(CHUNK_SIZE_BYTES, 8 * 1024 * 1024);
     assert.ok(CHUNK_SIZE_BYTES < 16 * 1024 * 1024);
   });

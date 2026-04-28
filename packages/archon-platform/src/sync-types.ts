@@ -1,4 +1,4 @@
-/** Fields required for Mongo sync (see proposed-architecture ADR-005/006). */
+/** Fields required for cloud sync (see proposed-architecture ADR-005/006). */
 export interface SyncDocument {
   id: string;
   updatedAt: number;

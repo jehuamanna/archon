@@ -1,8 +1,5 @@
 /**
- * Postgres connection layer for sync-api. Mirrors the API surface of
- * `src/db.ts` (connectMongo / ensureMongoConnected / getActiveDb) so route
- * handlers can swap `getActiveDb()` for `getDb()` and `withTx` for
- * `db.transaction(...)` with a one-line change.
+ * Postgres connection layer for sync-api.
  *
  * The pool is a singleton; `LISTEN` connections in `mdx-state/ws.ts` use
  * dedicated `pg.Client` instances acquired separately because LISTEN holds
@@ -39,8 +36,7 @@ function pgPoolOptions(): PoolConfig {
 
 /**
  * Idempotent PG connect using `DATABASE_URL` (or the local-pg dev default).
- * Concurrent invocations share one in-flight connect — same shape as
- * `ensureMongoConnected` so callers don't need to change their await pattern.
+ * Concurrent invocations share one in-flight connect.
  */
 export async function ensurePgConnected(): Promise<NodePgDatabase<typeof schema>> {
   if (db) return db;
@@ -64,7 +60,7 @@ export async function ensurePgConnected(): Promise<NodePgDatabase<typeof schema>
   }
 }
 
-/** Returns the connected db or throws — mirror of `getActiveDb()` for Mongo. */
+/** Returns the connected db or throws if `ensurePgConnected()` has not run. */
 export function getDb(): NodePgDatabase<typeof schema> {
   if (!db) {
     throw new Error("Postgres not connected — call ensurePgConnected() first");

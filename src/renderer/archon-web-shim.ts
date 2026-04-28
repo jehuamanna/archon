@@ -28,7 +28,7 @@ const noopUnsub = (): void => {};
 
 const resolveSyncApiBase = createSyncBaseUrlResolver();
 
-/** Route WPN HTTP to Fastify Mongo (`/wpn/*`) instead of headless Express (`/api/v1/wpn/*`). */
+/** Route WPN HTTP to Fastify sync-api (`/wpn/*`) instead of headless Express (`/api/v1/wpn/*`). */
 export function syncWpnUsesSyncApi(): boolean {
   if (typeof window !== "undefined" && window.__ARCHON_WPN_USE_SYNC_API__ === true) {
     return true;
@@ -98,7 +98,7 @@ async function wpnAggregateAllNoteListItems(
       }));
     } catch {
       /**
-       * Signed-in Mongo mode: never fall back to headless JSON file WPN — that is not SoT.
+       * Signed-in cloud mode: never fall back to headless JSON file WPN — that is not SoT.
        * (Legacy headless-only builds may still use the loop below when sync API is not configured.)
        */
       if (syncWpnUsesSyncApi() && resolveSyncApiBase().trim().length > 0) {
@@ -321,7 +321,7 @@ async function wpnHttp<T>(
           }
         }
         throw new Error(
-          "Sign in with cloud sync to use the Mongo-backed workspace in the browser.",
+          "Sign in with cloud sync to use the cloud-backed workspace in the browser.",
         );
       }
       wpnTrace("wpnHttp.fetch", { path, method, via: "sync-api" });
@@ -485,7 +485,7 @@ async function webRequest<T>(
 ): Promise<T> {
   if (archonWebBackendSyncOnly()) {
     throw new Error(
-      "[Archon] Headless API calls are disabled (NEXT_PUBLIC_ARCHON_WEB_BACKEND=sync-only). Run sync routes: `npm run sync-api` (Fastify on :4010) or serve `/api/v1` from Next with Mongo + JWT (see docs/deploy-archon-sync.md).",
+      "[Archon] Headless API calls are disabled (NEXT_PUBLIC_ARCHON_WEB_BACKEND=sync-only). Run sync routes: `npm run sync-api` (Fastify on :4010) or serve `/api/v1` from Next with Postgres + JWT (see docs/deploy-archon-sync.md).",
     );
   }
   const path = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
@@ -536,7 +536,7 @@ async function webRequest<T>(
     }
     const isHtml = /<\s*html[\s>]/i.test(text) || /<\s*!doctype/i.test(text);
     if (isHtml && /cannot\s+post/i.test(msg)) {
-      msg = `${msg.trim()}\n\nThe server has no route for this request. Use sync WPN: \`npm run sync-api\` + Mongo, or Next colocated \`/api/v1\` with \`NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN=1\` and Mongo in \`.env\`, and \`NEXT_PUBLIC_ARCHON_WEB_BACKEND=sync-only\` (see \`npm run dev:web\`, docs/deploy-archon-sync.md).`;
+      msg = `${msg.trim()}\n\nThe server has no route for this request. Use sync WPN: \`npm run sync-api\` + Postgres, or Next colocated \`/api/v1\` with \`NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN=1\` and Postgres in \`.env\`, and \`NEXT_PUBLIC_ARCHON_WEB_BACKEND=sync-only\` (see \`npm run dev:web\`, docs/deploy-archon-sync.md).`;
     }
     throw new Error(msg);
   }
@@ -1573,7 +1573,7 @@ export function createPlainBrowserDevStub(): ArchonRendererApi {
       generatedAt: "",
       plugins: [],
       indexError:
-        "Start the sync API (`npm run sync-api` or Next `/api/v1` with Mongo + JWT), sign in, or set NEXT_PUBLIC_ARCHON_SYNC_API_URL.",
+        "Start the sync API (`npm run sync-api` or Next `/api/v1` with Postgres + JWT), sign in, or set NEXT_PUBLIC_ARCHON_SYNC_API_URL.",
     }),
     installMarketplacePlugin: async () => ({
       success: false,

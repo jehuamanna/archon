@@ -19,7 +19,7 @@ export function ElectronHomeChromeBar(): React.ReactElement {
       {cloudWpn ? (
         <span
           className="rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-800 dark:text-sky-200"
-          title="This window uses cloud WPN (Mongo). Use File → New local window for a folder vault."
+          title="This window uses cloud WPN. Use File → New local window for a folder vault."
         >
           Cloud WPN
         </span>

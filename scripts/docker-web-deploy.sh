@@ -47,7 +47,7 @@ fi
 if ! docker container inspect "$GATEWAY" &>/dev/null; then
   echo "Error: container '$GATEWAY' does not exist." >&2
   echo "Start the stack first:" >&2
-  echo "  npm run deploy                    # Mongo + sync-api + gateway + UI" >&2
+  echo "  npm run deploy                    # Postgres + sync-api + gateway + UI" >&2
   echo "  npm run docker:api:up:detached   # compose only (set ARCHON_HOST_PROJECT if using --profile legacy)" >&2
   exit 1
 fi

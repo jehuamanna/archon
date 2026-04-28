@@ -1,12 +1,9 @@
 /**
- * Default-org / default-space scaffolding (ports of the equally-named helpers
- * from the legacy `db.ts`).
+ * Default-org / default-space scaffolding.
  *
- * `ensureUserHasDefaultOrg` and `ensureDefaultSpaceForOrg` were originally
- * idempotent backfill functions that ran during `connectMongo`'s migration
- * sweep AND on demand when the org-routes layer needed to land a new user
- * into a sane default. The PG version is the on-demand path only; the
- * historical migration sweep retires (drizzle-kit owns migration state).
+ * `ensureUserHasDefaultOrg` and `ensureDefaultSpaceForOrg` are idempotent
+ * helpers invoked on demand when org-routes need to land a new user into a
+ * sane default. Migration state is owned by drizzle-kit.
  */
 import { randomUUID } from "node:crypto";
 import { eq, and, sql } from "drizzle-orm";

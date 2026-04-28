@@ -1,3 +1,4 @@
+import { createSyncBaseUrlResolver } from "@archon/platform";
 import {
   getAccessToken,
   getActiveOrgId,
@@ -15,6 +16,8 @@ import {
   writeCloudSyncRefreshToken,
   writeCloudSyncToken,
 } from "../cloud-sync/cloud-sync-storage";
+
+const resolveSyncBase = createSyncBaseUrlResolver();
 
 type AuthResponse = { token: string; user: AuthUser };
 
@@ -52,7 +55,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   // actually sending a body.
   const bodyHeaders: Record<string, string> =
     init?.body != null ? { "Content-Type": "application/json" } : {};
-  const res = await fetch(`/api/v1${path}`, {
+  const base = resolveSyncBase().replace(/\/$/, "");
+  const url = base ? `${base}${path}` : `/api/v1${path}`;
+  const res = await fetch(url, {
     credentials: "include",
     ...(init ?? {}),
     headers: {

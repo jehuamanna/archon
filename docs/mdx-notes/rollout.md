@@ -38,7 +38,7 @@ When the web shell fetches an `mdx` note:
 
 - `ARCHON_MDX_RUNTIME_DISABLED=1 && restart sync-api`.
 - Web client continues to serve; `mdx` notes display raw source + banner.
-- No data loss; state remains intact in Mongo for the next re-enable.
+- No data loss; state remains intact in Postgres for the next re-enable.
 
 ## Regression gates
 
@@ -52,7 +52,7 @@ Before enabling for any workspace:
 ## Ownership in production
 
 - Bug reports tagged `mdx-mini-app` route to the team owning this plugin.
-- On-call should know: the only new failure modes are MDX compile errors (fallback UI) and Mongo transaction retries (logged via sync-api logger). A single WS outage is graceful-degrade — the HTTP layer keeps working.
+- On-call should know: the only new failure modes are MDX compile errors (fallback UI) and Postgres transaction retries (logged via sync-api logger). A single WS outage is graceful-degrade — the HTTP layer keeps working.
 
 ## Follow-ups not in v1
 

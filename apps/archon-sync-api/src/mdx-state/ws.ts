@@ -106,11 +106,7 @@ async function acquireChannel(
   };
 }
 
-/**
- * Registers the mini-app state WebSocket endpoint at GET /v1/ws/mdx-state.
- * Path matches the legacy Mongo Change Streams endpoint so the web client
- * doesn't need to change.
- */
+/** Registers the mini-app state WebSocket endpoint at GET /v1/ws/mdx-state. */
 export function registerMdxStateWsRoutes(
   app: FastifyInstance,
   opts: { jwtSecret: string },

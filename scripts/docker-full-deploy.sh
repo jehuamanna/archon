@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full stack + zero-downtime UI deploy (Mongo, sync-api, gateway, web; WPN in Mongo).
+# Full stack + zero-downtime UI deploy (Postgres, sync-api, gateway, web; WPN in Postgres).
 #
 # Usage:
 #   npm run deploy
@@ -10,7 +10,7 @@
 # What it does:
 #   1. Ensures dist/plugins exists (used by optional marketplace profile / plugin builds).
 #   2. Ensures ./.archon-docker-workspace exists (local scratch path for scripts that expect it).
-#   3. Brings up archon-sync-api, archon-web-blue, archon-gateway (and mongo-sync when ARCHON_LOCAL_MONGO=1).
+#   3. Brings up archon-sync-api, archon-web-blue, archon-gateway (and postgres when ARCHON_LOCAL_PG=1).
 #      Then always runs `compose up --no-deps archon-gateway` so :8080 is listening after partial stacks.
 #   4. Runs scripts/docker-web-deploy.sh to build the web image, blue/green swap, and prune dangling images.
 #
@@ -29,8 +29,17 @@ if [[ -f "${REPO_ROOT}/.env" ]]; then
   set +a
 fi
 
-# shellcheck disable=SC1091
-source "${REPO_ROOT}/scripts/docker-local-mongo-env.sh"
+# Local Postgres container is opt-in via ARCHON_LOCAL_PG=1 — set it in .env to bring up `postgres`
+# alongside the rest of the stack via the `local-pg` compose profile.
+ARCHON_LOCAL_PG="${ARCHON_LOCAL_PG:-0}"
+if [[ "$ARCHON_LOCAL_PG" == "1" ]]; then
+  compose_pf=(--profile local-pg)
+  pg_svc=(postgres)
+else
+  compose_pf=()
+  pg_svc=()
+fi
+export ARCHON_LOCAL_PG
 
 # Match docker compose project isolation (default: checkout directory basename). Jenkins sets
 # COMPOSE_PROJECT_NAME=archon so jobs under varying workspace paths reuse one stack; containers
@@ -67,7 +76,7 @@ remove_if_not_this_compose_project() {
 
 clear_foreign_compose_containers() {
   remove_if_not_this_compose_project archon-gateway
-  remove_if_not_this_compose_project archon-mongo-sync
+  remove_if_not_this_compose_project archon-postgres
   remove_if_not_this_compose_project archon-sync-api
   remove_if_not_this_compose_project archon-api
   remove_if_not_this_compose_project archon-web-blue
@@ -79,7 +88,7 @@ clear_foreign_compose_containers
 # Stopped archon-web-blue / archon-web-green still hold fixed container_name values; compose then
 # errors with "already in use". Remove only slots that are not serving traffic: always remove if
 # stopped; if running, remove only when not the active upstream in deploy/nginx-active-web.upstream.conf
-# (same source the gateway uses). Running gateway/sync/mongo are only removed above when their
+# (same source the gateway uses). Running gateway/sync/postgres are only removed above when their
 # compose project differs from COMPOSE_PROJECT_NAME.
 ACTIVE_FILE="${REPO_ROOT}/deploy/nginx-active-web.upstream.conf"
 
@@ -178,7 +187,7 @@ remove_docker_run_web_slot() {
 remove_docker_run_web_slot archon-web-blue
 remove_docker_run_web_slot archon-web-green
 
-echo "[archon] Starting archon-sync-api + web (blue) + gateway (ARCHON_LOCAL_MONGO=${ARCHON_LOCAL_MONGO})..."
+echo "[archon] Starting archon-sync-api + web (blue) + gateway (ARCHON_LOCAL_PG=${ARCHON_LOCAL_PG})..."
 active_is_docker_run=false
 if [[ -n "$active_line" ]]; then
   active_proj="$(docker container inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$active_line" 2>/dev/null || true)"
@@ -190,10 +199,10 @@ fi
 compose_up() {
   if [[ "$active_is_docker_run" == "true" ]]; then
     # Avoid pulling in archon-web-blue via depends_on (would conflict with an active docker-run slot).
-    docker compose "${compose_pf[@]}" up -d --build --remove-orphans "${mongo_svc[@]}" archon-sync-api
+    docker compose "${compose_pf[@]}" up -d --build --remove-orphans "${pg_svc[@]}" archon-sync-api
     docker compose "${compose_pf[@]}" up -d --build --remove-orphans --no-deps archon-gateway
   else
-    docker compose "${compose_pf[@]}" up -d --build --remove-orphans "${mongo_svc[@]}" archon-sync-api archon-web-blue archon-gateway
+    docker compose "${compose_pf[@]}" up -d --build --remove-orphans "${pg_svc[@]}" archon-sync-api archon-web-blue archon-gateway
   fi
 }
 

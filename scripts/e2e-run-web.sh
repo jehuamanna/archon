@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build @archon/web, start archon-sync-api + Next production server, run Playwright smoke tests.
-# Requires Mongo at MONGODB_URI (default mongodb://127.0.0.1:27017).
+# Requires Postgres at DATABASE_URL (default postgres://archon:archon@127.0.0.1:5432/archon_sync).
 #
 # Ports (override if busy):
 #   PORT / E2E_SYNC_API_PORT — sync-api (default 4010)
@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-export MONGODB_URI="${MONGODB_URI:-mongodb://127.0.0.1:27017}"
+export DATABASE_URL="${DATABASE_URL:-postgres://archon:archon@127.0.0.1:5432/archon_sync}"
 export JWT_SECRET="${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}"
 export PORT="${PORT:-${E2E_SYNC_API_PORT:-4010}}"
 export HOST="${HOST:-127.0.0.1}"

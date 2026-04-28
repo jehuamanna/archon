@@ -1,5 +1,5 @@
-# Default stack: archon-sync-api + archon-web-blue + archon-gateway (WPN in Mongo).
-# Local Mongo (`mongo-sync`) is opt-in via profile `local-mongo` (see ARCHON_LOCAL_MONGO in scripts).
+# Default stack: archon-sync-api + archon-web-blue + archon-gateway (WPN in Postgres).
+# Local Postgres (`postgres`) is opt-in via profile `local-pg` (see ARCHON_LOCAL_PG in scripts).
 # See docs/deploy-archon-sync.md
 #
 # Usage (gateway on host port ARCHON_GATEWAY_PORT, default 8080):
@@ -19,19 +19,9 @@
 #
 # Full stack + UI deploy:
 #   npm run deploy
-#   Open http://127.0.0.1:8080 — WPN in Mongo (local container with --profile local-mongo, or set MONGODB_URI for remote).
+#   Open http://127.0.0.1:8080 — WPN in Postgres (local container with --profile local-pg, or set DATABASE_URL for remote).
 
 services:
-  mongo-sync:
-    profiles: ["local-mongo"]
-    image: mongo:7
-    container_name: archon-mongo-sync
-    restart: unless-stopped
-    ports:
-      - "${ARCHON_MONGO_SYNC_PORT:-27017}:27017"
-    volumes:
-      - archon-mongo-sync-data:/data
-
   postgres:
     profiles: ["local-pg"]
     image: postgres:16
@@ -64,8 +54,7 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "4010"
-      MONGODB_URI: ${MONGODB_URI:-mongodb://mongo-sync:27017}
-      MONGODB_DB: ${MONGODB_DB:-archon_sync}
+      DATABASE_URL: ${DATABASE_URL:-postgres://archon:archon@postgres:5432/archon_sync}
       JWT_SECRET: ${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}
       ARCHON_BUNDLED_DOCS_DIR: /app/docs/bundled-plugin-authoring
     healthcheck:
@@ -176,5 +165,4 @@ services:
 
 volumes:
   archon-minio-data:
-  archon-mongo-sync-data:
   archon-postgres-data:

@@ -67,7 +67,7 @@ function parseNoteIdFromInternalMarkdownHref(href: string): string | null {
   return parts[0] ?? null;
 }
 
-/** Public row shape (drops userId + settings — same conventions as Mongo path). */
+/** Public row shape (drops userId + settings). */
 function workspaceRow(d: WorkspaceRow): Omit<WorkspaceRow, "userId" | "settings"> {
   const { userId: _u, settings: _s, ...rest } = d;
   void _u;

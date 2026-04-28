@@ -8,7 +8,7 @@
  * Bandwidth overhead is bounded: at most two short strings per image note
  * and zero bytes for every other type.
  *
- * Kept pure so it can be unit-tested without spinning up Mongo.
+ * Kept pure so it can be unit-tested without spinning up Postgres.
  */
 
 export type NoteSearchHints = {

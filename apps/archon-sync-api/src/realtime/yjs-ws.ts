@@ -179,14 +179,37 @@ export function registerYjsWsRoutes(
     },
     async onStoreDocument({ documentName, document, context }) {
       const noteId = documentName;
+      const text = document.getText("content").toString();
+      // Refuse to persist an empty Y.Doc that would clobber existing
+      // `wpn_notes.content`. Hocuspocus may invoke onStoreDocument early
+      // in the connection lifecycle (before sync completes) or after a
+      // client mounted with an empty Y.Text shadow; persisting the empty
+      // state then would replace the seed with "" both in `yjs_state`
+      // and in `wpn_notes.content`, and the next open would `applyUpdate`
+      // the 2-byte empty state and skip the seed branch — losing content
+      // forever. If the editor genuinely cleared the note, that is
+      // expressed as a non-empty Y.Doc with delete-set entries, so the
+      // empty-string check here is a strict guard, not a false positive.
+      if (text.length === 0) {
+        const noteRows = await getDb()
+          .select({ content: wpnNotes.content })
+          .from(wpnNotes)
+          .where(eq(wpnNotes.id, noteId))
+          .limit(1);
+        if ((noteRows[0]?.content ?? "").length > 0) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[yjs-ws] skip store: empty Y.Doc would clobber non-empty content",
+            { noteId },
+          );
+          return;
+        }
+      }
       const fullState = Buffer.from(Y.encodeStateAsUpdate(document));
       await adapter.storeDoc(noteId, fullState);
       // Bridge Yjs body state → `wpn_notes.content` so the legacy HTTP
       // detail / list / export endpoints (which read from `wpn_notes`,
-      // not `yjs_state`) stay in sync. Without this, switching the
-      // editor to push edits over Yjs would freeze `wpn_notes.content`
-      // at the seed value forever.
-      const text = document.getText("content").toString();
+      // not `yjs_state`) stay in sync.
       try {
         const editorUserId =
           (context as { user?: { id?: string } } | undefined)?.user?.id;

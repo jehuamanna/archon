@@ -1,20 +1,14 @@
 /**
- * Drizzle schema for sync-api on Postgres. Mirrors the 22 Mongo collections
- * from `mongodump-pre-cutover-20260425-162501/nodex_sync/` plus a `note_edges`
- * table (for backfilled cross-links per Q2=a) and a `legacy_object_id_map`
- * table (for ObjectId→UUID translation per Q1=B).
+ * Drizzle schema for sync-api on Postgres.
  *
  * Conventions:
  *  - All entity primary keys are `uuid`. WPN tables (workspaces/projects/notes)
- *    inherit their UUIDs from the source data; ObjectId-keyed entities are
- *    reissued at import time and the legacy hex is stored in
- *    `legacy_object_id_map` for boundary translation.
- *  - Timestamp fields keep their existing flavor: epoch-ms `bigint` for fields
- *    that were `created_at_ms` / `updated_at_ms` in the Mongo schema; PG
- *    `timestamptz` for fields that were Mongo `Date` objects (createdAt,
- *    updatedAt, ts, etc.). The importer translates accordingly.
- *  - Uniqueness constraints mirror the Mongo `ensureIndexes` setup in
- *    apps/archon-sync-api/src/db.ts (around lines 180–290).
+ *    inherit UUIDs from source data; legacy 24-char hex ids that survived an
+ *    earlier cutover are tracked in `legacy_object_id_map` for boundary
+ *    translation.
+ *  - Timestamp fields use epoch-ms `bigint` for `created_at_ms` /
+ *    `updated_at_ms` style fields and PG `timestamptz` for createdAt /
+ *    updatedAt / ts style fields.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -63,8 +57,8 @@ export const legacyObjectIdMap = pgTable(
 // ---------- identity ----------
 
 /**
- * `users.refreshSessions` is `RefreshSessionDoc[]` ({ jti, createdAt }) in Mongo;
- * stored as `jsonb` here. `lastActiveSpaceByOrg` keeps its keyed-object shape.
+ * `users.refreshSessions` is an array of `{ jti, createdAt }` stored as `jsonb`.
+ * `lastActiveSpaceByOrg` is a keyed-object jsonb.
  */
 export const users = pgTable(
   "users",
@@ -317,9 +311,8 @@ export const projectShares = pgTable(
 
 // ---------- WPN (workspace / project / note tree + cross-link edges) ----------
 
-// Note: WPN-tree TS field names match the existing Mongo doc shape
-// (snake_case for indexes / timestamps / structural fields) so route
-// handlers and permission-resolver consumers don't need a mapper.
+// WPN-tree TS field names use snake_case for indexes / timestamps / structural
+// fields so route handlers and permission-resolver consumers don't need a mapper.
 export const wpnWorkspaces = pgTable(
   "wpn_workspaces",
   {
@@ -512,8 +505,8 @@ export const notifications = pgTable(
 // ---------- mdx-state ----------
 
 /**
- * The mdx-state head/chunks/cursors moved to PG. Notification fanout is now
- * `pg_notify('mdx:'||workspaceId, chunkId)` (replaces Mongo Change Streams).
+ * mdx-state head/chunks/cursors live in PG. Notification fanout uses
+ * `pg_notify('mdx:'||workspaceId, chunkId)`.
  */
 export const mdxStateHead = pgTable(
   "mdx_state_head",

@@ -1,10 +1,9 @@
 /**
  * Per-project mdx-state service on Postgres.
  *
- * Replaces the Mongo replica-set/standalone fork: PG transactions are
- * uniform, so the inline + chunked write paths are both wrapped in a
- * single `withTx`. Readers protect themselves from torn state by filtering
- * chunks on `headVersion`, same contract as the Mongo path.
+ * The inline + chunked write paths are both wrapped in a single `withTx`.
+ * Readers protect themselves from torn state by filtering chunks on
+ * `headVersion`.
  *
  * Notification: every successful put fires `pg_notify('mdx:<projectId>', …)`
  * via mdx-state/notify.ts so the WS subscriber re-fetches the head row.
@@ -123,7 +122,7 @@ export class MdxStateService {
       .orderBy(asc(mdxStateChunks.chunkIndex));
     if (chunks.length === 0) {
       // Orphaned chunked head — chunks deleted but head not flipped. Treat
-      // as absent (matches Mongo path).
+      // as absent.
       return { value: undefined, version: 0, mode: "absent" };
     }
     const buf = Buffer.concat(chunks.map((c) => Buffer.from(c.data as Buffer)));

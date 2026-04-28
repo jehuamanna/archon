@@ -54,7 +54,7 @@ export function ElectronRunModeGreet({
           <button type="button" className={card} onClick={() => onChoose("cloud")}>
             <span className="text-[13px] font-semibold">Cloud</span>
             <span className="mt-2 text-left text-[12px] leading-5 text-muted-foreground">
-              Same WPN path as the browser: Mongo-backed workspaces via the sync API. Register or sign in is shown
+              Same WPN path as the browser: cloud-backed workspaces via the sync API. Register or sign in is shown
               automatically when you open this mode.
             </span>
           </button>

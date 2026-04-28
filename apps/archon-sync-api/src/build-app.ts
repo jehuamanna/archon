@@ -53,6 +53,8 @@ export async function buildSyncApiApp(
       "Authorization",
       "Accept",
       "X-Requested-With",
+      "X-Archon-Org",
+      "X-Archon-Space",
     ],
     maxAge: 86400,
   });

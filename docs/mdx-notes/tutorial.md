@@ -328,7 +328,7 @@ Blocked: `fetch`, `window`, `document`, `eval`, `Function`, `globalThis`, `impor
 - **Builder's Code toggle** — `Ctrl+/` swaps between Builder and raw MDX. Use Code for anything more than simple drop-and-edit.
 - **Live updates** — every `<Value>`, `<List>`, `<Table>`, `<Chart>` reading the same key updates across all open tabs within ~1 second.
 - **Safe by default** — you can't break the app from an MDX note. If a component errors, you'll see a fallback tile; siblings keep rendering.
-- **State persists** — state lives in Mongo per project. Deleting the note does not delete its state keys. Use a fresh key name if you want a clean start.
+- **State persists** — state lives in Postgres per project. Deleting the note does not delete its state keys. Use a fresh key name if you want a clean start.
 
 ---
 

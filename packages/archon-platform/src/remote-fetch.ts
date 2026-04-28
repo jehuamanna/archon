@@ -60,7 +60,7 @@ export type CreateFetchRemoteApiOptions = {
 };
 
 /**
- * HTTP client for `@archon/sync-api` (Fastify + Mongo).
+ * HTTP client for `@archon/sync-api` (Fastify + Postgres).
  * If base URL is empty, `syncPush` / `syncPull` no-op; `auth*` throws.
  */
 export function createFetchRemoteApi(

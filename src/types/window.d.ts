@@ -31,7 +31,7 @@ declare global {
     __ARCHON_PDFJS_WORKER_SRC__?: string;
     /** Base URL of the headless HTTP API (no trailing slash); from query, localStorage, or the web API bar. */
     __ARCHON_WEB_API_BASE__?: string;
-    /** Base URL of the Fastify Mongo sync API (`@archon/sync-api`), no trailing slash. */
+    /** Base URL of the Fastify sync API (`@archon/sync-api`), no trailing slash. */
     __ARCHON_SYNC_API_BASE__?: string;
     /**
      * When true (or `NEXT_PUBLIC_ARCHON_WPN_USE_SYNC_API=1`), `window.Archon` WPN calls use the sync API

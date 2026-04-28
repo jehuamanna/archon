@@ -43,8 +43,8 @@ That's it — you have a shared counter backed by `useProjectState("clicks")` an
 - The builder serialized your tree to readable MDX (`<Button label="Click me" onClick="clicks" />` + a Markdown block).
 - On save, the MDX source was stored in the note's `content`.
 - On render, the web MDX runtime compiled it once (cached in IndexedDB via sha256 content hash) and mounted the SDK components.
-- `<Button onClick="clicks">` increments the project-scoped state key `clicks`, which writes to `mdx_state_head` in Mongo.
-- A Mongo Change Stream pushes the write over a WebSocket to every open viewer, who sees the new value within ~1s.
+- `<Button onClick="clicks">` increments the project-scoped state key `clicks`, which writes to `mdx_state_head` in Postgres.
+- A `pg_notify` fanout pushes the write over a WebSocket to every open viewer, who sees the new value within ~1s.
 
 ## Troubleshooting
 

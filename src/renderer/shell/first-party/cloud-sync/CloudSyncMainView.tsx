@@ -77,14 +77,14 @@ export function CloudSyncMainView(): React.ReactElement {
       <div className="box-border h-full overflow-auto p-6">
         <h2 className="text-[13px] font-semibold text-foreground">Cloud sync</h2>
         <p className="mt-1 max-w-lg text-[12px] text-muted-foreground">
-          Mongo-backed notes via the Fastify sync API. Legacy workspace notes are
+          Cloud-backed notes via the Fastify sync API. Legacy workspace notes are
           unchanged. API base:{" "}
           <span className="font-mono text-[11px]">{apiBase || "see env"}</span>
         </p>
         {isEphemeralScratchExperience() ? (
           <p className="mt-3 max-w-lg rounded-md border border-amber-500/35 bg-amber-500/10 p-2 text-[11px] leading-relaxed text-muted-foreground">
             Scratch / try-out: notes use IndexedDB (and browser try-out also uses a localStorage flag) on this device
-            until you authenticate. Sign in below to use the sync API (Mongo) when configured.
+            until you authenticate. Sign in below to use the sync API when configured.
           </p>
         ) : null}
         <div className="mt-6 max-w-sm space-y-3">

@@ -4,7 +4,7 @@ import { useSDKContext } from "./context";
 type Dispatch<T> = (next: T | ((prev: T) => T)) => void;
 
 /**
- * Primary state primitive — each `key` is its own Mongo doc (`project_state_head`).
+ * Primary state primitive — each `key` is its own row in `project_state_head`.
  * Optimistic local echo; reconciles on server ack.
  */
 export function useProjectState<T>(
