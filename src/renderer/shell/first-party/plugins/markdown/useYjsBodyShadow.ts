@@ -177,6 +177,19 @@ export function useYjsBodyShadow(
     return () => {
       cancelled = true;
       setConnected(false);
+      // IMPORTANT: do NOT call `doc.destroy()` here. The yCollab extension
+      // bound by the editor (`MarkdownNoteEditor.cmExtensions`) still holds
+      // this Y.Text; it only detaches when React re-renders and CodeMirror
+      // reconfigures the extension chain. Destroying the doc *before* that
+      // re-render fires causes y-codemirror.next's ySync plugin to crash
+      // ("Cannot read properties of null (reading 'parent')") because the
+      // ytext's parent gets nulled out while the plugin still references it.
+      //
+      // Setting `yText` to null below tells React to drop the yCollab
+      // extension on next render; the old Y.Doc then becomes unreachable
+      // and will be GC'd naturally — no explicit `destroy()` needed.
+      // Disconnecting the provider is enough to stop WS traffic and clean
+      // up its listeners.
       setYText(null);
       if (provider) {
         try {
@@ -187,14 +200,7 @@ export function useYjsBodyShadow(
         }
         provider = null;
       }
-      if (doc) {
-        try {
-          doc.destroy();
-        } catch {
-          /* noop */
-        }
-        doc = null;
-      }
+      doc = null;
     };
   }, [noteId, spaceId]);
 
