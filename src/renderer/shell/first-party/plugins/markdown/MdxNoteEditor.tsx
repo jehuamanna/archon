@@ -467,7 +467,30 @@ export function MdxNoteEditor({
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  // Adopt remote Yjs diffs (other tabs, MCP `archon_write_note`, etc.) into
+  // React state + CodeMirror so the editor doesn't push stale local text back
+  // and silently revert them. No-op when the remote text already matches the
+  // current value.
+  const applyRemoteText = useCallback((next: string) => {
+    if (latestRef.current === next) return;
+    latestRef.current = next;
+    setValue(next);
+    setPreviewContent(next);
+    const view = cmViewRef.current;
+    if (view) {
+      const cur = view.state.doc.toString();
+      if (cur !== next) {
+        view.dispatch({
+          changes: { from: 0, to: cur.length, insert: next },
+        });
+      }
+    }
+  }, []);
+  const yjsBody = useYjsBodyShadow(
+    persist ? note.id : null,
+    activeSpaceId,
+    applyRemoteText,
+  );
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
 
