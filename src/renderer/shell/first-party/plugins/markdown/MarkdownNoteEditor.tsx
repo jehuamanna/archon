@@ -6,7 +6,11 @@ import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
 import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
-import { useYjsBodyShadow } from "./useYjsBodyShadow";
+import {
+  useYjsBodyShadow,
+  colorForUserId,
+  type CollabUser,
+} from "./useYjsBodyShadow";
 import MarkdownRenderer from "../../../../components/renderers/MarkdownRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -463,7 +467,25 @@ export function MarkdownNoteEditor({
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  // Identity for Yjs awareness: peers see my caret labelled with this name
+  // and tinted with this color. Memoised so a new object reference doesn't
+  // re-trigger the awareness refresh effect every render.
+  const collabUser: CollabUser | null = useMemo(() => {
+    if (auth.state.status !== "authed") return null;
+    const u = auth.state.user;
+    const name = u.username || u.email.split("@")[0] || "User";
+    return { id: u.id, name, color: colorForUserId(u.id) };
+  }, [
+    auth.state.status,
+    auth.state.status === "authed" ? auth.state.user.id : null,
+    auth.state.status === "authed" ? auth.state.user.username : null,
+    auth.state.status === "authed" ? auth.state.user.email : null,
+  ]);
+  const yjsBody = useYjsBodyShadow(
+    persist ? note.id : null,
+    activeSpaceId,
+    collabUser,
+  );
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
 
@@ -709,10 +731,17 @@ export function MarkdownNoteEditor({
     // diffs flow into the view without React intermediation, and local
     // edits are committed to Y.Text with the right transaction origin.
     if (yjsBody.yText && yjsBody.connected) {
-      ext.push(yCollab(yjsBody.yText, null));
+      ext.push(yCollab(yjsBody.yText, yjsBody.awareness));
     }
     return ext;
-  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.connected, note.id]);
+  }, [
+    readOnly,
+    resolvedDark,
+    yjsBody.yText,
+    yjsBody.connected,
+    yjsBody.awareness,
+    note.id,
+  ]);
 
   useEffect(() => {
     const host = cmHostRef.current;
