@@ -1381,6 +1381,8 @@ export type MasterAdminRow = {
   userId: string;
   email: string;
   displayName: string | null;
+  /** True for the bootstrap admin (`ARCHON_MASTER_ADMIN_EMAIL`); cannot be demoted. */
+  isBootstrap: boolean;
 };
 
 export type OrgAdminRow = {

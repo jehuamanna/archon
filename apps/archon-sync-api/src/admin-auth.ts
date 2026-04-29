@@ -43,6 +43,27 @@ export async function requireMasterAdmin(
 }
 
 /**
+ * Returns the configured bootstrap-admin email (lowercased) or `null` when
+ * `ARCHON_MASTER_ADMIN_EMAIL` is unset. The bootstrap admin is the operator
+ * account `ensureMasterAdmin` provisions on boot — it must remain a master
+ * admin for the lifetime of the deployment, otherwise a restart could leave
+ * the platform with no usable master account.
+ */
+export function bootstrapMasterAdminEmail(): string | null {
+  const configured = (process.env.ARCHON_MASTER_ADMIN_EMAIL ?? "")
+    .trim()
+    .toLowerCase();
+  return configured.length > 0 ? configured : null;
+}
+
+/** True when the supplied email matches the configured bootstrap admin. */
+export function isBootstrapMasterAdminEmail(email: string | null | undefined): boolean {
+  const configured = bootstrapMasterAdminEmail();
+  if (!configured) return false;
+  return (email ?? "").trim().toLowerCase() === configured;
+}
+
+/**
  * First-run promotion: if `ARCHON_MASTER_ADMIN_EMAIL` matches the user's
  * email, flip `is_master_admin` to true on first authentication. Idempotent.
  */

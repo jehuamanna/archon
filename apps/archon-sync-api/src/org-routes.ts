@@ -56,6 +56,7 @@ import {
 import { recordAudit } from "./audit.js";
 import { buildSessionsAfterAppend } from "./refresh-sessions.js";
 import {
+  ensureDefaultTeamForOrg,
   ensureUserHasDefaultOrg,
   getDefaultTeamIdForOrg,
 } from "./org-defaults.js";
@@ -118,17 +119,51 @@ export function registerOrgRoutes(
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
     let memberships = await listMembershipsForUser(auth.sub);
-    if (memberships.length === 0) {
-      const userRows = await db()
-        .select({ email: users.email, isMasterAdmin: users.isMasterAdmin })
-        .from(users)
-        .where(eq(users.id, auth.sub))
-        .limit(1);
-      // Skip auto-create for master admins — they're platform-wide and
-      // shouldn't get an auto-personal-org sneaked in via /orgs/me; they
-      // manage orgs from the master console (`/master/orgs`).
-      if (userRows[0] && userRows[0].isMasterAdmin !== true) {
-        await ensureUserHasDefaultOrg(auth.sub, userRows[0].email);
+    const userRows = await db()
+      .select({
+        email: users.email,
+        isMasterAdmin: users.isMasterAdmin,
+        defaultOrgId: users.defaultOrgId,
+        lockedOrgId: users.lockedOrgId,
+      })
+      .from(users)
+      .where(eq(users.id, auth.sub))
+      .limit(1);
+    const isMaster = userRows[0]?.isMasterAdmin === true;
+    if (memberships.length === 0 && userRows[0] && !isMaster) {
+      // Non-master with zero memberships: bootstrap their personal org.
+      // Master admins are platform-wide and shouldn't get an auto-personal
+      // org sneaked in via /orgs/me — they manage orgs from the master
+      // console (`/master/orgs`).
+      await ensureUserHasDefaultOrg(auth.sub, userRows[0].email);
+      memberships = await listMembershipsForUser(auth.sub);
+    }
+    if (isMaster) {
+      // Heal orgs the master created before they were auto-enrolled (or
+      // that lost their membership for any reason): if they own the org
+      // but aren't a member, enroll them as admin and scaffold the
+      // default team. Idempotent, so harmless on repeat calls.
+      const ownedRows = await db()
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.ownerUserId, auth.sub));
+      const memberOrgIds = new Set(memberships.map((m) => m.orgId));
+      const orphans = ownedRows.filter((o) => !memberOrgIds.has(o.id));
+      if (orphans.length > 0) {
+        for (const o of orphans) {
+          await db()
+            .insert(orgMemberships)
+            .values({
+              orgId: o.id,
+              userId: auth.sub,
+              role: "admin",
+              joinedAt: new Date(),
+            })
+            .onConflictDoNothing({
+              target: [orgMemberships.orgId, orgMemberships.userId],
+            });
+          await ensureDefaultTeamForOrg(o.id, auth.sub);
+        }
         memberships = await listMembershipsForUser(auth.sub);
       }
     }
@@ -141,14 +176,6 @@ export function registerOrgRoutes(
             .from(organizations)
             .where(inArray(organizations.id, orgIds));
     const orgsById = new Map(orgRows.map((o) => [o.id, o]));
-    const userRows = await db()
-      .select({
-        defaultOrgId: users.defaultOrgId,
-        lockedOrgId: users.lockedOrgId,
-      })
-      .from(users)
-      .where(eq(users.id, auth.sub))
-      .limit(1);
     const userDoc = userRows[0];
     const activeOrgId = auth.activeOrgId ?? userDoc?.defaultOrgId ?? null;
     return reply.send({
@@ -168,22 +195,13 @@ export function registerOrgRoutes(
     });
   });
 
-  /** Create a new Org. Caller becomes admin and owner. */
   /**
-   * Master-only: create a new organization.
-   *
-   * Org creation is a privileged platform-wide operation under the
-   * admin-driven onboarding model — only master admins (env-promoted via
-   * `ARCHON_MASTER_ADMIN_EMAIL` or invited via `POST /master/invites`)
-   * provision new orgs. Org admins manage *their* org's membership but
-   * cannot spawn sibling orgs.
-   *
-   * Master is recorded as `ownerUserId` for audit / FK-anchor purposes,
-   * but is intentionally NOT auto-added to `org_memberships` — the master
-   * already has platform-wide controls via `/master/*` and isn't a
-   * regular member of every org. Use
-   * `POST /master/orgs/:orgId/admins` to designate the org's first
-   * org-admin (the human who'll actually run it day-to-day).
+   * Master-only: create a new organization. Creator (the master admin)
+   * becomes the org's first admin member and the default
+   * department/team are scaffolded so they can immediately switch in
+   * via the org-switcher. They can later transfer day-to-day operation
+   * by inviting an org-admin via `POST /master/orgs/:orgId/admins` (and
+   * demoting themselves through the same surface if desired).
    */
   app.post("/orgs", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
@@ -218,6 +236,22 @@ export function registerOrgRoutes(
       ownerUserId: ctx.auth.sub,
       createdAt: new Date(),
     });
+    // Enroll the creator as org admin and scaffold the default
+    // department + team so they have a usable workspace on first switch.
+    // Without this, /orgs/me returns [] and /orgs/active 404s on the org
+    // they just created.
+    await db()
+      .insert(orgMemberships)
+      .values({
+        orgId,
+        userId: ctx.auth.sub,
+        role: "admin",
+        joinedAt: new Date(),
+      })
+      .onConflictDoNothing({
+        target: [orgMemberships.orgId, orgMemberships.userId],
+      });
+    await ensureDefaultTeamForOrg(orgId, ctx.auth.sub);
     await recordAudit({
       orgId,
       actorUserId: ctx.auth.sub,
