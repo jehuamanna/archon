@@ -6,6 +6,7 @@ import {
   setAccessToken,
   setActiveOrgId,
   setActiveSpaceId,
+  setActiveTeamId,
   type AuthUser,
   type AuthUserOrg,
   type AuthUserSpace,
@@ -182,7 +183,7 @@ export async function listMyOrgs(): Promise<ListOrgsResponse> {
 export async function setActiveOrgRemote(orgId: string): Promise<{
   token: string;
   activeOrgId: string;
-  activeSpaceId: string | null;
+  activeTeamId: string | null;
 }> {
   const token = getAccessToken();
   if (!token) {
@@ -191,7 +192,7 @@ export async function setActiveOrgRemote(orgId: string): Promise<{
   const r = await requestJson<{
     token: string;
     activeOrgId: string;
-    activeSpaceId: string | null;
+    activeTeamId: string | null;
   }>("/orgs/active", {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
@@ -200,13 +201,14 @@ export async function setActiveOrgRemote(orgId: string): Promise<{
   setAccessToken(r.token);
   writeCloudSyncToken(r.token);
   setActiveOrgId(r.activeOrgId);
-  // The server's JWT carries both activeOrgId and activeSpaceId; without this
-  // mirror write, WpnExplorer's useEffect([activeSpaceId]) won't refire on org
-  // switch and the tree goes stale.
-  if (r.activeSpaceId) {
-    setActiveSpaceId(r.activeSpaceId);
-  }
-  return { token: r.token, activeOrgId: r.activeOrgId, activeSpaceId: r.activeSpaceId };
+  // Mirror the JWT-carried activeTeamId into renderer session state so
+  // explorer effects keyed on the active team refire on org switch.
+  setActiveTeamId(r.activeTeamId);
+  // Best-effort vestigial mirror so legacy useEffect([activeSpaceId])
+  // hooks in #5-not-yet-ported components still see *something* change
+  // on org switch. Removed once the explorer rewrite lands.
+  setActiveSpaceId(r.activeTeamId);
+  return { token: r.token, activeOrgId: r.activeOrgId, activeTeamId: r.activeTeamId };
 }
 
 export type InviteSpaceGrantInfo = {
@@ -827,11 +829,20 @@ export async function setActiveSpaceRemote(spaceId: string): Promise<{
   return r;
 }
 
-// ----- Phase 3: Teams -----
+// ----- Teams (post org/team migration) -----
+//
+// Teams sit under a department (every team has a non-null `departmentId`).
+// Project access flows through `team_projects` grants — NOT through the
+// pre-migration team→space grants. The legacy `TeamGrant` shape has been
+// replaced with `TeamProjectGrant` below.
+
+export type TeamMembershipRole = "admin" | "member";
+export type TeamProjectRole = "owner" | "contributor" | "viewer";
 
 export type TeamRow = {
   teamId: string;
   orgId: string;
+  departmentId: string;
   name: string;
   colorToken: string | null;
   memberCount: number;
@@ -855,20 +866,29 @@ export async function listOrgTeams(orgId: string): Promise<TeamRow[]> {
 
 export async function createTeam(payload: {
   orgId: string;
+  departmentId: string;
   name: string;
-  colorToken?: string;
-}): Promise<{ teamId: string; orgId: string; name: string; colorToken: string | null }> {
+  colorToken?: string | null;
+}): Promise<{
+  teamId: string;
+  orgId: string;
+  departmentId: string;
+  name: string;
+  colorToken: string | null;
+}> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
+  const body: Record<string, unknown> = {
+    name: payload.name,
+    departmentId: payload.departmentId,
+  };
+  if (payload.colorToken !== undefined) body.colorToken = payload.colorToken;
   return requestJson(`/orgs/${encodeURIComponent(payload.orgId)}/teams`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      name: payload.name,
-      ...(payload.colorToken ? { colorToken: payload.colorToken } : {}),
-    }),
+    body: JSON.stringify(body),
   });
 }
 
@@ -876,6 +896,8 @@ export async function updateTeam(payload: {
   teamId: string;
   name?: string;
   colorToken?: string | null;
+  /** Move the team to a different department in the same org. */
+  departmentId?: string;
 }): Promise<void> {
   const token = getAccessToken();
   if (!token) {
@@ -884,6 +906,7 @@ export async function updateTeam(payload: {
   const body: Record<string, unknown> = {};
   if (payload.name !== undefined) body.name = payload.name;
   if (payload.colorToken !== undefined) body.colorToken = payload.colorToken;
+  if (payload.departmentId !== undefined) body.departmentId = payload.departmentId;
   await requestJson(`/teams/${encodeURIComponent(payload.teamId)}`, {
     method: "PATCH",
     headers: { Authorization: `Bearer ${token}` },
@@ -906,6 +929,7 @@ export type TeamMember = {
   userId: string;
   email: string;
   displayName: string | null;
+  role: TeamMembershipRole;
   joinedAt: string;
 };
 
@@ -927,6 +951,7 @@ export async function listTeamMembers(teamId: string): Promise<TeamMember[]> {
 export async function addTeamMember(payload: {
   teamId: string;
   userId: string;
+  role?: TeamMembershipRole;
 }): Promise<void> {
   const token = getAccessToken();
   if (!token) {
@@ -935,8 +960,30 @@ export async function addTeamMember(payload: {
   await requestJson(`/teams/${encodeURIComponent(payload.teamId)}/members`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ userId: payload.userId }),
+    body: JSON.stringify({
+      userId: payload.userId,
+      ...(payload.role ? { role: payload.role } : {}),
+    }),
   });
+}
+
+export async function setTeamMemberRole(payload: {
+  teamId: string;
+  userId: string;
+  role: TeamMembershipRole;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/teams/${encodeURIComponent(payload.teamId)}/members/${encodeURIComponent(payload.userId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ role: payload.role }),
+    },
+  );
 }
 
 export async function removeTeamMember(payload: {
@@ -956,20 +1003,23 @@ export async function removeTeamMember(payload: {
   );
 }
 
-export type TeamGrant = {
-  spaceId: string;
-  spaceName: string;
-  role: SpaceRole;
+/** A team's grant on a single project (m2m via `team_projects`). */
+export type TeamProjectGrant = {
+  projectId: string;
+  projectName: string;
+  role: TeamProjectRole;
   grantedAt: string;
 };
 
-export async function listTeamGrants(teamId: string): Promise<TeamGrant[]> {
+export async function listTeamProjects(
+  teamId: string,
+): Promise<TeamProjectGrant[]> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
-  const r = await requestJson<{ grants: TeamGrant[] }>(
-    `/teams/${encodeURIComponent(teamId)}/grants`,
+  const r = await requestJson<{ grants: TeamProjectGrant[] }>(
+    `/teams/${encodeURIComponent(teamId)}/projects`,
     {
       method: "GET",
       headers: { Authorization: `Bearer ${token}` },
@@ -978,37 +1028,252 @@ export async function listTeamGrants(teamId: string): Promise<TeamGrant[]> {
   return r.grants;
 }
 
-export async function grantTeamSpace(payload: {
+export async function grantTeamProject(payload: {
   teamId: string;
-  spaceId: string;
-  role: SpaceRole;
+  projectId: string;
+  role: TeamProjectRole;
 }): Promise<void> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
-  await requestJson(`/teams/${encodeURIComponent(payload.teamId)}/grants`, {
+  await requestJson(`/teams/${encodeURIComponent(payload.teamId)}/projects`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}` },
-    body: JSON.stringify({ spaceId: payload.spaceId, role: payload.role }),
+    body: JSON.stringify({
+      projectId: payload.projectId,
+      role: payload.role,
+    }),
   });
 }
 
-export async function revokeTeamGrant(payload: {
+export async function setTeamProjectRole(payload: {
   teamId: string;
-  spaceId: string;
+  projectId: string;
+  role: TeamProjectRole;
 }): Promise<void> {
   const token = getAccessToken();
   if (!token) {
     throw new Error("Unauthorized");
   }
   await requestJson(
-    `/teams/${encodeURIComponent(payload.teamId)}/grants/${encodeURIComponent(payload.spaceId)}`,
+    `/teams/${encodeURIComponent(payload.teamId)}/projects/${encodeURIComponent(payload.projectId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ role: payload.role }),
+    },
+  );
+}
+
+export async function revokeTeamProject(payload: {
+  teamId: string;
+  projectId: string;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/teams/${encodeURIComponent(payload.teamId)}/projects/${encodeURIComponent(payload.projectId)}`,
     {
       method: "DELETE",
       headers: { Authorization: `Bearer ${token}` },
     },
   );
+}
+
+// ----- Departments -----
+
+export type DepartmentMembershipRole = "admin" | "member";
+
+export type DepartmentRow = {
+  departmentId: string;
+  orgId: string;
+  name: string;
+  colorToken: string | null;
+  teamCount: number;
+  memberCount: number;
+  createdAt: string;
+};
+
+export async function listOrgDepartments(
+  orgId: string,
+): Promise<DepartmentRow[]> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const r = await requestJson<{ departments: DepartmentRow[] }>(
+    `/orgs/${encodeURIComponent(orgId)}/departments`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return r.departments;
+}
+
+export async function createDepartment(payload: {
+  orgId: string;
+  name: string;
+  colorToken?: string | null;
+}): Promise<{
+  departmentId: string;
+  orgId: string;
+  name: string;
+  colorToken: string | null;
+}> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const body: Record<string, unknown> = { name: payload.name };
+  if (payload.colorToken !== undefined) body.colorToken = payload.colorToken;
+  return requestJson(
+    `/orgs/${encodeURIComponent(payload.orgId)}/departments`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export async function updateDepartment(payload: {
+  departmentId: string;
+  name?: string;
+  colorToken?: string | null;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const body: Record<string, unknown> = {};
+  if (payload.name !== undefined) body.name = payload.name;
+  if (payload.colorToken !== undefined) body.colorToken = payload.colorToken;
+  await requestJson(
+    `/departments/${encodeURIComponent(payload.departmentId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    },
+  );
+}
+
+export async function deleteDepartment(departmentId: string): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/departments/${encodeURIComponent(departmentId)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+}
+
+export type DepartmentMember = {
+  userId: string;
+  email: string;
+  displayName: string | null;
+  role: DepartmentMembershipRole;
+  joinedAt: string;
+};
+
+export async function listDepartmentMembers(
+  departmentId: string,
+): Promise<DepartmentMember[]> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const r = await requestJson<{ members: DepartmentMember[] }>(
+    `/departments/${encodeURIComponent(departmentId)}/members`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return r.members;
+}
+
+export async function addDepartmentMember(payload: {
+  departmentId: string;
+  userId: string;
+  role?: DepartmentMembershipRole;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/departments/${encodeURIComponent(payload.departmentId)}/members`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        userId: payload.userId,
+        ...(payload.role ? { role: payload.role } : {}),
+      }),
+    },
+  );
+}
+
+export async function setDepartmentMemberRole(payload: {
+  departmentId: string;
+  userId: string;
+  role: DepartmentMembershipRole;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/departments/${encodeURIComponent(payload.departmentId)}/members/${encodeURIComponent(payload.userId)}`,
+    {
+      method: "PATCH",
+      headers: { Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ role: payload.role }),
+    },
+  );
+}
+
+export async function removeDepartmentMember(payload: {
+  departmentId: string;
+  userId: string;
+}): Promise<void> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  await requestJson(
+    `/departments/${encodeURIComponent(payload.departmentId)}/members/${encodeURIComponent(payload.userId)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+}
+
+export async function listDepartmentTeams(
+  departmentId: string,
+): Promise<TeamRow[]> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const r = await requestJson<{ teams: TeamRow[] }>(
+    `/departments/${encodeURIComponent(departmentId)}/teams`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+  return r.teams;
 }
 
 // ----- Phase 7: Audit log -----

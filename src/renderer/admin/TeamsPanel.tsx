@@ -4,21 +4,21 @@ import {
   addTeamMember,
   createTeam,
   deleteTeam,
-  grantTeamSpace,
+  grantTeamProject,
+  listOrgDepartments,
   listOrgMembers,
-  listOrgSpaces,
   listOrgTeams,
-  listTeamGrants,
+  listTeamProjects,
   listTeamMembers,
   removeTeamMember,
-  revokeTeamGrant,
+  revokeTeamProject,
+  type DepartmentRow,
   type OrgMember,
-  type SpaceRow,
-  type TeamGrant,
   type TeamMember,
+  type TeamProjectGrant,
+  type TeamProjectRole,
   type TeamRow,
 } from "../auth/auth-client";
-import type { SpaceRole } from "../auth/auth-session";
 import type { RootState } from "../store";
 
 const card = "rounded-md border border-border bg-background p-4 text-sm";
@@ -52,8 +52,10 @@ function teamChipStyle(colorToken: string | null): React.CSSProperties {
 }
 
 /**
- * Admin-only Teams console: create teams with a color, manage members,
- * grant teams a role on one or more spaces. Discord-style colored chips.
+ * Admin-only Teams console: create teams within a department, manage
+ * members, grant teams a role on one or more projects (post org/team
+ * migration: project access flows through `team_projects`, not the
+ * pre-migration team→space grants). Discord-style colored chips.
  */
 export function TeamsPanel(): React.ReactElement | null {
   const orgState = useSelector((s: RootState) => s.orgMembership);
@@ -62,45 +64,55 @@ export function TeamsPanel(): React.ReactElement | null {
 
   const [teams, setTeams] = React.useState<TeamRow[]>([]);
   const [orgMembers, setOrgMembers] = React.useState<OrgMember[]>([]);
-  const [spaces, setSpaces] = React.useState<SpaceRow[]>([]);
+  const [departments, setDepartments] = React.useState<DepartmentRow[]>([]);
   const [error, setError] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [newName, setNewName] = React.useState("");
   const [newColor, setNewColor] = React.useState<string>(COLOR_TOKENS[0]!);
+  const [newDepartmentId, setNewDepartmentId] = React.useState<string>("");
   const [submitting, setSubmitting] = React.useState(false);
   const [activeTeamId, setActiveTeamId] = React.useState<string | null>(null);
   const [activeMembers, setActiveMembers] = React.useState<TeamMember[]>([]);
-  const [activeGrants, setActiveGrants] = React.useState<TeamGrant[]>([]);
+  const [activeGrants, setActiveGrants] = React.useState<TeamProjectGrant[]>(
+    [],
+  );
   const [addUserId, setAddUserId] = React.useState<string>("");
-  const [grantSpaceId, setGrantSpaceId] = React.useState<string>("");
-  const [grantRole, setGrantRole] = React.useState<SpaceRole>("member");
+  // Project ids are typed manually because we do not list projects here —
+  // projects are scoped to teams in the new model, so the Teams admin
+  // panel doesn't have direct read access to them. Surface a pasteable
+  // text field for the admin and let the server enforce membership.
+  const [grantProjectId, setGrantProjectId] = React.useState<string>("");
+  const [grantRole, setGrantRole] = React.useState<TeamProjectRole>("contributor");
 
   const refresh = React.useCallback(async (): Promise<void> => {
     if (!orgId) return;
     setLoading(true);
     setError(null);
     try {
-      const [t, m, s] = await Promise.all([
+      const [t, m, d] = await Promise.all([
         listOrgTeams(orgId),
         listOrgMembers(orgId),
-        listOrgSpaces(orgId),
+        listOrgDepartments(orgId),
       ]);
       setTeams(t);
       setOrgMembers(m);
-      setSpaces(s);
+      setDepartments(d);
+      if (!newDepartmentId && d.length > 0) {
+        setNewDepartmentId(d[0]!.departmentId);
+      }
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [orgId]);
+  }, [orgId, newDepartmentId]);
 
   const refreshActive = React.useCallback(async (): Promise<void> => {
     if (!activeTeamId) return;
     try {
       const [m, g] = await Promise.all([
         listTeamMembers(activeTeamId),
-        listTeamGrants(activeTeamId),
+        listTeamProjects(activeTeamId),
       ]);
       setActiveMembers(m);
       setActiveGrants(g);
@@ -136,10 +148,21 @@ export function TeamsPanel(): React.ReactElement | null {
     e.preventDefault();
     if (!orgId) return;
     if (!newName.trim()) return;
+    if (!newDepartmentId) {
+      setError(
+        "Pick a department first (every team belongs to one). Create one in the Departments panel if none exist.",
+      );
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      await createTeam({ orgId, name: newName.trim(), colorToken: newColor });
+      await createTeam({
+        orgId,
+        departmentId: newDepartmentId,
+        name: newName.trim(),
+        colorToken: newColor,
+      });
       setNewName("");
       await refresh();
     } catch (err) {
@@ -188,26 +211,26 @@ export function TeamsPanel(): React.ReactElement | null {
   }
 
   async function handleGrant(): Promise<void> {
-    if (!activeTeamId || !grantSpaceId) return;
+    if (!activeTeamId || !grantProjectId) return;
     setError(null);
     try {
-      await grantTeamSpace({
+      await grantTeamProject({
         teamId: activeTeamId,
-        spaceId: grantSpaceId,
+        projectId: grantProjectId.trim(),
         role: grantRole,
       });
-      setGrantSpaceId("");
+      setGrantProjectId("");
       await refreshActive();
     } catch (err) {
       setError((err as Error).message);
     }
   }
 
-  async function handleRevoke(spaceId: string): Promise<void> {
+  async function handleRevoke(projectId: string): Promise<void> {
     if (!activeTeamId) return;
     setError(null);
     try {
-      await revokeTeamGrant({ teamId: activeTeamId, spaceId });
+      await revokeTeamProject({ teamId: activeTeamId, projectId });
       await refreshActive();
     } catch (err) {
       setError((err as Error).message);
@@ -215,6 +238,9 @@ export function TeamsPanel(): React.ReactElement | null {
   }
 
   const activeTeam = teams.find((t) => t.teamId === activeTeamId) ?? null;
+  const departmentById = new Map(
+    departments.map((d) => [d.departmentId, d.name]),
+  );
   const memberPickerOptions = orgMembers.filter(
     (m) => !activeMembers.some((am) => am.userId === m.userId),
   );
@@ -234,6 +260,19 @@ export function TeamsPanel(): React.ReactElement | null {
             onChange={(e) => setNewName(e.target.value)}
             className={input}
           />
+          <select
+            aria-label="Department"
+            value={newDepartmentId}
+            onChange={(e) => setNewDepartmentId(e.target.value)}
+            className={btn}
+          >
+            <option value="">Department…</option>
+            {departments.map((d) => (
+              <option key={d.departmentId} value={d.departmentId}>
+                {d.name}
+              </option>
+            ))}
+          </select>
           <select
             aria-label="Color"
             value={newColor}
@@ -263,6 +302,7 @@ export function TeamsPanel(): React.ReactElement | null {
                 className={`flex items-center gap-2 rounded-full border px-3 py-1 text-[11px] font-medium ${
                   selected ? "ring-2 ring-offset-1 ring-offset-background" : ""
                 }`}
+                title={`Department: ${departmentById.get(t.departmentId) ?? "—"}`}
               >
                 {t.name}
                 <span className="opacity-70">· {t.memberCount}</span>
@@ -278,10 +318,15 @@ export function TeamsPanel(): React.ReactElement | null {
         </h2>
         {!activeTeam ? (
           <p className={muted}>
-            Pick a team chip on the left to manage its members and space grants.
+            Pick a team chip on the left to manage its members and project
+            grants.
           </p>
         ) : (
           <>
+            <p className={muted}>
+              Department:{" "}
+              {departmentById.get(activeTeam.departmentId) ?? "—"}
+            </p>
             <div className="mb-4">
               <div className="mb-2 flex items-center justify-between">
                 <span className={muted}>Members ({activeMembers.length})</span>
@@ -325,6 +370,9 @@ export function TeamsPanel(): React.ReactElement | null {
                   <li key={m.userId} className="flex items-center justify-between py-1.5">
                     <span className="truncate text-sm">
                       {m.displayName ?? m.email}
+                      <span className="ml-2 text-[11px] text-muted-foreground">
+                        ({m.role})
+                      </span>
                     </span>
                     <button
                       type="button"
@@ -341,34 +389,34 @@ export function TeamsPanel(): React.ReactElement | null {
             </div>
 
             <div>
-              <span className={muted}>Space grants ({activeGrants.length})</span>
-              <div className="my-2 flex items-center gap-2">
-                <select
-                  aria-label="Grant space"
-                  value={grantSpaceId}
-                  onChange={(e) => setGrantSpaceId(e.target.value)}
+              <span className={muted}>
+                Project grants ({activeGrants.length})
+              </span>
+              <div className="my-2 flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  aria-label="Grant project id"
+                  placeholder="Project UUID…"
+                  value={grantProjectId}
+                  onChange={(e) => setGrantProjectId(e.target.value)}
                   className={input}
-                >
-                  <option value="">Grant access to a space…</option>
-                  {spaces.map((s) => (
-                    <option key={s.spaceId} value={s.spaceId}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+                />
                 <select
                   aria-label="Grant role"
                   value={grantRole}
-                  onChange={(e) => setGrantRole(e.target.value as SpaceRole)}
+                  onChange={(e) =>
+                    setGrantRole(e.target.value as TeamProjectRole)
+                  }
                   className={btn}
                 >
-                  <option value="member">member</option>
                   <option value="owner">owner</option>
+                  <option value="contributor">contributor</option>
+                  <option value="viewer">viewer</option>
                 </select>
                 <button
                   type="button"
                   className={btn}
-                  disabled={!grantSpaceId}
+                  disabled={!grantProjectId}
                   onClick={() => {
                     void handleGrant();
                   }}
@@ -378,9 +426,12 @@ export function TeamsPanel(): React.ReactElement | null {
               </div>
               <ul className="divide-y divide-border/40">
                 {activeGrants.map((g) => (
-                  <li key={g.spaceId} className="flex items-center justify-between py-1.5">
+                  <li
+                    key={g.projectId}
+                    className="flex items-center justify-between py-1.5"
+                  >
                     <span className="truncate text-sm">
-                      {g.spaceName}
+                      {g.projectName}
                       <span className="ml-2 text-[11px] text-muted-foreground">
                         ({g.role})
                       </span>
@@ -389,7 +440,7 @@ export function TeamsPanel(): React.ReactElement | null {
                       type="button"
                       className={btnDanger}
                       onClick={() => {
-                        void handleRevoke(g.spaceId);
+                        void handleRevoke(g.projectId);
                       }}
                     >
                       Revoke

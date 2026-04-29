@@ -33,12 +33,31 @@ type CloudAuthThunkExtra = { extra: ArchonPlatformDeps };
 
 function decodeAccessTokenClaims(
   token: string,
-): { activeOrgId?: string; activeSpaceId?: string } | null {
+): {
+  activeOrgId?: string;
+  /**
+   * Vestigial alias for `activeTeamId`. The sync-api stopped emitting
+   * `activeSpaceId` after the org/team migration; the field stays on the
+   * decoded shape so legacy explorer/sidebar/editor consumers reading
+   * `claims.activeSpaceId` keep working until #5 ports them to read
+   * `activeTeamId`. The two fields are populated from the same source
+   * (the JWT `activeTeamId` claim) until the migration is complete.
+   */
+  activeSpaceId?: string;
+  activeTeamId?: string;
+} | null {
   const obj = decodeJwtPayload(token);
   if (!obj) return null;
+  const activeTeamId =
+    typeof obj.activeTeamId === "string" ? obj.activeTeamId : undefined;
   return {
     activeOrgId: typeof obj.activeOrgId === "string" ? obj.activeOrgId : undefined,
-    activeSpaceId: typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined,
+    activeTeamId,
+    // Mirror the team claim into the vestigial space field so #5-not-yet-
+    // ported `claims.activeSpaceId` reads return the active team id.
+    activeSpaceId:
+      activeTeamId ??
+      (typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined),
   };
 }
 
