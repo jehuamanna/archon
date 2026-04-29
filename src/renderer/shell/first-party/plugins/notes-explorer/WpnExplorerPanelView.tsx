@@ -3784,9 +3784,9 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
               <button
                 type="button"
                 className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
-                onClick={() => void onCreateWorkspace()}
+                onClick={() => void onCreateProject(SYNTHETIC_WORKSPACE_ID)}
               >
-                New workspace
+                New project
               </button>
               <button
                 type="button"
@@ -4284,39 +4284,35 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
       ) : null}
 
       {/* ── Import / Export bottom bar ── */}
-      <div className="flex shrink-0 items-center gap-1 border-t border-border bg-muted/10 px-2 py-1">
-        <button
-          type="button"
-          className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"
-          onClick={() => {
-            void (async () => {
-              try {
-                const result = await getArchon().wpnImportWorkspaces(
-                  undefined,
-                  { conflict: importConflictPolicy },
-                );
-                showToast({
-                  severity: "info",
-                  message: `Imported ${result.workspaces} workspace(s), ${result.projects} project(s), ${result.notes} note(s)`,
-                });
-                window.dispatchEvent(new CustomEvent(ARCHON_WPN_TREE_CHANGED_EVENT));
-              } catch (err) {
-                if (err instanceof Error && err.message === "No file selected") return;
-                showToast({
-                  severity: "error",
-                  message: err instanceof Error ? err.message : "Import failed",
-                });
-              }
-            })();
-          }}
-        >
-          Import
-        </button>
-        <label
-          className="flex items-center gap-1 text-[10px] text-muted-foreground"
-          title="How to handle workspaces whose names already exist in the target."
-        >
-          <span>on conflict:</span>
+      <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border bg-muted/10 px-2 py-1 text-[10px]">
+        <div className="flex min-w-0 items-center gap-1">
+          <button
+            type="button"
+            className="rounded border border-border/60 px-2 py-0.5 hover:bg-muted/40"
+            onClick={() => {
+              void (async () => {
+                try {
+                  const result = await getArchon().wpnImportWorkspaces(
+                    undefined,
+                    { conflict: importConflictPolicy },
+                  );
+                  showToast({
+                    severity: "info",
+                    message: `Imported ${result.projects} project(s), ${result.notes} note(s)`,
+                  });
+                  window.dispatchEvent(new CustomEvent(ARCHON_WPN_TREE_CHANGED_EVENT));
+                } catch (err) {
+                  if (err instanceof Error && err.message === "No file selected") return;
+                  showToast({
+                    severity: "error",
+                    message: err instanceof Error ? err.message : "Import failed",
+                  });
+                }
+              })();
+            }}
+          >
+            Import
+          </button>
           <select
             value={importConflictPolicy}
             onChange={(e) =>
@@ -4324,22 +4320,24 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                 e.currentTarget.value as WpnImportConflictPolicy,
               )
             }
-            className="rounded border border-border/60 bg-background px-1 py-0.5 text-[10px] text-foreground"
+            className="min-w-0 rounded border border-border/60 bg-background px-1 py-0.5 text-foreground"
+            title="On name conflict: rename keeps both, skip leaves the existing copy, overwrite replaces it."
+            aria-label="Import conflict policy"
             data-testid="wpn-import-conflict-select"
           >
-            <option value="rename">rename</option>
-            <option value="skip">skip</option>
-            <option value="overwrite">overwrite</option>
+            <option value="rename">rename on conflict</option>
+            <option value="skip">skip on conflict</option>
+            <option value="overwrite">overwrite on conflict</option>
           </select>
-        </label>
+        </div>
         <button
           type="button"
-          className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"
+          className="shrink-0 rounded border border-border/60 px-2 py-0.5 hover:bg-muted/40"
           onClick={() => {
             void (async () => {
               try {
                 await getArchon().wpnExportWorkspaces();
-                showToast({ severity: "info", message: "All workspaces exported" });
+                showToast({ severity: "info", message: "All projects exported" });
               } catch (err) {
                 showToast({
                   severity: "error",
@@ -4349,7 +4347,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
             })();
           }}
         >
-          Export All
+          Export all
         </button>
       </div>
       </div>
