@@ -7,19 +7,23 @@
  * route layer is just auth + body validation.
  *
  * Cross-project moves call `pgWpnMoveNoteToProject` with a
- * `targetParentId` (null for root). Title-change preview is currently a
- * 501 — it depends on the shared note-vfs-* helpers being flattened to
- * a 2-segment Project/Title scheme, which is its own commit.
+ * `targetParentId` (null for root). Title-change preview uses the
+ * sync-api-local mirror at `note-vfs-mirror.ts` to avoid a cross-workspace
+ * dependency on `src/shared/`.
  */
 import type { FastifyInstance } from "fastify";
+import { and, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { resolveActiveOrgId } from "./org-auth.js";
+import { getDb } from "./pg.js";
+import { notes, projects } from "./db/schema.js";
 import {
   assertCanManageProject,
   assertCanReadProject,
   assertCanWriteProject,
   assertCanWriteProjectForNote,
+  getEffectiveProjectRoles,
 } from "./permission-resolver.js";
 import {
   pgWpnCreateNote,
@@ -40,6 +44,11 @@ import {
   WPN_DUPLICATE_NOTE_TITLE_MESSAGE,
 } from "./wpn-pg-writes.js";
 import { isUuid } from "./db/legacy-id-map.js";
+import {
+  normalizeVfsSegment,
+  rewriteMarkdownForWpnNoteTitleChange,
+  vfsCanonicalPathsForTitleChange,
+} from "./note-vfs-mirror.js";
 
 const createProjectBody = z.object({
   name: z.string().trim().min(1).max(120),
@@ -287,16 +296,92 @@ export function registerWpnWriteRoutes(
 
   /**
    * Title-change preview — used by the editor to show "this title shift will
-   * also rewrite N inbound link references" before the user commits. Pending
-   * the shared note-vfs-* path-scheme flatten; 501 until then.
+   * also rewrite N inbound link references" before the user commits. Scans
+   * every note the caller can read, runs the rewrite logic in dry-run, and
+   * counts notes whose content would change.
+   *
+   * Scope: notes inside projects the caller has read access to via
+   * team_projects. Master/org-admin "see everything" overrides aren't applied
+   * here — preview semantics are about the user's own working set, not the
+   * full graph.
    */
   app.post("/wpn/notes/:id/preview-title-change", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
-    return reply.status(501).send({
-      error:
-        "Title-change preview is pending the shared note-vfs-* flatten to " +
-        "the post-migration 2-segment path scheme.",
+    const { id } = request.params as { id: string };
+    if (!isUuid(id)) {
+      return reply.status(400).send({ error: "Invalid note id" });
+    }
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const newTitleRaw = typeof body.title === "string" ? body.title : "";
+
+    // Read-gate: load the note's project, check the caller can read it.
+    const noteRows = await getDb()
+      .select({
+        title: notes.title,
+        projectId: notes.projectId,
+        deleted: notes.deleted,
+      })
+      .from(notes)
+      .where(eq(notes.id, id))
+      .limit(1);
+    const note = noteRows[0];
+    if (!note || note.deleted) {
+      return reply.status(404).send({ error: "Note not found" });
+    }
+    const projectRow = await assertCanReadProject(reply, auth, note.projectId);
+    if (!projectRow) return;
+
+    const nextTitle = newTitleRaw.trim() || note.title;
+    const ctx = { project_name: projectRow.name };
+    const paths = vfsCanonicalPathsForTitleChange(ctx, note.title, nextTitle);
+    if (!paths) {
+      return reply.send({ dependentNoteCount: 0, dependentNoteIds: [] });
+    }
+    const { oldCanonical, newCanonical } = paths;
+    const oldSeg = normalizeVfsSegment(note.title, "Untitled");
+    const newSeg = normalizeVfsSegment(nextTitle, "Untitled");
+
+    // Limit the scan to projects the caller can read. Pre-migration this
+    // walked the user's per-user shadow rows; the post-migration substitute
+    // is `team_projects` access — equivalent for "what could the user
+    // notice changing in their working set".
+    const accessible = await getEffectiveProjectRoles(auth.sub);
+    const projectIds = [...accessible.keys()];
+    if (projectIds.length === 0) {
+      return reply.send({ dependentNoteCount: 0, dependentNoteIds: [] });
+    }
+    const allNotes = await getDb()
+      .select({
+        id: notes.id,
+        projectId: notes.projectId,
+        content: notes.content,
+      })
+      .from(notes)
+      .where(
+        and(
+          sql`${notes.projectId} = ANY(${projectIds})`,
+          sql`${notes.deleted} IS NOT TRUE`,
+        ),
+      );
+
+    const dependentNoteIds: string[] = [];
+    for (const n of allNotes) {
+      const c0 = n.content ?? "";
+      const c1 = rewriteMarkdownForWpnNoteTitleChange(
+        c0,
+        n.projectId,
+        note.projectId,
+        oldCanonical,
+        newCanonical,
+        oldSeg,
+        newSeg,
+      );
+      if (c1 !== c0) dependentNoteIds.push(n.id);
+    }
+    return reply.send({
+      dependentNoteCount: dependentNoteIds.length,
+      dependentNoteIds,
     });
   });
 
