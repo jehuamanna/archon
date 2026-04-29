@@ -16,7 +16,27 @@ COPY apps ./apps
 COPY packages ./packages
 COPY docs/bundled-plugin-authoring ./docs/bundled-plugin-authoring
 
-RUN npm ci -w @archon/sync-api --ignore-scripts
+# Install ALL workspace deps (not just sync-api's) so devDeps required to
+# build workspace packages — notably TypeScript for `@nodex-studio/mdx-sdk`
+# — are present. `--ignore-scripts` keeps the install side-effect-free
+# (no postinstall electron-rebuild etc.); we run the workspace builds
+# explicitly below.
+RUN npm ci --ignore-scripts
+
+# `@nodex-studio/mdx-sdk` ships a built `dist/` (`main: "./dist/index.js"`
+# in its package.json). The repo-root `.dockerignore` excludes `dist`
+# everywhere, and `--ignore-scripts` skipped the `prepare` hook, so the
+# package's compiled output isn't in the image yet — we build it here
+# before sync-api boots and tries to import it.
+#
+# Other workspace packages (`@archon/platform`, `@archon/mdx-sdk-runtime`,
+# `@archon-studio/mcp`, …) use `src/` as their `main`, so tsx resolves
+# them at runtime without a build step.
+RUN npm run build -w @nodex-studio/mdx-sdk
+
+# Drop devDependencies after the workspace build so the runtime image
+# stays slim. tsx itself stays (it's a runtime dep of @archon/sync-api).
+RUN npm prune --omit=dev
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
