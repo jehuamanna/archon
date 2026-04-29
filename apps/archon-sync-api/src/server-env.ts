@@ -1,9 +1,7 @@
 export function envString(name: string, fallback = ""): string {
   const v = process.env[name];
-  console.log(`[ENV] envString(${name}) = ${v ? "[redacted]" : "(empty)"} (fallback = ${fallback})`);
   return typeof v === "string" ? v.trim() : fallback;
 }
-console.log("Postgres connection string:", process.env.DATABASE_URL ? "[redacted]" : "(empty)");
 
 
 /**
