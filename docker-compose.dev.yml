@@ -31,7 +31,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archon}
       POSTGRES_DB: ${POSTGRES_DB:-archon_sync}
     ports:
-      - "${ARCHON_POSTGRES_PORT:-5432}:5432"
+      # Default 5433 (not 5432) so a host Postgres on the standard port can
+      # coexist. Override with `ARCHON_POSTGRES_PORT=5432` in .env if you
+      # want the standard port and don't run a host Postgres.
+      - "${ARCHON_POSTGRES_PORT:-5433}:5432"
     volumes:
       - archon-dev-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -47,7 +50,8 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "no", "--save", ""]
     ports:
-      - "${ARCHON_REDIS_PORT:-6379}:6379"
+      # Default 6380 to avoid colliding with a host Redis on 6379.
+      - "${ARCHON_REDIS_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -68,9 +72,13 @@ services:
       HOST: 0.0.0.0
       PORT: "4010"
       NODE_ENV: development
-      DATABASE_URL: ${DATABASE_URL:-postgres://archon:archon@postgres:5432/archon_sync}
+      # Service-discovery URLs are hardcoded so a host-side `.env` (used by
+      # `npm run sync-api:local`) doesn't override them with `localhost`,
+      # which is unreachable from inside the container network.
+      DATABASE_URL: postgres://archon:archon@postgres:5432/archon_sync
+      REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      ARCHON_MASTER_ADMIN_EMAIL: ${ARCHON_MASTER_ADMIN_EMAIL:-}
       ARCHON_REPLICA_ID: ${ARCHON_REPLICA_ID:-dev-sync-api-1}
       ARCHON_BUNDLED_DOCS_DIR: /app/docs/bundled-plugin-authoring
       CORS_ORIGIN: ${CORS_ORIGIN:-true}

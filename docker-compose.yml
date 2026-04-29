@@ -42,6 +42,22 @@ services:
       retries: 5
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    container_name: archon-redis
+    restart: unless-stopped
+    # Persistence off: Hocuspocus uses Redis only as a pub/sub fanout layer
+    # for cross-replica Yjs updates and awareness. The CRDT state of record
+    # lives in Postgres (`yjs_state` + `notes.content`); a Redis restart
+    # loses nothing durable. AOF + RDB are wasted IO here.
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   archon-sync-api:
     build:
       context: .
@@ -56,7 +72,16 @@ services:
       PORT: "4010"
       DATABASE_URL: ${DATABASE_URL:-postgres://archon:archon@postgres:5432/archon_sync}
       JWT_SECRET: ${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}
+      # When set, Hocuspocus pub/subs Yjs updates + awareness across every
+      # sync-api replica. Single-replica deploys may unset to run in-memory
+      # only — Yjs collab still works for clients on the same replica.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      ARCHON_REPLICA_ID: ${ARCHON_REPLICA_ID:-archon-sync-1}
+      ARCHON_MASTER_ADMIN_EMAIL: ${ARCHON_MASTER_ADMIN_EMAIL:-}
       ARCHON_BUNDLED_DOCS_DIR: /app/docs/bundled-plugin-authoring
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [
