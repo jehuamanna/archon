@@ -3,7 +3,6 @@ FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -12,40 +11,12 @@ ENV npm_config_fetch_retries=5 \
     npm_config_fetch_retry_mintimeout=20000 \
     npm_config_fetch_retry_maxtimeout=120000
 
-RUN wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.11.0/cloud-sql-proxy.linux.amd64 \
-    -O /cloud-sql-proxy && chmod +x /cloud-sql-proxy
-
-
 COPY package.json package-lock.json tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
 COPY docs/bundled-plugin-authoring ./docs/bundled-plugin-authoring
 
-# Install ALL workspace deps (not just sync-api's) so devDeps required to
-# build workspace packages — notably TypeScript for `@nodex-studio/mdx-sdk`
-# — are present. `--ignore-scripts` keeps the install side-effect-free
-# (no postinstall electron-rebuild etc.); we run the workspace builds
-# explicitly below.
-RUN npm ci --ignore-scripts
-
-# `@nodex-studio/mdx-sdk` ships a built `dist/` (`main: "./dist/index.js"`
-# in its package.json). The repo-root `.dockerignore` excludes `dist`
-# everywhere, and `--ignore-scripts` skipped the `prepare` hook, so the
-# package's compiled output isn't in the image yet — we build it here
-# before sync-api boots and tries to import it.
-#
-# Other workspace packages (`@archon/platform`, `@archon/mdx-sdk-runtime`,
-# `@archon-studio/mcp`, …) use `src/` as their `main`, so tsx resolves
-# them at runtime without a build step.
-RUN npm run build -w @nodex-studio/mdx-sdk
-
-# Note: we deliberately do NOT `npm prune --omit=dev`. The runtime
-# command is `tsx src/server.ts`, and tsx is in
-# `apps/archon-sync-api/devDependencies` (it's a TypeScript-aware loader,
-# classified as dev-tooling by upstream). Pruning would remove it and the
-# container would crash with `tsx: not found`. A future "compile to dist
-# + run with node" follow-up could let us prune cleanly, but for now keep
-# the dev deps in the runtime image.
+RUN npm ci -w @archon/sync-api --ignore-scripts
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
@@ -54,5 +25,4 @@ ENV NODE_ENV=production \
 
 EXPOSE 4010
 
-# CMD ["npm", "run", "start", "-w", "@archon/sync-api"]
-CMD sh -c "/cloud-sql-proxy --port 5432 autonomiq-42:asia-south1:db-dev-autonomiq-pgsql & npm run start -w @archon/sync-api"
+CMD ["npm", "run", "start", "-w", "@archon/sync-api"]
