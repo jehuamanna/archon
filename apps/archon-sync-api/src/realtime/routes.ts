@@ -1,22 +1,26 @@
 /**
- * Phase 1 token-mint endpoint. The web client calls
+ * Realtime WS token-mint endpoint. The web client calls
  * `POST /v1/realtime/ws-token` with an access token in `Authorization`,
- * specifying the target `spaceId` (and optional `workspaceId` / `noteId`
- * for downstream Phase 2/3 use). The server validates space membership and
- * returns a 5-minute `typ: "spaceWs"` JWT the client uses to open the
- * WebSocket at `GET /v1/ws/space/:spaceId?token=<jwt>`.
+ * specifying a `spaceId` (legacy parameter — preserved for client compat
+ * after the spaces → projects squash) plus optional `noteId`/`workspaceId`.
+ * The server returns a 5-minute `typ: "spaceWs"` JWT the client uses to
+ * open the Yjs WebSocket at `GET /v1/ws/yjs?token=<jwt>`.
  *
- * Splitting the access token from the WS token keeps the long-lived
- * principal token off the wire as a query string and lets the server reuse
- * its space-membership check without per-frame revalidation.
+ * Authorisation moved per-note: the spaces table no longer exists, so the
+ * fine-grained gate runs in `yjs-ws.ts` `onAuthenticate`, which resolves
+ * the documentName (noteId) → project and checks `effectiveRoleInProject`.
+ * This route only proves identity (via `requireAuth`); a token without a
+ * matching project grant gets rejected at WS open time.
+ *
+ * Splitting the access token from the WS token still keeps the long-lived
+ * principal off the wire as a query string parameter.
  */
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { requireAuth, signToken } from "../auth.js";
-import { effectiveRoleInSpace } from "../permission-resolver.js";
 
 const wsTokenBody = z.object({
-  spaceId: z.string().uuid(),
+  spaceId: z.string().uuid().optional(),
   workspaceId: z.string().uuid().optional(),
   noteId: z.string().uuid().optional(),
 });
@@ -34,10 +38,10 @@ export function registerRealtimeRoutes(
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    const role = await effectiveRoleInSpace(auth.sub, parsed.data.spaceId);
-    if (!role) {
-      return reply.status(403).send({ error: "no access to space" });
-    }
+    // The minted token carries identity only — per-note authorisation runs
+    // at WS open in `yjs-ws.ts onAuthenticate`. The body's `spaceId` is
+    // accepted (and ignored) for client compat after the spaces squash.
+    void parsed.data;
     const token = signToken(
       jwtSecret,
       {
@@ -46,7 +50,6 @@ export function registerRealtimeRoutes(
         typ: "spaceWs",
         principal: auth.principal ?? { type: "user" },
         activeOrgId: auth.activeOrgId,
-        activeSpaceId: parsed.data.spaceId,
       },
       "5m",
     );
