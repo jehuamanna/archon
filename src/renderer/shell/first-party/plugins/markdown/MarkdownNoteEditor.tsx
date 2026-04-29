@@ -702,18 +702,21 @@ export function MarkdownNoteEditor({
     // forceUpdate closure capturing an empty `value` prop). When yCollab
     // is bound, that transaction propagates through ySyncPlugin and wipes
     // Y.Text — which the server then persists, destroying the note. Drop
-    // any ExternalChange transaction that would clear non-empty doc to
-    // empty; the editor can still receive real edits via yCollab.
+    // any ExternalChange transaction that would shrink a non-empty doc:
+    // full empties (newLen === 0) are the original wipe; partial shrinks
+    // (newLen < startLen) happen when a stale React `value` prop, lagging
+    // behind Y.Text, is fed back through CodeMirror on a connected→
+    // disconnected flicker. Real user edits never come through ExternalChange.
     ext.push(
       EditorState.transactionFilter.of((tr) => {
         if (tr.annotation(ExternalChange) !== true) return tr;
         if (!tr.docChanged) return tr;
         const startLen = tr.startState.doc.length;
         const newLen = tr.newDoc.length;
-        if (startLen > 0 && newLen === 0) {
+        if (startLen > 0 && newLen < startLen) {
           // eslint-disable-next-line no-console
           console.warn(
-            "[md-editor] dropped ExternalChange empty-out tx",
+            "[md-editor] dropped ExternalChange shrink tx",
             { noteId: note.id, startLen, newLen },
           );
           return [];

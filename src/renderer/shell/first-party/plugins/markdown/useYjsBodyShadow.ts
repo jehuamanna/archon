@@ -239,7 +239,9 @@ export function useYjsBodyShadow(
       });
       // Publish identity into Yjs awareness so peers can render this user's
       // caret with a name + stable color. yCollab reads `state.user.{name,
-      // color, colorLight}` for its remote-selections theme.
+      // color, colorLight}` for its remote-selections theme — without these
+      // fields, peers receive the awareness packet but yRemoteSelectionsTheme
+      // skips the caret decoration, so the cursor is silently invisible.
       if (user) {
         try {
           provider.awareness?.setLocalStateField("user", {
@@ -251,16 +253,36 @@ export function useYjsBodyShadow(
         } catch {
           /* awareness may be null in degenerate test harnesses */
         }
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[yjs-body] no collabUser at WS open — peers won't render this caret. Check auth.state.status in MarkdownNoteEditor.",
+          { noteId, spaceId },
+        );
       }
       if (!cancelled) setAwareness(provider.awareness ?? null);
       const onStatus = (): void => {
         if (cancelled || !provider) return;
         const ok = provider.synced && provider.isConnected;
+        // Snapshot peer count + whether each peer carries a `user` field so
+        // a missing remote caret is diagnosable from the console alone.
+        const states = provider.awareness?.getStates();
+        const peerSummary: Record<string, { hasUser: boolean; name?: string }> = {};
+        if (states) {
+          for (const [clientId, state] of states.entries()) {
+            const u = (state as { user?: { name?: string } } | undefined)?.user;
+            peerSummary[String(clientId)] = {
+              hasUser: !!u,
+              name: u?.name,
+            };
+          }
+        }
         // eslint-disable-next-line no-console
         console.debug("[yjs-body] status", {
           synced: provider.synced,
           connected: provider.isConnected,
           flag: ok,
+          peers: peerSummary,
         });
         setConnected(ok);
       };
