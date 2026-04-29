@@ -11,6 +11,10 @@ ENV npm_config_fetch_retries=5 \
     npm_config_fetch_retry_mintimeout=20000 \
     npm_config_fetch_retry_maxtimeout=120000
 
+RUN wget https://storage.googleapis.com/cloud-sql-connectors/cloud-sql-proxy/v2.11.0/cloud-sql-proxy.linux.amd64 \
+    -O /cloud-sql-proxy && chmod +x /cloud-sql-proxy
+
+
 COPY package.json package-lock.json tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
@@ -49,4 +53,5 @@ ENV NODE_ENV=production \
 
 EXPOSE 4010
 
-CMD ["npm", "run", "start", "-w", "@archon/sync-api"]
+# CMD ["npm", "run", "start", "-w", "@archon/sync-api"]
+CMD sh -c "/cloud-sql-proxy --port 5432 autonomiq-42:asia-south1:db-dev-autonomiq-pgsql & npm run start -w @archon/sync-api"
