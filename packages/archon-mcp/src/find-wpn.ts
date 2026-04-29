@@ -1,5 +1,4 @@
-import type { WpnHttpClient } from "./wpn-client.js";
-import type { WpnNoteWithContextRow } from "./wpn-client.js";
+import type { WpnHttpClient, WpnNoteWithContextRow, WpnProjectRow } from "./wpn-client.js";
 import { norm } from "./resolve-note.js";
 
 /** RFC-style UUID v1–v5 (loose check for id vs name disambiguation). */
@@ -8,40 +7,39 @@ export function isLikelyUuid(s: string): boolean {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(t);
 }
 
+/**
+ * Project hit shape post-migration. Workspaces are gone; the unique path
+ * is just the project name within the active org.
+ */
 export type ProjectPathRow = {
   projectId: string;
   projectName: string;
-  workspaceId: string;
-  workspaceName: string;
   path: string;
 };
 
-export type WorkspaceRef = {
-  workspaceId: string;
-  workspaceName: string;
-};
-
+/**
+ * Note hit shape post-migration. The Org → Project → Note hierarchy means
+ * the human-readable path is just `Project / Title`.
+ */
 export type NotePathRow = {
   noteId: string;
   title: string;
   type: string;
   projectId: string;
   projectName: string;
-  workspaceId: string;
-  workspaceName: string;
   path: string;
 };
 
-type WsRow = { id: string; name?: string };
-type ProjRow = { id: string; name?: string; workspace_id?: string };
-
+/**
+ * Find project(s) by name or UUID within the active org. Project listing is
+ * already org-scoped by the JWT, so no workspace/team filter is needed —
+ * cross-org search is not supported (callers switch active org first).
+ */
 export async function findProjectsByQuery(
   client: WpnHttpClient,
   query: string,
-  workspaceQuery?: string,
 ): Promise<
   | { status: "none"; message: string }
-  | { status: "workspace_ambiguous"; message: string; workspaces: WorkspaceRef[] }
   | { status: "ambiguous"; message: string; matches: ProjectPathRow[] }
   | { status: "unique"; matches: ProjectPathRow[] }
 > {
@@ -50,64 +48,26 @@ export async function findProjectsByQuery(
     return { status: "none", message: "Empty query." };
   }
 
-  const workspaces = (await client.getWorkspaces()) as WsRow[];
-  let scopedWs = workspaces;
-
-  if (workspaceQuery !== undefined && workspaceQuery.trim() !== "") {
-    const wq = workspaceQuery.trim();
-    if (isLikelyUuid(wq)) {
-      scopedWs = workspaces.filter((w) => w.id === wq);
-    } else {
-      scopedWs = workspaces.filter((w) => norm(w.name ?? "") === norm(wq));
-    }
-    if (scopedWs.length === 0) {
-      return {
-        status: "none",
-        message: `No workspace matched "${workspaceQuery}".`,
-      };
-    }
-    if (scopedWs.length > 1) {
-      return {
-        status: "workspace_ambiguous",
-        message:
-          "Multiple workspaces match that name; pass workspace id or a more specific workspaceQuery.",
-        workspaces: scopedWs.map((w) => ({
-          workspaceId: w.id,
-          workspaceName: w.name ?? "",
-        })),
-      };
-    }
-  }
-
-  const flat: ProjectPathRow[] = [];
-  for (const w of scopedWs) {
-    const projects = (await client.getProjects(w.id)) as ProjRow[];
-    const wname = w.name ?? "";
-    for (const p of projects) {
-      const pname = p.name ?? "";
-      flat.push({
-        projectId: p.id,
-        projectName: pname,
-        workspaceId: w.id,
-        workspaceName: wname,
-        path: `${wname} / ${pname}`,
-      });
-    }
-  }
+  const projects: WpnProjectRow[] = await client.listProjects();
 
   let matches: ProjectPathRow[];
   if (isLikelyUuid(q)) {
-    matches = flat.filter((r) => r.projectId === q);
+    matches = projects
+      .filter((p) => p.id === q)
+      .map((p) => ({ projectId: p.id, projectName: p.name, path: p.name }));
   } else {
-    matches = flat.filter((r) => norm(r.projectName) === norm(q));
+    const nq = norm(q);
+    matches = projects
+      .filter((p) => norm(p.name) === nq)
+      .map((p) => ({ projectId: p.id, projectName: p.name, path: p.name }));
   }
 
   if (matches.length === 0) {
     return {
       status: "none",
       message: isLikelyUuid(q)
-        ? `No project with id "${q}".`
-        : `No project named "${query}" in the selected scope.`,
+        ? `No project with id "${q}" in the active org.`
+        : `No project named "${query}" in the active org.`,
     };
   }
   if (matches.length === 1) {
@@ -116,20 +76,26 @@ export async function findProjectsByQuery(
   return {
     status: "ambiguous",
     message:
-      "Multiple projects match; each row includes projectId and path (Workspace / Project). Pick one id or narrow workspaceQuery.",
+      "Multiple projects share that name in the active org; pick one by passing a UUID query.",
     matches,
   };
 }
 
+/**
+ * Find note(s) by title or UUID using the cached `notes-with-context`
+ * catalog. Optional `projectQuery` narrows by project name or UUID.
+ */
 export function findNotesByQuery(
   rows: WpnNoteWithContextRow[],
   query: string,
-  workspaceQuery?: string,
   projectQuery?: string,
 ):
   | { status: "none"; message: string }
-  | { status: "workspace_ambiguous"; message: string; workspaces: WorkspaceRef[] }
-  | { status: "project_ambiguous"; message: string; projects: { projectId: string; projectName: string; workspaceId: string; workspaceName: string; path: string }[] }
+  | {
+      status: "project_ambiguous";
+      message: string;
+      projects: { projectId: string; projectName: string; path: string }[];
+    }
   | { status: "ambiguous"; message: string; matches: NotePathRow[] }
   | { status: "unique"; matches: NotePathRow[] } {
   const q = query.trim();
@@ -139,38 +105,6 @@ export function findNotesByQuery(
 
   let filtered = rows;
 
-  if (workspaceQuery !== undefined && workspaceQuery.trim() !== "") {
-    const wq = workspaceQuery.trim();
-    if (isLikelyUuid(wq)) {
-      filtered = filtered.filter((r) => r.workspace_id === wq);
-    } else {
-      const wsMatches = new Map<string, string>();
-      for (const r of filtered) {
-        if (norm(r.workspace_name) === norm(wq)) {
-          wsMatches.set(r.workspace_id, r.workspace_name);
-        }
-      }
-      if (wsMatches.size > 1) {
-        return {
-          status: "workspace_ambiguous",
-          message:
-            "Multiple workspaces share that name; pass workspace id as workspaceQuery or disambiguate.",
-          workspaces: [...wsMatches.entries()].map(([workspaceId, workspaceName]) => ({
-            workspaceId,
-            workspaceName,
-          })),
-        };
-      }
-      filtered = filtered.filter((r) => norm(r.workspace_name) === norm(wq));
-    }
-    if (filtered.length === 0) {
-      return {
-        status: "none",
-        message: `No notes in a workspace matching "${workspaceQuery}".`,
-      };
-    }
-  }
-
   if (projectQuery !== undefined && projectQuery.trim() !== "") {
     const pq = projectQuery.trim();
     if (isLikelyUuid(pq)) {
@@ -178,21 +112,17 @@ export function findNotesByQuery(
     } else {
       const projBuckets = new Map<
         string,
-        { projectId: string; projectName: string; workspaceId: string; workspaceName: string; path: string }
+        { projectId: string; projectName: string; path: string }
       >();
       for (const r of filtered) {
         if (norm(r.project_name) !== norm(pq)) {
           continue;
         }
-        const k = `${r.workspace_id}\0${r.project_id}`;
-        if (!projBuckets.has(k)) {
-          const path = `${r.workspace_name} / ${r.project_name}`;
-          projBuckets.set(k, {
+        if (!projBuckets.has(r.project_id)) {
+          projBuckets.set(r.project_id, {
             projectId: r.project_id,
             projectName: r.project_name,
-            workspaceId: r.workspace_id,
-            workspaceName: r.workspace_name,
-            path,
+            path: r.project_name,
           });
         }
       }
@@ -200,7 +130,7 @@ export function findNotesByQuery(
         return {
           status: "project_ambiguous",
           message:
-            "Multiple projects match that name in scope; pass project id as projectQuery or narrow workspace.",
+            "Multiple projects share that name in the active org; pass project id as projectQuery.",
           projects: [...projBuckets.values()],
         };
       }
@@ -227,9 +157,7 @@ export function findNotesByQuery(
     type: r.type,
     projectId: r.project_id,
     projectName: r.project_name,
-    workspaceId: r.workspace_id,
-    workspaceName: r.workspace_name,
-    path: `${r.workspace_name} / ${r.project_name} / ${r.title}`,
+    path: `${r.project_name} / ${r.title}`,
   }));
 
   if (out.length === 0) {
@@ -246,7 +174,7 @@ export function findNotesByQuery(
   return {
     status: "ambiguous",
     message:
-      "Multiple notes match; each row includes noteId and path (Workspace / Project / Title). Pick one id or narrow filters.",
+      "Multiple notes match; each row includes noteId and path (Project / Title). Pick one id or narrow projectQuery.",
     matches: out,
   };
 }

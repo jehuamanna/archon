@@ -2,10 +2,14 @@
 export class McpTokenHolder {
   accessToken = "";
   refreshToken: string | null = null;
-  /** Active organization context (Phase 1); sent as `X-Archon-Org` on every WPN call. */
+  /** Active organization context; sent as `X-Archon-Org` on every WPN call. */
   activeOrgId: string | null = null;
-  /** Active space context (Phase 2); sent as `X-Archon-Space` on every WPN call. */
-  activeSpaceId: string | null = null;
+  /**
+   * Active team context. Carried in the JWT (`activeTeamId`) and refreshed
+   * by `POST /orgs/active`. Not sent as a header — the server reads it from
+   * the JWT — but tracked here so callers can show the active-team UI hint.
+   */
+  activeTeamId: string | null = null;
 
   setTokens(access: string, refresh: string | null): void {
     this.accessToken = access.trim();
@@ -16,15 +20,15 @@ export class McpTokenHolder {
     this.activeOrgId = orgId && orgId.trim() ? orgId.trim() : null;
   }
 
-  setActiveSpace(spaceId: string | null): void {
-    this.activeSpaceId = spaceId && spaceId.trim() ? spaceId.trim() : null;
+  setActiveTeam(teamId: string | null): void {
+    this.activeTeamId = teamId && teamId.trim() ? teamId.trim() : null;
   }
 
   clear(): void {
     this.accessToken = "";
     this.refreshToken = null;
     this.activeOrgId = null;
-    this.activeSpaceId = null;
+    this.activeTeamId = null;
   }
 
   hasAccess(): boolean {

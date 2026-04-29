@@ -10,14 +10,18 @@ export type WpnHttpClientOptions = {
   onTokensUpdated?: (access: string, refresh: string | null) => void;
 };
 
+/**
+ * Row shape from `GET /wpn/notes-with-context`. Post-migration the explorer
+ * tree is `Org → Project → Note`; the MCP find-pass surfaces project
+ * context (id + name) only. Workspace/space context columns were removed
+ * with the org/team migration.
+ */
 export type WpnNoteWithContextRow = {
   id: string;
   title: string;
   type: string;
   project_id: string;
   project_name: string;
-  workspace_id: string;
-  workspace_name: string;
 };
 
 export type WpnNoteDetail = {
@@ -42,6 +46,57 @@ export type WpnNoteListItem = {
   title: string;
   depth: number;
   sibling_index: number;
+};
+
+/** Public project row (snake_case) returned by `/wpn/projects` + `/wpn/full-tree`. */
+export type WpnProjectRow = {
+  id: string;
+  org_id: string;
+  creator_user_id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+};
+
+/** Org membership row from `GET /orgs/me`. */
+export type OrgMembershipRow = {
+  orgId: string;
+  name: string;
+  slug: string;
+  role: "admin" | "member";
+  isDefault: boolean;
+};
+
+/** Team row from `GET /orgs/:orgId/teams`. */
+export type TeamRow = {
+  teamId: string;
+  orgId: string;
+  departmentId: string;
+  name: string;
+  colorToken: string | null;
+  memberCount: number;
+  createdAt: string;
+};
+
+/** Department row from `GET /orgs/:orgId/departments`. */
+export type DepartmentRow = {
+  departmentId: string;
+  orgId: string;
+  name: string;
+  colorToken: string | null;
+  teamCount: number;
+  memberCount: number;
+  createdAt: string;
+};
+
+/** Team→project grant row from `GET /teams/:teamId/projects`. */
+export type TeamProjectGrant = {
+  projectId: string;
+  projectName: string;
+  role: "owner" | "contributor" | "viewer";
+  grantedAt: string;
 };
 
 function isWpnNoteListItem(x: unknown): x is WpnNoteListItem {
@@ -129,9 +184,6 @@ export class WpnHttpClient {
     if (this.holder.activeOrgId) {
       h["X-Archon-Org"] = this.holder.activeOrgId;
     }
-    if (this.holder.activeSpaceId) {
-      h["X-Archon-Space"] = this.holder.activeSpaceId;
-    }
     return h;
   }
 
@@ -217,27 +269,11 @@ export class WpnHttpClient {
     return body as T;
   }
 
-  async getWorkspaces(): Promise<unknown[]> {
-    const body = await this.getJson<{ workspaces?: unknown }>(
-      "/wpn/workspaces",
-      "WPN GET workspaces",
-    );
-    const ws = body.workspaces;
-    if (!Array.isArray(ws)) {
-      throw new Error("WPN GET workspaces: missing workspaces array");
-    }
-    return ws;
-  }
+  // ── Org / team / department surface ────────────────────────────────────
 
-  /** Phase 1 — list orgs the authenticated user belongs to (and active selection). */
+  /** List orgs the authenticated user belongs to (and active selection). */
   async listMyOrgs(): Promise<{
-    orgs: Array<{
-      orgId: string;
-      name: string;
-      slug: string;
-      role: "admin" | "member";
-      isDefault: boolean;
-    }>;
+    orgs: OrgMembershipRow[];
     activeOrgId: string | null;
     defaultOrgId: string | null;
   }> {
@@ -247,29 +283,209 @@ export class WpnHttpClient {
     );
   }
 
-  /** Phase 2 — list spaces the user belongs to across all orgs. */
-  async listMySpaces(): Promise<{
-    spaces: Array<{
-      spaceId: string;
-      orgId: string | null;
-      name: string;
-      kind: "default" | "normal";
-      role: "owner" | "member";
-    }>;
-    activeSpaceId: string | null;
+  /** List teams in an org (caller must be an org member). */
+  async listTeamsForOrg(orgId: string): Promise<TeamRow[]> {
+    const body = await this.getJson<{ teams?: unknown }>(
+      `/orgs/${encodeURIComponent(orgId)}/teams`,
+      "GET org teams",
+    );
+    const t = body.teams;
+    if (!Array.isArray(t)) {
+      throw new Error("GET org teams: missing teams array");
+    }
+    return t as TeamRow[];
+  }
+
+  /** List departments in an org (caller must be an org member). */
+  async listDepartmentsForOrg(orgId: string): Promise<DepartmentRow[]> {
+    const body = await this.getJson<{ departments?: unknown }>(
+      `/orgs/${encodeURIComponent(orgId)}/departments`,
+      "GET org departments",
+    );
+    const d = body.departments;
+    if (!Array.isArray(d)) {
+      throw new Error("GET org departments: missing departments array");
+    }
+    return d as DepartmentRow[];
+  }
+
+  /** Admin-only: create a team in a department. */
+  async createTeam(
+    orgId: string,
+    departmentId: string,
+    name: string,
+    colorToken?: string | null,
+  ): Promise<{
+    teamId: string;
+    orgId: string;
+    departmentId: string;
+    name: string;
+    colorToken: string | null;
   }> {
-    return this.getJson("/spaces/me", "GET /spaces/me");
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/orgs/${encodeURIComponent(orgId)}/teams`,
+      "POST",
+      "POST team",
+      colorToken !== undefined
+        ? { departmentId, name, colorToken }
+        : { departmentId, name },
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`POST team failed (${res.status}): ${err}`);
+    }
+    return parsed as {
+      teamId: string;
+      orgId: string;
+      departmentId: string;
+      name: string;
+      colorToken: string | null;
+    };
+  }
+
+  /** Admin-only: rename / recolor / move team to a different department. */
+  async updateTeam(
+    teamId: string,
+    patch: { name?: string; colorToken?: string | null; departmentId?: string },
+  ): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/teams/${encodeURIComponent(teamId)}`,
+      "PATCH",
+      "PATCH team",
+      patch,
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`PATCH team failed (${res.status}): ${err}`);
+    }
+  }
+
+  /** Admin-only: delete a team. */
+  async deleteTeam(teamId: string): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/teams/${encodeURIComponent(teamId)}`,
+      "DELETE",
+      "DELETE team",
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`DELETE team failed (${res.status}): ${err}`);
+    }
+  }
+
+  /** Admin-only: create a department. */
+  async createDepartment(
+    orgId: string,
+    name: string,
+    colorToken?: string | null,
+  ): Promise<{
+    departmentId: string;
+    orgId: string;
+    name: string;
+    colorToken: string | null;
+  }> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/orgs/${encodeURIComponent(orgId)}/departments`,
+      "POST",
+      "POST department",
+      colorToken !== undefined ? { name, colorToken } : { name },
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`POST department failed (${res.status}): ${err}`);
+    }
+    return parsed as {
+      departmentId: string;
+      orgId: string;
+      name: string;
+      colorToken: string | null;
+    };
+  }
+
+  /** Admin-only: rename / recolor a department. */
+  async updateDepartment(
+    departmentId: string,
+    patch: { name?: string; colorToken?: string | null },
+  ): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/departments/${encodeURIComponent(departmentId)}`,
+      "PATCH",
+      "PATCH department",
+      patch,
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`PATCH department failed (${res.status}): ${err}`);
+    }
+  }
+
+  /** Admin-only: delete a department (refused while teams reference it). */
+  async deleteDepartment(departmentId: string): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/departments/${encodeURIComponent(departmentId)}`,
+      "DELETE",
+      "DELETE department",
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`DELETE department failed (${res.status}): ${err}`);
+    }
+  }
+
+  /** List a team's project grants. */
+  async listTeamProjects(teamId: string): Promise<TeamProjectGrant[]> {
+    const body = await this.getJson<{ grants?: unknown }>(
+      `/teams/${encodeURIComponent(teamId)}/projects`,
+      "GET team projects",
+    );
+    const g = body.grants;
+    if (!Array.isArray(g)) {
+      throw new Error("GET team projects: missing grants array");
+    }
+    return g as TeamProjectGrant[];
+  }
+
+  /** Admin-only: grant the team a role on a project (idempotent upsert). */
+  async grantTeamProject(
+    teamId: string,
+    projectId: string,
+    role: "owner" | "contributor" | "viewer",
+  ): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/teams/${encodeURIComponent(teamId)}/projects`,
+      "POST",
+      "POST team project grant",
+      { projectId, role },
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`POST team project grant failed (${res.status}): ${err}`);
+    }
+  }
+
+  /** Admin-only: revoke a team's project grant. */
+  async revokeTeamProject(teamId: string, projectId: string): Promise<void> {
+    const { res, text, body: parsed } = await this.fetchWpn(
+      `/teams/${encodeURIComponent(teamId)}/projects/${encodeURIComponent(projectId)}`,
+      "DELETE",
+      "DELETE team project grant",
+    );
+    if (!res.ok) {
+      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
+      throw new Error(`DELETE team project grant failed (${res.status}): ${err}`);
+    }
   }
 
   /**
-   * Switch active org for this session: POST /orgs/active returns a fresh access token
-   * whose claims carry the new `activeOrgId` and (when resolvable) `activeSpaceId`.
-   * Applies the new token and org/space context to the holder, invalidates the
-   * notes-with-context cache, and fires `onTokensUpdated` so callers can persist.
+   * Switch active org for this session. `POST /orgs/active` returns a fresh
+   * access token whose claims carry the new `activeOrgId` and (when
+   * resolvable) `activeTeamId`. Applies the new token + org/team context to
+   * the holder, invalidates the notes-with-context cache, and fires
+   * `onTokensUpdated` so callers can persist.
    */
   async switchActiveOrg(orgId: string): Promise<{
     activeOrgId: string;
-    activeSpaceId: string | null;
+    activeTeamId: string | null;
   }> {
     const { res, text, body } = await this.fetchWpn(
       "/orgs/active",
@@ -284,7 +500,7 @@ export class WpnHttpClient {
     const b = body as {
       token?: string;
       activeOrgId?: string;
-      activeSpaceId?: string | null;
+      activeTeamId?: string | null;
     };
     if (typeof b.token !== "string" || !b.token.trim()) {
       throw new Error("POST /orgs/active: missing token in response");
@@ -295,26 +511,41 @@ export class WpnHttpClient {
     const prevRefresh = this.holder.refreshToken;
     this.holder.setTokens(b.token.trim(), prevRefresh);
     this.holder.setActiveOrg(b.activeOrgId.trim());
-    const spaceId =
-      typeof b.activeSpaceId === "string" && b.activeSpaceId.trim()
-        ? b.activeSpaceId.trim()
+    const teamId =
+      typeof b.activeTeamId === "string" && b.activeTeamId.trim()
+        ? b.activeTeamId.trim()
         : null;
-    this.holder.setActiveSpace(spaceId);
+    this.holder.setActiveTeam(teamId);
     this.onTokensUpdated?.(this.holder.accessToken, this.holder.refreshToken);
     this.invalidateNotesWithContextCacheInternal();
-    return { activeOrgId: b.activeOrgId.trim(), activeSpaceId: spaceId };
+    return { activeOrgId: b.activeOrgId.trim(), activeTeamId: teamId };
   }
 
-  async getProjects(workspaceId: string): Promise<unknown[]> {
+  // ── Project / note surface ─────────────────────────────────────────────
+
+  /** List all projects readable to the caller in the active org. */
+  async listProjects(): Promise<WpnProjectRow[]> {
     const body = await this.getJson<{ projects?: unknown }>(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/projects`,
+      "/wpn/projects",
       "WPN GET projects",
     );
     const p = body.projects;
     if (!Array.isArray(p)) {
       throw new Error("WPN GET projects: missing projects array");
     }
-    return p;
+    return p as WpnProjectRow[];
+  }
+
+  /** Single round-trip: projects + notesByProjectId + explorerStateByProjectId. */
+  async getFullTree(): Promise<{
+    projects: WpnProjectRow[];
+    notesByProjectId: Record<string, WpnNoteListItem[]>;
+    explorerStateByProjectId: Record<string, { expanded_ids: string[] }>;
+  }> {
+    return this.getJson(
+      "/wpn/full-tree",
+      "WPN GET full-tree",
+    );
   }
 
   async getNotesFlat(projectId: string): Promise<WpnNoteListItem[]> {
@@ -353,16 +584,15 @@ export class WpnHttpClient {
   }
 
   /**
-   * Resolve a noteId to its scope chain via `GET /wpn/notes/:id/scope`. Returns
-   * `null` when the note doesn't exist or is unreadable (404). Read-only — does
-   * not mutate session state. Pair with {@link ensureScopeForNote} for the
+   * Resolve a noteId to its scope chain via `GET /wpn/notes/:id/scope`.
+   * Post-migration the scope is just `(projectId, orgId)` — workspaces and
+   * spaces are gone. Returns `null` when the note doesn't exist or is
+   * unreadable (404). Pair with {@link ensureScopeForNote} for the
    * "switch then retry" flow used by every noteId-taking MCP tool.
    */
   async getNoteScope(noteId: string): Promise<{
     noteId: string;
     projectId: string;
-    workspaceId: string;
-    spaceId: string | null;
     orgId: string | null;
   } | null> {
     const { res, text, body } = await this.fetchWpn(
@@ -380,62 +610,49 @@ export class WpnHttpClient {
     const b = body as {
       noteId?: unknown;
       projectId?: unknown;
-      workspaceId?: unknown;
-      spaceId?: unknown;
       orgId?: unknown;
     };
     if (
       typeof b.noteId !== "string" ||
-      typeof b.projectId !== "string" ||
-      typeof b.workspaceId !== "string"
+      typeof b.projectId !== "string"
     ) {
       throw new Error("WPN GET note scope: missing fields in response");
     }
     return {
       noteId: b.noteId,
       projectId: b.projectId,
-      workspaceId: b.workspaceId,
-      spaceId: typeof b.spaceId === "string" && b.spaceId.length > 0 ? b.spaceId : null,
       orgId: typeof b.orgId === "string" && b.orgId.length > 0 ? b.orgId : null,
     };
   }
 
   /**
-   * Ensure the active org/space matches the home of `noteId`, switching when
+   * Ensure the active org matches the home of `noteId`, switching when
    * needed so a downstream `notes-with-context`-style call (e.g. the
    * `archon_execute_note` find pass) can see the note. Returns a record of
    * what changed — `switched: false` when already in scope, otherwise the
-   * before/after orgId and spaceId so the calling tool can surface it.
+   * before/after orgId so the calling tool can surface it.
    *
-   * Org change requires re-minting the JWT (`switchActiveOrg`); same-org space
-   * change just updates the header in the holder. When the note is unreadable
-   * (404), returns `{ switched: false, found: false }` and lets the caller
-   * decide whether to fall through (most tools will still attempt the original
-   * call so the existing 404 / "not found" surfaces normally).
+   * Org change requires re-minting the JWT (`switchActiveOrg`), which also
+   * updates the JWT-carried `activeTeamId` claim. When the note is
+   * unreadable (404), returns `{ switched: false, found: false }` and lets
+   * the caller decide whether to fall through.
    */
   async ensureScopeForNote(noteId: string): Promise<{
     switched: boolean;
     found: boolean;
     fromOrgId: string | null;
     toOrgId: string | null;
-    fromSpaceId: string | null;
-    toSpaceId: string | null;
   }> {
     const fromOrgId = this.holder.activeOrgId;
-    const fromSpaceId = this.holder.activeSpaceId;
     let scope: Awaited<ReturnType<WpnHttpClient["getNoteScope"]>>;
     try {
       scope = await this.getNoteScope(noteId);
     } catch {
-      // Network / server error — don't block the original tool call; let it
-      // surface the underlying error itself.
       return {
         switched: false,
         found: false,
         fromOrgId,
         toOrgId: fromOrgId,
-        fromSpaceId,
-        toSpaceId: fromSpaceId,
       };
     }
     if (!scope) {
@@ -444,54 +661,42 @@ export class WpnHttpClient {
         found: false,
         fromOrgId,
         toOrgId: fromOrgId,
-        fromSpaceId,
-        toSpaceId: fromSpaceId,
       };
     }
     const targetOrgId = scope.orgId;
-    const targetSpaceId = scope.spaceId;
     const orgMatches = targetOrgId === null || targetOrgId === fromOrgId;
-    const spaceMatches = targetSpaceId === null || targetSpaceId === fromSpaceId;
-    if (orgMatches && spaceMatches) {
+    if (orgMatches) {
       return {
         switched: false,
         found: true,
         fromOrgId,
         toOrgId: fromOrgId,
-        fromSpaceId,
-        toSpaceId: fromSpaceId,
       };
     }
-    if (!orgMatches && targetOrgId) {
+    if (targetOrgId) {
       await this.switchActiveOrg(targetOrgId);
-    }
-    if (targetSpaceId && this.holder.activeSpaceId !== targetSpaceId) {
-      this.holder.setActiveSpace(targetSpaceId);
-      this.invalidateNotesWithContextCacheInternal();
     }
     return {
       switched: true,
       found: true,
       fromOrgId,
       toOrgId: this.holder.activeOrgId,
-      fromSpaceId,
-      toSpaceId: this.holder.activeSpaceId,
     };
   }
 
   /**
-   * Mint a short-TTL `spaceWs` JWT for the given space via
-   * `POST /realtime/ws-token`. Used by `archon_write_note` to open a
-   * Hocuspocus client connection for content updates. Returns null when the
-   * caller has no access to the space (403) — caller should fall back to
-   * REST-only and let the in-process bridge handle the broadcast.
+   * Mint a short-TTL `spaceWs` JWT via `POST /realtime/ws-token`. Used by
+   * `archon_write_note` to open a Hocuspocus client connection for content
+   * updates. Per-note authorisation runs at WS open time on the server; the
+   * minted token only proves identity. The `typ: "spaceWs"` JWT name is
+   * vestigial — preserved for client compat after the spaces squash.
    */
-  async mintSpaceWsToken(spaceId: string): Promise<string | null> {
+  async mintRealtimeWsToken(): Promise<string | null> {
     const { res, text, body } = await this.fetchWpn(
       "/realtime/ws-token",
       "POST",
       "WPN mint ws-token",
-      { spaceId },
+      {},
     );
     if (res.status === 403 || res.status === 404) return null;
     if (!res.ok) {
@@ -555,67 +760,24 @@ export class WpnHttpClient {
     return note;
   }
 
-  async updateWorkspace(
-    workspaceId: string,
-    patch: { name?: string; sort_index?: number; color_token?: string | null },
-  ): Promise<unknown> {
+  async createProject(
+    name: string,
+    opts: { teamId?: string; teamRole?: "owner" | "contributor" | "viewer" } = {},
+  ): Promise<WpnProjectRow> {
+    const body: Record<string, unknown> = { name };
+    if (opts.teamId !== undefined) body.teamId = opts.teamId;
+    if (opts.teamRole !== undefined) body.teamRole = opts.teamRole;
     const { res, text, body: parsed } = await this.fetchWpn(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}`,
-      "PATCH",
-      "WPN update workspace",
-      patch,
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(`WPN PATCH workspace failed (${res.status}): ${err}`);
-    }
-    return (parsed as { workspace?: unknown }).workspace ?? parsed;
-  }
-
-  async moveWorkspaceToSpace(
-    workspaceId: string,
-    targetSpaceId: string,
-  ): Promise<unknown> {
-    const { res, text, body: parsed } = await this.fetchWpn(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/space`,
-      "PATCH",
-      "WPN move workspace to space",
-      { targetSpaceId },
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(
-        `WPN PATCH workspace/space failed (${res.status}): ${err}`,
-      );
-    }
-    this.invalidateNotesWithContextCacheInternal();
-    return (parsed as { workspace?: unknown }).workspace ?? parsed;
-  }
-
-  async deleteWorkspace(workspaceId: string): Promise<void> {
-    const { res, text, body: parsed } = await this.fetchWpn(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}`,
-      "DELETE",
-      "WPN delete workspace",
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(`WPN DELETE workspace failed (${res.status}): ${err}`);
-    }
-  }
-
-  async createProject(workspaceId: string, name: string): Promise<{ id: string; name: string }> {
-    const { res, text, body: parsed } = await this.fetchWpn(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/projects`,
+      "/wpn/projects",
       "POST",
       "WPN create project",
-      { name },
+      body,
     );
     if (!res.ok) {
       const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
       throw new Error(`WPN POST project failed (${res.status}): ${err}`);
     }
-    const project = (parsed as { project?: { id: string; name: string } }).project;
+    const project = (parsed as { project?: WpnProjectRow }).project;
     if (!project || typeof project.id !== "string") {
       throw new Error("WPN POST project: missing project in response");
     }
@@ -625,8 +787,8 @@ export class WpnHttpClient {
 
   async updateProject(
     projectId: string,
-    patch: { name?: string; sort_index?: number; color_token?: string | null; workspace_id?: string },
-  ): Promise<unknown> {
+    patch: { name?: string; sortIndex?: number; colorToken?: string | null },
+  ): Promise<WpnProjectRow> {
     const { res, text, body: parsed } = await this.fetchWpn(
       `/wpn/projects/${encodeURIComponent(projectId)}`,
       "PATCH",
@@ -638,7 +800,11 @@ export class WpnHttpClient {
       throw new Error(`WPN PATCH project failed (${res.status}): ${err}`);
     }
     this.invalidateNotesWithContextCacheInternal();
-    return (parsed as { project?: unknown }).project ?? parsed;
+    const project = (parsed as { project?: WpnProjectRow }).project;
+    if (!project) {
+      throw new Error("WPN PATCH project: missing project in response");
+    }
+    return project;
   }
 
   async deleteProject(projectId: string): Promise<void> {
@@ -669,7 +835,6 @@ export class WpnHttpClient {
   }
 
   async moveNote(
-    projectId: string,
     draggedId: string,
     targetId: string,
     placement: "before" | "after" | "into",
@@ -678,7 +843,7 @@ export class WpnHttpClient {
       "/wpn/notes/move",
       "POST",
       "WPN move note",
-      { projectId, draggedId, targetId, placement },
+      { draggedId, targetId, placement },
     );
     if (!res.ok) {
       const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
@@ -707,21 +872,13 @@ export class WpnHttpClient {
   async moveNoteToProject(
     noteId: string,
     targetProjectId: string,
-    targetParentId?: string | null,
+    targetParentId: string | null,
   ): Promise<void> {
-    const payload: {
-      noteId: string;
-      targetProjectId: string;
-      targetParentId?: string | null;
-    } = { noteId, targetProjectId };
-    if (targetParentId !== undefined) {
-      payload.targetParentId = targetParentId;
-    }
     const { res, text, body: parsed } = await this.fetchWpn(
       "/wpn/notes/move-to-project",
       "POST",
       "WPN move note to project",
-      payload,
+      { noteId, targetProjectId, targetParentId },
     );
     if (!res.ok) {
       const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
@@ -732,15 +889,11 @@ export class WpnHttpClient {
 
   async duplicateProject(
     projectId: string,
-    opts: { targetWorkspaceId?: string; newName?: string } = {},
+    opts: { teamId?: string; newName?: string } = {},
   ): Promise<{ projectId: string; name: string }> {
     const body: Record<string, string> = {};
-    if (opts.targetWorkspaceId !== undefined) {
-      body.targetWorkspaceId = opts.targetWorkspaceId;
-    }
-    if (opts.newName !== undefined) {
-      body.newName = opts.newName;
-    }
+    if (opts.teamId !== undefined) body.teamId = opts.teamId;
+    if (opts.newName !== undefined) body.newName = opts.newName;
     const { res, text, body: parsed } = await this.fetchWpn(
       `/wpn/projects/${encodeURIComponent(projectId)}/duplicate`,
       "POST",
@@ -759,52 +912,6 @@ export class WpnHttpClient {
     return { projectId: p.projectId, name: p.name };
   }
 
-  async duplicateWorkspace(
-    workspaceId: string,
-    opts: { newName?: string; targetSpaceId?: string } = {},
-  ): Promise<{
-    workspaceId: string;
-    name: string;
-    projects: { projectId: string; name: string; sourceProjectId: string }[];
-  }> {
-    const body: Record<string, string> = {};
-    if (opts.newName !== undefined) {
-      body.newName = opts.newName;
-    }
-    if (opts.targetSpaceId !== undefined) {
-      body.targetSpaceId = opts.targetSpaceId;
-    }
-    const { res, text, body: parsed } = await this.fetchWpn(
-      `/wpn/workspaces/${encodeURIComponent(workspaceId)}/duplicate`,
-      "POST",
-      "WPN duplicate workspace",
-      body,
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(`WPN duplicate workspace failed (${res.status}): ${err}`);
-    }
-    const p = parsed as {
-      workspaceId?: unknown;
-      name?: unknown;
-      projects?: unknown;
-    };
-    if (typeof p.workspaceId !== "string" || typeof p.name !== "string") {
-      throw new Error(
-        "WPN duplicate workspace: missing workspaceId/name in response",
-      );
-    }
-    const projects = Array.isArray(p.projects)
-      ? (p.projects as {
-          projectId: string;
-          name: string;
-          sourceProjectId: string;
-        }[])
-      : [];
-    this.invalidateNotesWithContextCacheInternal();
-    return { workspaceId: p.workspaceId, name: p.name, projects };
-  }
-
   async getBacklinks(noteId: string): Promise<{ id: string; title: string; project_id: string }[]> {
     const { res, text, body: parsed } = await this.fetchWpn(
       `/wpn/backlinks/${encodeURIComponent(noteId)}`,
@@ -821,12 +928,17 @@ export class WpnHttpClient {
       : [];
   }
 
-  async exportWorkspaces(workspaceIds?: string[]): Promise<ArrayBuffer> {
+  /**
+   * Stream the org's bundle export as a ZIP. Optionally restrict to a
+   * subset of `projectIds`; the server enforces read access per project
+   * and rejects any unreadable id.
+   */
+  async exportProjects(projectIds?: string[]): Promise<ArrayBuffer> {
     const doFetch = () =>
       fetch(this.url("/wpn/export"), {
         method: "POST",
         headers: this.authHeaders(),
-        body: JSON.stringify(workspaceIds ? { workspaceIds } : {}),
+        body: JSON.stringify(projectIds ? { projectIds } : {}),
       });
     let res = await doFetch();
     if (res.status === 401 && this.holder.refreshToken) {
@@ -839,7 +951,12 @@ export class WpnHttpClient {
     return res.arrayBuffer();
   }
 
-  async importWorkspaces(zipBuffer: ArrayBuffer): Promise<unknown> {
+  /**
+   * Import a v3 bundle ZIP into a target team. The server pins the
+   * imported projects' org to the team's org and creates `team_projects`
+   * grants for each newly imported project against that team.
+   */
+  async importProjects(zipBuffer: ArrayBuffer, teamId: string): Promise<unknown> {
     const boundary = `----archon${Date.now()}`;
     const header = `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="import.zip"\r\nContent-Type: application/zip\r\n\r\n`;
     const footer = `\r\n--${boundary}--\r\n`;
@@ -850,36 +967,30 @@ export class WpnHttpClient {
     bodyBuf.set(new Uint8Array(zipBuffer), headerBuf.length);
     bodyBuf.set(footerBuf, headerBuf.length + zipBuffer.byteLength);
 
-    const h: Record<string, string> = {
-      "Content-Type": `multipart/form-data; boundary=${boundary}`,
-      Accept: "application/json",
+    const buildHeaders = (): Record<string, string> => {
+      const h: Record<string, string> = {
+        "Content-Type": `multipart/form-data; boundary=${boundary}`,
+        Accept: "application/json",
+      };
+      if (this.holder.accessToken) {
+        h.Authorization = `Bearer ${this.holder.accessToken}`;
+      }
+      if (this.holder.activeOrgId) {
+        h["X-Archon-Org"] = this.holder.activeOrgId;
+      }
+      return h;
     };
-    if (this.holder.accessToken) {
-      h.Authorization = `Bearer ${this.holder.accessToken}`;
-    }
-    if (this.holder.activeOrgId) {
-      h["X-Archon-Org"] = this.holder.activeOrgId;
-    }
-    if (this.holder.activeSpaceId) {
-      h["X-Archon-Space"] = this.holder.activeSpaceId;
-    }
+    const importUrl = `${this.url("/wpn/import")}?teamId=${encodeURIComponent(teamId)}`;
     const doFetch = () =>
-      fetch(this.url("/wpn/import"), {
+      fetch(importUrl, {
         method: "POST",
-        headers: h,
+        headers: buildHeaders(),
         body: bodyBuf,
       });
     let res = await doFetch();
     if (res.status === 401 && this.holder.refreshToken) {
       const ok = await this.tryRefresh();
       if (ok) {
-        h.Authorization = `Bearer ${this.holder.accessToken}`;
-        if (this.holder.activeOrgId) {
-          h["X-Archon-Org"] = this.holder.activeOrgId;
-        }
-        if (this.holder.activeSpaceId) {
-          h["X-Archon-Space"] = this.holder.activeSpaceId;
-        }
         res = await doFetch();
       }
     }
@@ -891,68 +1002,11 @@ export class WpnHttpClient {
     return res.json();
   }
 
-  async createWorkspace(name: string): Promise<{ id: string; name: string }> {
-    const { res, text, body: parsed } = await this.fetchWpn(
-      "/wpn/workspaces",
-      "POST",
-      "WPN create workspace",
-      { name },
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(`WPN POST workspace failed (${res.status}): ${err}`);
-    }
-    const workspace = (parsed as { workspace?: { id: string; name: string } }).workspace;
-    if (!workspace || typeof workspace.id !== "string") {
-      throw new Error("WPN POST workspace: missing workspace in response");
-    }
-    this.invalidateNotesWithContextCacheInternal();
-    return workspace;
-  }
-
-  async createSpace(
-    orgId: string,
-    name: string,
-  ): Promise<{
-    spaceId: string;
-    orgId: string;
-    name: string;
-    kind: string;
-    role: string;
-  }> {
-    const { res, text, body: parsed } = await this.fetchWpn(
-      `/orgs/${encodeURIComponent(orgId)}/spaces`,
-      "POST",
-      "WPN create space",
-      { name },
-    );
-    if (!res.ok) {
-      const err = (parsed as { error?: string })?.error ?? text.slice(0, 200);
-      throw new Error(`WPN POST space failed (${res.status}): ${err}`);
-    }
-    const space = parsed as {
-      spaceId?: string;
-      orgId?: string;
-      name?: string;
-      kind?: string;
-      role?: string;
-    };
-    if (!space || typeof space.spaceId !== "string") {
-      throw new Error("WPN POST space: missing spaceId in response");
-    }
-    return {
-      spaceId: space.spaceId,
-      orgId: typeof space.orgId === "string" ? space.orgId : orgId,
-      name: typeof space.name === "string" ? space.name : name,
-      kind: typeof space.kind === "string" ? space.kind : "normal",
-      role: typeof space.role === "string" ? space.role : "owner",
-    };
-  }
-
   /**
    * Mint a signed R2 GET URL for an image-asset key owned by the caller.
-   * The server enforces key-scope ACLs (org/space/workspace must match JWT claims
-   * and project ownership) — this client only ferries key + optional TTL.
+   * The server enforces key-scope ACLs (org/project must match the JWT's
+   * active org and the project's org_id) — this client only ferries key +
+   * optional TTL.
    */
   async signAssetKey(
     key: string,

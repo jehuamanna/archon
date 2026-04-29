@@ -10,24 +10,19 @@ const rows: WpnNoteWithContextRow[] = [
     type: "markdown",
     project_id: "p1",
     project_name: "Core",
-    workspace_id: "w1",
-    workspace_name: "Main",
   },
   {
     id: "a2",
     title: "Spec",
     type: "markdown",
     project_id: "p2",
-    project_name: "Core",
-    workspace_id: "w2",
-    workspace_name: "Other",
+    project_name: "Other",
   },
 ];
 
 describe("resolveNoteFromCatalog", () => {
   it("returns single match with case-insensitive names", () => {
     const r = resolveNoteFromCatalog(rows, {
-      workspaceName: "main",
       projectName: "  core ",
       noteTitle: "SPEC",
     });
@@ -39,7 +34,6 @@ describe("resolveNoteFromCatalog", () => {
 
   it("returns none when title missing", () => {
     const r = resolveNoteFromCatalog(rows, {
-      workspaceName: "Main",
       projectName: "Core",
       noteTitle: "Missing",
     });
@@ -49,7 +43,7 @@ describe("resolveNoteFromCatalog", () => {
     }
   });
 
-  it("returns ambiguous when same triple exists twice", () => {
+  it("returns ambiguous when same pair exists twice", () => {
     const dup: WpnNoteWithContextRow[] = [
       ...rows,
       {
@@ -58,12 +52,9 @@ describe("resolveNoteFromCatalog", () => {
         type: "markdown",
         project_id: "p9",
         project_name: "Core",
-        workspace_id: "w1",
-        workspace_name: "Main",
       },
     ];
     const r = resolveNoteFromCatalog(dup, {
-      workspaceName: "Main",
       projectName: "Core",
       noteTitle: "Spec",
     });

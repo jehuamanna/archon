@@ -18,18 +18,17 @@ function item(p: Partial<WpnNoteListItem> & Pick<WpnNoteListItem, "id" | "title"
 }
 
 describe("parseParentWpnPath", () => {
-  it("parses workspace, project, and title chain", () => {
-    const r = parseParentWpnPath("Main / Core / Alpha / Beta");
+  it("parses project + title chain (post-migration 2-segment minimum)", () => {
+    const r = parseParentWpnPath("Core / Alpha / Beta");
     assert.equal(r.ok, true);
     if (r.ok) {
-      assert.equal(r.workspaceName, "Main");
       assert.equal(r.projectName, "Core");
       assert.deepEqual(r.parentPathTitles, ["Alpha", "Beta"]);
     }
   });
 
-  it("rejects too few segments", () => {
-    const r = parseParentWpnPath("Only / Two");
+  it("rejects single segment (needs project + at least one title)", () => {
+    const r = parseParentWpnPath("OnlyOne");
     assert.equal(r.ok, false);
   });
 });

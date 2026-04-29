@@ -10,8 +10,6 @@ const sampleRows = [
     type: "markdown",
     project_id: "p1",
     project_name: "Prj",
-    workspace_id: "w1",
-    workspace_name: "Ws",
   },
 ];
 

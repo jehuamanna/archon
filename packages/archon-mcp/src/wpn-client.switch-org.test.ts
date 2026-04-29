@@ -53,13 +53,13 @@ describe("WpnHttpClient.switchActiveOrg", () => {
           JSON.stringify({
             token: "new-access",
             activeOrgId: "org-B",
-            activeSpaceId: "space-B",
+            activeTeamId: "team-B",
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
       }
-      if (url.endsWith("/wpn/workspaces") && method === "GET") {
-        return new Response(JSON.stringify({ workspaces: [] }), {
+      if (url.endsWith("/wpn/projects") && method === "GET") {
+        return new Response(JSON.stringify({ projects: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -72,11 +72,11 @@ describe("WpnHttpClient.switchActiveOrg", () => {
     globalThis.fetch = origFetch;
   });
 
-  it("posts to /orgs/active with orgId and applies token + org + space", async () => {
+  it("posts to /orgs/active with orgId and applies token + org + team", async () => {
     const holder = new McpTokenHolder();
     holder.setTokens("old-access", "rt-1");
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
+    holder.setActiveTeam("team-A");
 
     let persisted: { access: string; refresh: string | null } | null = null;
     const client = new WpnHttpClient("http://127.0.0.1:9", holder, {
@@ -94,29 +94,29 @@ describe("WpnHttpClient.switchActiveOrg", () => {
     assert.equal(postCall!.headers["Authorization"], "Bearer old-access");
     assert.equal(postCall!.headers["X-Archon-Org"], "org-A");
 
-    assert.deepEqual(res, { activeOrgId: "org-B", activeSpaceId: "space-B" });
+    assert.deepEqual(res, { activeOrgId: "org-B", activeTeamId: "team-B" });
     assert.equal(holder.accessToken, "new-access");
     assert.equal(holder.refreshToken, "rt-1");
     assert.equal(holder.activeOrgId, "org-B");
-    assert.equal(holder.activeSpaceId, "space-B");
+    assert.equal(holder.activeTeamId, "team-B");
     assert.deepEqual(persisted, { access: "new-access", refresh: "rt-1" });
   });
 
-  it("subsequent WPN calls use the new org context headers", async () => {
+  it("subsequent WPN calls use the new org context header", async () => {
     const holder = new McpTokenHolder();
     holder.setTokens("old-access", "rt-1");
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
 
     const client = new WpnHttpClient("http://127.0.0.1:9", holder);
     await client.switchActiveOrg("org-B");
-    await client.getWorkspaces();
+    await client.listProjects();
 
-    const wsCall = calls.find((c) => c.url.endsWith("/wpn/workspaces"));
-    assert.ok(wsCall, "expected GET /wpn/workspaces call");
+    const wsCall = calls.find((c) => c.url.endsWith("/wpn/projects"));
+    assert.ok(wsCall, "expected GET /wpn/projects call");
     assert.equal(wsCall!.headers["Authorization"], "Bearer new-access");
     assert.equal(wsCall!.headers["X-Archon-Org"], "org-B");
-    assert.equal(wsCall!.headers["X-Archon-Space"], "space-B");
+    // X-Archon-Space is NOT sent post-migration; the active team is JWT-only.
+    assert.equal(wsCall!.headers["X-Archon-Space"], undefined);
   });
 
   it("throws when response is missing token", async () => {
@@ -148,7 +148,7 @@ describe("WpnHttpClient.switchActiveOrg", () => {
   });
 });
 
-describe("McpTokenHolder one-shot org override (list_wpn pattern)", () => {
+describe("McpTokenHolder one-shot org override (list_org_tree pattern)", () => {
   let origFetch: typeof fetch;
   let calls: FetchCall[];
 
@@ -160,8 +160,8 @@ describe("McpTokenHolder one-shot org override (list_wpn pattern)", () => {
       const method = (init?.method ?? "GET").toUpperCase();
       const headers = headersToObject(init);
       calls.push({ url, method, headers, body: null });
-      if (url.endsWith("/wpn/workspaces")) {
-        return new Response(JSON.stringify({ workspaces: [] }), {
+      if (url.endsWith("/wpn/projects")) {
+        return new Response(JSON.stringify({ projects: [] }), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
@@ -180,17 +180,17 @@ describe("McpTokenHolder one-shot org override (list_wpn pattern)", () => {
     holder.setActiveOrg("org-A");
     const client = new WpnHttpClient("http://127.0.0.1:9", holder);
 
-    await client.getWorkspaces();
+    await client.listProjects();
 
     const prev = holder.activeOrgId;
     holder.setActiveOrg("org-B");
     try {
-      await client.getWorkspaces();
+      await client.listProjects();
     } finally {
       holder.setActiveOrg(prev);
     }
 
-    await client.getWorkspaces();
+    await client.listProjects();
 
     assert.equal(calls.length, 3);
     assert.equal(calls[0]!.headers["X-Archon-Org"], "org-A");
