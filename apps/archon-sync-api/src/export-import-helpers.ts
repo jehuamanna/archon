@@ -1,9 +1,9 @@
 /**
- * PLAN-06 slice 4a — pure helpers for the v2 export/import pipeline.
+ * Pure helpers for the v3 export/import pipeline.
  *
  * Kept free of Fastify / DB / R2 side-effects so they're easy to
- * unit-test without infrastructure. The sync-api routes (slice 4b + 4c)
- * compose these with the I/O edges.
+ * unit-test without infrastructure. The sync-api routes compose these
+ * with the I/O edges.
  */
 
 import { randomUUID } from "node:crypto";
@@ -38,20 +38,12 @@ export type WpnExportProjectEntry = {
   notes: WpnExportNoteEntry[];
 };
 
-export type WpnExportWorkspaceEntry = {
-  id: string;
-  name: string;
-  sort_index: number;
-  color_token: string | null;
-  projects: WpnExportProjectEntry[];
-};
-
-export type WpnExportBundleVersion = 1 | 2;
+export type WpnExportBundleVersion = 3;
 
 export type WpnExportMetadata = {
   version: WpnExportBundleVersion;
   exported_at_ms: number;
-  workspaces: WpnExportWorkspaceEntry[];
+  projects: WpnExportProjectEntry[];
 };
 
 export type WpnImportConflictPolicy = "skip" | "overwrite" | "rename";
@@ -61,7 +53,6 @@ export type WpnImportConflictPolicy = "skip" | "overwrite" | "rename";
 // ────────────────────────────────────────────────────────────────────────────
 
 export type IdRemap = {
-  workspaces: Map<string, string>;
   projects: Map<string, string>;
   notes: Map<string, string>;
 };
@@ -72,10 +63,10 @@ export type RemappedBundle = {
 };
 
 /**
- * Produce a deep copy of `bundle` with new UUIDs everywhere (workspace,
- * project, note) and with internal references (`parent_id`) rewritten to
- * point at the new ids. The returned `idRemap` lets the caller translate
- * any other references (e.g. vFS paths in markdown content) at route level.
+ * Produce a deep copy of `bundle` with new UUIDs everywhere (project, note)
+ * and with internal references (`parent_id`) rewritten to point at the new
+ * ids. The returned `idRemap` lets the caller translate any other references
+ * (e.g. cross-bundle vFS paths in markdown) at the route level.
  *
  * Metadata `r2Key` / `thumbKey` / `thumbMime` / `thumbSizeBytes` are NOT
  * rewritten here — use `clearImageMetadataKeys` before the import route
@@ -85,45 +76,33 @@ export function remapExportBundleIds(
   bundle: WpnExportMetadata,
   idFactory: () => string = randomUUID,
 ): RemappedBundle {
-  const wsMap = new Map<string, string>();
   const projMap = new Map<string, string>();
   const noteMap = new Map<string, string>();
 
-  const workspaces = bundle.workspaces.map((ws): WpnExportWorkspaceEntry => {
-    const newWsId = idFactory();
-    wsMap.set(ws.id, newWsId);
-    const projects = ws.projects.map((proj): WpnExportProjectEntry => {
-      const newProjId = idFactory();
-      projMap.set(proj.id, newProjId);
-      const notes = proj.notes.map((note): WpnExportNoteEntry => {
-        const newNoteId = idFactory();
-        noteMap.set(note.id, newNoteId);
-        return {
-          ...note,
-          id: newNoteId,
-          // parent_id rewrite happens in a second pass once we have every note id.
-        };
-      });
+  const projects = bundle.projects.map((proj): WpnExportProjectEntry => {
+    const newProjId = idFactory();
+    projMap.set(proj.id, newProjId);
+    const notes = proj.notes.map((note): WpnExportNoteEntry => {
+      const newNoteId = idFactory();
+      noteMap.set(note.id, newNoteId);
       return {
-        ...proj,
-        id: newProjId,
-        notes,
+        ...note,
+        id: newNoteId,
+        // parent_id rewrite happens in a second pass once we have every note id.
       };
     });
     return {
-      ...ws,
-      id: newWsId,
-      projects,
+      ...proj,
+      id: newProjId,
+      notes,
     };
   });
 
   // Second pass — rewrite parent_id using the fully-populated note map.
-  for (const ws of workspaces) {
-    for (const proj of ws.projects) {
-      for (const note of proj.notes) {
-        if (note.parent_id !== null) {
-          note.parent_id = noteMap.get(note.parent_id) ?? null;
-        }
+  for (const proj of projects) {
+    for (const note of proj.notes) {
+      if (note.parent_id !== null) {
+        note.parent_id = noteMap.get(note.parent_id) ?? null;
       }
     }
   }
@@ -132,10 +111,9 @@ export function remapExportBundleIds(
     bundle: {
       version: bundle.version,
       exported_at_ms: bundle.exported_at_ms,
-      workspaces,
+      projects,
     },
     idRemap: {
-      workspaces: wsMap,
       projects: projMap,
       notes: noteMap,
     },
@@ -155,10 +133,8 @@ const IMAGE_ASSET_METADATA_KEYS = [
 
 /**
  * Return a copy of the metadata with the image-asset R2 references removed.
- * The import route re-uploads bytes under a fresh key (derived from the
- * importing user's org/space + the remapped workspace/project/note ids)
- * and then writes a new `r2Key`; the thumbnail fields are rebuilt on first
- * client open (slice 4d).
+ * Bundled assets get a fresh `r2Key` after re-upload by the import route;
+ * the thumbnail fields are rebuilt on first client open.
  */
 export function clearImageMetadataKeys(
   metadata: Record<string, unknown> | null | undefined,
@@ -182,15 +158,15 @@ export type ConflictDecision =
   | { action: "create"; name: string };
 
 /**
- * Decide what name (if any) to use for an imported workspace given the
- * existing workspace names in the target space and the policy chosen.
+ * Decide what name (if any) to use for an imported project given the existing
+ * project names on the target team and the policy chosen.
  *
  * - `skip`: returns `{ action: "skip" }` when a collision exists; otherwise
  *   `{ action: "create", name }`.
  * - `overwrite`: returns `{ action: "reuse", name }` when a collision exists
- *   (the route merges into the existing workspace); otherwise `create`.
+ *   (the route merges into the existing project); otherwise `create`.
  * - `rename`: always `create`; on collision, append `" 2"` (or `" 3"`, `" 4"`,
- *   …) until a free name is found. The imported workspace keeps its original
+ *   …) until a free name is found. The imported project keeps its original
  *   name verbatim when there is no collision.
  */
 export function chooseImportName(args: {
@@ -198,7 +174,7 @@ export function chooseImportName(args: {
   existing: ReadonlySet<string>;
   policy: WpnImportConflictPolicy;
 }): ConflictDecision {
-  const trimmed = args.name.trim() || "Workspace";
+  const trimmed = args.name.trim() || "Project";
   const collision = args.existing.has(trimmed);
   if (!collision) {
     return { action: "create", name: trimmed };
@@ -216,7 +192,97 @@ export function chooseImportName(args: {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Slice 4b — v2 export manifest builder
+// Import planning
+// ────────────────────────────────────────────────────────────────────────────
+
+export type ImportProjectAction =
+  | { kind: "skip"; sourceProjectId: string }
+  | {
+      kind: "create";
+      sourceProjectId: string;
+      chosenName: string;
+      /** True when the chosen name differs from the bundled project name. */
+      renamed: boolean;
+    }
+  | {
+      kind: "reuse";
+      sourceProjectId: string;
+      existingProjectId: string;
+      chosenName: string;
+    };
+
+export type ImportPlan = {
+  projects: ImportProjectAction[];
+};
+
+/**
+ * Decide, for each project in the bundle, whether to skip, reuse, or create
+ * (and under what name). Pure: no DB, no R2.
+ *
+ * Note: in-bundle markdown links of the form `#/w/<Project>/<Title>` are NOT
+ * rewritten on project rename in this pass. Cross-project link rewriting
+ * lives behind the shared `note-vfs-*` path-scheme flatten and lands in a
+ * follow-up commit; for now, renamed projects produce links that resolve to
+ * the new project's pages by the new title (the title segment is unchanged).
+ */
+export function planImportProjects(args: {
+  bundle: WpnExportMetadata;
+  existingProjects: ReadonlyArray<{ id: string; name: string }>;
+  policy: WpnImportConflictPolicy;
+}): ImportPlan {
+  const existingByName = new Map<string, string>();
+  const existingNames = new Set<string>();
+  for (const p of args.existingProjects) {
+    existingByName.set(p.name, p.id);
+    existingNames.add(p.name);
+  }
+  const claimedNames = new Set(existingNames);
+  const projects: ImportProjectAction[] = [];
+
+  for (const proj of args.bundle.projects) {
+    const decision = chooseImportName({
+      name: proj.name,
+      existing: claimedNames,
+      policy: args.policy,
+    });
+    if (decision.action === "skip") {
+      projects.push({ kind: "skip", sourceProjectId: proj.id });
+      continue;
+    }
+    if (decision.action === "reuse") {
+      const existingId = existingByName.get(decision.name);
+      if (!existingId) {
+        projects.push({
+          kind: "create",
+          sourceProjectId: proj.id,
+          chosenName: decision.name,
+          renamed: decision.name !== proj.name,
+        });
+        claimedNames.add(decision.name);
+        continue;
+      }
+      projects.push({
+        kind: "reuse",
+        sourceProjectId: proj.id,
+        existingProjectId: existingId,
+        chosenName: decision.name,
+      });
+      continue;
+    }
+    projects.push({
+      kind: "create",
+      sourceProjectId: proj.id,
+      chosenName: decision.name,
+      renamed: decision.name !== proj.name,
+    });
+    claimedNames.add(decision.name);
+  }
+
+  return { projects };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// v3 export manifest builder
 // ────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -292,14 +358,6 @@ export type ExportProjectInput = {
   notes: ExportNoteInput[];
 };
 
-export type ExportWorkspaceInput = {
-  id: string;
-  name: string;
-  sort_index: number;
-  color_token: string | null;
-  projects: ExportProjectInput[];
-};
-
 /** Per-asset descriptor returned alongside the manifest for the route to stream. */
 export type AssetStreamPlan = {
   noteId: string;
@@ -332,119 +390,17 @@ export class ExportBytesCapExceededError extends Error {
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Slice 4c — import planning (conflict-policy + name-rewrite pairs)
-// ────────────────────────────────────────────────────────────────────────────
-
-export type ImportWorkspaceAction =
-  | { kind: "skip"; sourceWorkspaceId: string }
-  | {
-      kind: "create";
-      sourceWorkspaceId: string;
-      chosenName: string;
-      /** True when the chosen name differs from the bundled workspace name. */
-      renamed: boolean;
-    }
-  | {
-      kind: "reuse";
-      sourceWorkspaceId: string;
-      existingWorkspaceId: string;
-      chosenName: string;
-    };
-
-export type ImportPlan = {
-  workspaces: ImportWorkspaceAction[];
-  /** Old→new canonical path pairs for vFS link rewrites on rename. */
-  canonicalPathRewrites: { oldCanonical: string; newCanonical: string }[];
-};
-
 /**
- * Decide, for each workspace in the bundle, whether to skip, reuse, or create
- * (and under what name). Also compute the canonical vFS path rewrites that
- * should be applied to markdown content so in-bundle `#/w/<ws>/<proj>/<title>`
- * links keep resolving post-import when the workspace was renamed.
- *
- * Pure: no DB, no R2.
- */
-export function planImportWorkspaces(args: {
-  bundle: WpnExportMetadata;
-  existingWorkspaces: ReadonlyArray<{ id: string; name: string }>;
-  policy: WpnImportConflictPolicy;
-}): ImportPlan {
-  const existingByName = new Map<string, string>();
-  const existingNames = new Set<string>();
-  for (const w of args.existingWorkspaces) {
-    existingByName.set(w.name, w.id);
-    existingNames.add(w.name);
-  }
-  const claimedNames = new Set(existingNames);
-  const workspaces: ImportWorkspaceAction[] = [];
-  const canonicalPathRewrites: ImportPlan["canonicalPathRewrites"] = [];
-
-  for (const ws of args.bundle.workspaces) {
-    const decision = chooseImportName({
-      name: ws.name,
-      existing: claimedNames,
-      policy: args.policy,
-    });
-    if (decision.action === "skip") {
-      workspaces.push({ kind: "skip", sourceWorkspaceId: ws.id });
-      continue;
-    }
-    if (decision.action === "reuse") {
-      const existingId = existingByName.get(decision.name);
-      if (!existingId) {
-        workspaces.push({
-          kind: "create",
-          sourceWorkspaceId: ws.id,
-          chosenName: decision.name,
-          renamed: decision.name !== ws.name,
-        });
-        claimedNames.add(decision.name);
-        continue;
-      }
-      workspaces.push({
-        kind: "reuse",
-        sourceWorkspaceId: ws.id,
-        existingWorkspaceId: existingId,
-        chosenName: decision.name,
-      });
-      continue;
-    }
-    const renamed = decision.name !== ws.name;
-    workspaces.push({
-      kind: "create",
-      sourceWorkspaceId: ws.id,
-      chosenName: decision.name,
-      renamed,
-    });
-    claimedNames.add(decision.name);
-    if (renamed) {
-      for (const proj of ws.projects) {
-        for (const note of proj.notes) {
-          canonicalPathRewrites.push({
-            oldCanonical: `${ws.name}/${proj.name}/${note.title}`,
-            newCanonical: `${decision.name}/${proj.name}/${note.title}`,
-          });
-        }
-      }
-    }
-  }
-
-  return { workspaces, canonicalPathRewrites };
-}
-
-/**
- * Build a v2 export manifest + the list of image-asset streams the caller
+ * Build a v3 export manifest + the list of image-asset streams the caller
  * needs to write into the ZIP. Pure: no I/O, no DB, no R2.
  *
  * Each image note with a usable `r2Key` + `mimeType` + `sizeBytes` trio
  * contributes one `assets[]` entry in the manifest and one `AssetStreamPlan`
  * in the result. Image notes without R2 refs pass through (broken-on-import
- * by design — matches v1 behavior for partially-uploaded notes).
+ * by design — matches v1/v2 behavior for partially-uploaded notes).
  */
 export function buildExportManifest(args: {
-  workspaces: ExportWorkspaceInput[];
+  projects: ExportProjectInput[];
   exportedAtMs: number;
   /** Max total asset bytes. Throws {@link ExportBytesCapExceededError} when exceeded. */
   maxAssetBytes: number;
@@ -452,69 +408,63 @@ export function buildExportManifest(args: {
   const assets: AssetStreamPlan[] = [];
   let totalBytes = 0;
 
-  const workspaces: WpnExportWorkspaceEntry[] = args.workspaces.map((ws) => ({
-    id: ws.id,
-    name: ws.name,
-    sort_index: ws.sort_index,
-    color_token: ws.color_token,
-    projects: ws.projects.map((proj) => ({
-      id: proj.id,
-      name: proj.name,
-      sort_index: proj.sort_index,
-      color_token: proj.color_token,
-      notes: proj.notes.map((note): WpnExportNoteEntry => {
-        const base: WpnExportNoteEntry = {
-          id: note.id,
-          parent_id: note.parent_id,
-          type: note.type,
-          title: note.title,
-          sibling_index: note.sibling_index,
-          metadata: note.metadata,
-        };
-        if (note.type !== "image") return base;
-        const probe = (note.metadata ?? {}) as ExportImageMetadataProbe;
-        const r2Key = typeof probe.r2Key === "string" ? probe.r2Key : null;
-        const mimeType = typeof probe.mimeType === "string" ? probe.mimeType : null;
-        const sizeBytes = typeof probe.sizeBytes === "number" ? probe.sizeBytes : null;
-        if (!r2Key || !mimeType || sizeBytes === null || sizeBytes < 0) {
-          return base;
-        }
-        const originalFilename =
-          typeof probe.originalFilename === "string" ? probe.originalFilename : undefined;
-        const filename = deriveAssetFilename({
-          noteId: note.id,
-          mimeType,
-          originalFilename,
-        });
-        const zipPath = `assets/${note.id}/${filename}`;
-        const assetEntry: WpnExportAssetEntry = {
-          zipPath,
-          mimeType,
-          sizeBytes,
-          ...(originalFilename ? { originalFilename } : {}),
-        };
-        totalBytes += sizeBytes;
-        if (totalBytes > args.maxAssetBytes) {
-          throw new ExportBytesCapExceededError(args.maxAssetBytes, totalBytes);
-        }
-        assets.push({
-          noteId: note.id,
-          r2Key,
-          mimeType,
-          sizeBytes,
-          zipPath,
-          filename,
-        });
-        return { ...base, assets: [assetEntry] };
-      }),
-    })),
+  const projects: WpnExportProjectEntry[] = args.projects.map((proj) => ({
+    id: proj.id,
+    name: proj.name,
+    sort_index: proj.sort_index,
+    color_token: proj.color_token,
+    notes: proj.notes.map((note): WpnExportNoteEntry => {
+      const base: WpnExportNoteEntry = {
+        id: note.id,
+        parent_id: note.parent_id,
+        type: note.type,
+        title: note.title,
+        sibling_index: note.sibling_index,
+        metadata: note.metadata,
+      };
+      if (note.type !== "image") return base;
+      const probe = (note.metadata ?? {}) as ExportImageMetadataProbe;
+      const r2Key = typeof probe.r2Key === "string" ? probe.r2Key : null;
+      const mimeType = typeof probe.mimeType === "string" ? probe.mimeType : null;
+      const sizeBytes = typeof probe.sizeBytes === "number" ? probe.sizeBytes : null;
+      if (!r2Key || !mimeType || sizeBytes === null || sizeBytes < 0) {
+        return base;
+      }
+      const originalFilename =
+        typeof probe.originalFilename === "string" ? probe.originalFilename : undefined;
+      const filename = deriveAssetFilename({
+        noteId: note.id,
+        mimeType,
+        originalFilename,
+      });
+      const zipPath = `assets/${note.id}/${filename}`;
+      const assetEntry: WpnExportAssetEntry = {
+        zipPath,
+        mimeType,
+        sizeBytes,
+        ...(originalFilename ? { originalFilename } : {}),
+      };
+      totalBytes += sizeBytes;
+      if (totalBytes > args.maxAssetBytes) {
+        throw new ExportBytesCapExceededError(args.maxAssetBytes, totalBytes);
+      }
+      assets.push({
+        noteId: note.id,
+        r2Key,
+        mimeType,
+        sizeBytes,
+        zipPath,
+        filename,
+      });
+      return { ...base, assets: [assetEntry] };
+    }),
   }));
 
   return {
     metadata: {
-      version: 2,
+      version: 3,
       exported_at_ms: args.exportedAtMs,
-      workspaces,
+      projects,
     },
     assets,
     totalAssetBytes: totalBytes,
