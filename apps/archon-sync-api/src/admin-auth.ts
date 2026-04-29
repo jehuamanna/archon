@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import bcrypt from "bcryptjs";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { eq, and, sql, ne, or, isNull } from "drizzle-orm";
 import { requireAuth, type JwtPayload } from "./auth.js";
@@ -62,6 +64,76 @@ export async function maybePromoteMasterAdmin(
         or(isNull(users.isMasterAdmin), ne(users.isMasterAdmin, true)),
       ),
     );
+}
+
+/**
+ * Boot-time bootstrap: ensure a master-admin user exists when
+ * `ARCHON_MASTER_ADMIN_EMAIL` is set. Public signup is disabled, so without
+ * this no one can ever sign in to a freshly-deployed instance.
+ *
+ * Behavior:
+ *  - email-only env set, account missing → create user with
+ *    password = `ARCHON_MASTER_ADMIN_PASSWORD` if provided, else the email
+ *    address itself; `mustSetPassword=true` so first login forces rotation
+ *    via `MustChangePasswordScreen`.
+ *  - account exists, not master → promote to master_admin (no password
+ *    touch — they already have one).
+ *  - account exists and is master → no-op.
+ *
+ * Idempotent and safe to run on every boot.
+ *
+ * Returns a structured result for logging; never throws on a missing env
+ * var (deploys without a configured master admin are valid, e.g. when an
+ * existing master will manage themselves).
+ */
+export async function ensureMasterAdmin(): Promise<
+  | { kind: "skipped-no-email" }
+  | { kind: "created"; userId: string; email: string; usedDefaultPassword: boolean }
+  | { kind: "promoted-existing"; userId: string; email: string }
+  | { kind: "already-master"; userId: string; email: string }
+> {
+  const email = (process.env.ARCHON_MASTER_ADMIN_EMAIL ?? "").trim().toLowerCase();
+  if (!email) return { kind: "skipped-no-email" };
+
+  const db = getDb();
+  const existing = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      isMasterAdmin: users.isMasterAdmin,
+    })
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1);
+
+  if (existing[0]) {
+    if (existing[0].isMasterAdmin === true) {
+      return { kind: "already-master", userId: existing[0].id, email };
+    }
+    await db
+      .update(users)
+      .set({ isMasterAdmin: true })
+      .where(eq(users.id, existing[0].id));
+    return { kind: "promoted-existing", userId: existing[0].id, email };
+  }
+
+  // Bootstrap account creation. The default password is the email address —
+  // intentionally weak so the operator notices and rotates it on first login.
+  // `mustSetPassword=true` makes the renderer hard-block the workbench until
+  // a new password is set via POST /auth/change-password.
+  const explicit = (process.env.ARCHON_MASTER_ADMIN_PASSWORD ?? "").trim();
+  const usedDefaultPassword = explicit.length === 0;
+  const password = explicit.length > 0 ? explicit : email;
+  const passwordHash = await bcrypt.hash(password, 12);
+  const userId = randomUUID();
+  await db.insert(users).values({
+    id: userId,
+    email,
+    passwordHash,
+    isMasterAdmin: true,
+    mustSetPassword: true,
+  });
+  return { kind: "created", userId, email, usedDefaultPassword };
 }
 
 // Drizzle helpers we don't currently use locally — exported as `_` to suppress

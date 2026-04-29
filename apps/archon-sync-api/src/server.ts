@@ -10,6 +10,7 @@ import {
   requireJwtSecret,
 } from "./server-env.js";
 import { getYjsAdapter } from "./realtime/yjs-ws.js";
+import { ensureMasterAdmin } from "./admin-auth.js";
 
 const port = Number(envString("PORT", "4010")) || 4010;
 const host = envString("HOST", "0.0.0.0");
@@ -38,6 +39,44 @@ try {
 } catch (err) {
   app.log.error({ err }, "drizzle migrate failed at boot");
   process.exit(1);
+}
+
+// Bootstrap the master admin from env. Public signup is disabled, so a
+// fresh deployment has no way in without this. See `ensureMasterAdmin()`
+// for the create-vs-promote logic.
+try {
+  const result = await ensureMasterAdmin();
+  switch (result.kind) {
+    case "skipped-no-email":
+      app.log.warn(
+        "ARCHON_MASTER_ADMIN_EMAIL is unset — no master admin will exist on this instance. Set it in .env and restart, or seed a master admin manually.",
+      );
+      break;
+    case "created":
+      app.log.warn(
+        { userId: result.userId, email: result.email },
+        result.usedDefaultPassword
+          ? "Master admin created with DEFAULT password = email address. mustSetPassword=true; the operator will be forced to change it on first login. Set ARCHON_MASTER_ADMIN_PASSWORD to override."
+          : "Master admin created with operator-supplied ARCHON_MASTER_ADMIN_PASSWORD. mustSetPassword=true; the operator will be forced to change it on first login.",
+      );
+      break;
+    case "promoted-existing":
+      app.log.info(
+        { userId: result.userId, email: result.email },
+        "Existing user promoted to master admin",
+      );
+      break;
+    case "already-master":
+      app.log.info(
+        { userId: result.userId, email: result.email },
+        "Master admin already provisioned",
+      );
+      break;
+  }
+} catch (err) {
+  app.log.error({ err }, "ensureMasterAdmin failed at boot");
+  // Don't exit — the app is still usable for existing accounts. Just loud
+  // about it so a deploy with a typo'd email is obvious in logs.
 }
 
 // Compaction loop for the per-note Yjs update log. `setInterval(...).unref()`
