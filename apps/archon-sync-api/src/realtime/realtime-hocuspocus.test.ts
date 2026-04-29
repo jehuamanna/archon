@@ -7,14 +7,15 @@ import * as Y from "yjs";
 import type { AddressInfo } from "node:net";
 import { buildSyncApiApp } from "../build-app.js";
 import { getDb } from "../pg.js";
-import { wpnNotes } from "../db/schema.js";
+import { notes } from "../db/schema.js";
 import {
   setupPgTestSchema,
   type TestPgSchemaContext,
   factoryUser,
   factoryOrg,
-  factorySpace,
-  factoryWorkspace,
+  factoryDepartment,
+  factoryTeam,
+  factoryTeamMembership,
   factoryProject,
 } from "../test-pg-helper.js";
 import { signToken } from "../auth.js";
@@ -36,6 +37,58 @@ async function waitFor<T>(
   throw new Error(`waitFor timed out after ${timeoutMs}ms`);
 }
 
+async function setupOrgProject(): Promise<{
+  userId: string;
+  orgId: string;
+  teamId: string;
+  projectId: string;
+  noteId: string;
+  emailPrefix: string;
+}> {
+  const emailPrefix = `hp-${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const userId = await factoryUser({ email: `${emailPrefix}@p4.test` });
+  const orgId = await factoryOrg({ ownerUserId: userId });
+  const departmentId = await factoryDepartment({
+    orgId,
+    createdByUserId: userId,
+  });
+  const teamId = await factoryTeam({
+    orgId,
+    departmentId,
+    createdByUserId: userId,
+  });
+  await factoryTeamMembership({
+    teamId,
+    userId,
+    addedByUserId: userId,
+    role: "admin",
+  });
+  const projectId = await factoryProject({
+    orgId,
+    creatorUserId: userId,
+    teamId,
+    teamRole: "owner",
+  });
+  const noteId = randomUUID();
+  const t0 = Date.now();
+  await getDb().insert(notes).values({
+    id: noteId,
+    orgId,
+    projectId,
+    parentId: null,
+    createdByUserId: userId,
+    updatedByUserId: userId,
+    type: "page",
+    title: "Body collab test",
+    content: "",
+    metadata: null,
+    siblingIndex: 0,
+    createdAtMs: t0,
+    updatedAtMs: t0,
+  });
+  return { userId, orgId, teamId, projectId, noteId, emailPrefix };
+}
+
 test(
   "AC4.1 — two-tab body collab converges via Hocuspocus",
   { timeout: 20_000 },
@@ -51,33 +104,7 @@ test(
     const prevDebounce = process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS;
     process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS = "100";
 
-    const userId = await factoryUser({ email: `hp-${Date.now()}@p4.test` });
-    const orgId = await factoryOrg({ ownerUserId: userId });
-    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
-    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
-    const projectId = await factoryProject({
-      userId,
-      workspaceId,
-      orgId,
-      spaceId,
-    });
-    const noteId = randomUUID();
-    const t0 = Date.now();
-    await getDb().insert(wpnNotes).values({
-      id: noteId,
-      userId,
-      orgId,
-      spaceId,
-      project_id: projectId,
-      parent_id: null,
-      type: "page",
-      title: "Body collab test",
-      content: "",
-      sibling_index: 0,
-      created_at_ms: t0,
-      updated_at_ms: t0,
-      deleted: false,
-    });
+    const { userId, orgId, noteId, emailPrefix } = await setupOrgProject();
 
     const app = await buildSyncApiApp({
       jwtSecret,
@@ -90,15 +117,18 @@ test(
     // protocol auth message (not the URL).
     const wsBase = `ws://127.0.0.1:${addr.port}/api/v1/ws/yjs`;
 
+    // The `typ: "spaceWs"` JWT name is vestigial after the spaces squash —
+    // identity-only token. Per-note authorisation runs at WS open in
+    // yjs-ws.ts onAuthenticate; the active org carries the membership that
+    // gates project access.
     const wsToken = signToken(
       jwtSecret,
       {
         sub: userId,
-        email: `hp-test@example.test`,
+        email: `${emailPrefix}@example.test`,
         typ: "spaceWs",
         principal: { type: "user" },
         activeOrgId: orgId,
-        activeSpaceId: spaceId,
       },
       "5m",
     );
@@ -167,33 +197,7 @@ test(
     const prevDebounce = process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS;
     process.env.ARCHON_YJS_AUTOSAVE_DEBOUNCE_MS = "100";
 
-    const userId = await factoryUser({ email: `rc-${Date.now()}@p4.test` });
-    const orgId = await factoryOrg({ ownerUserId: userId });
-    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
-    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
-    const projectId = await factoryProject({
-      userId,
-      workspaceId,
-      orgId,
-      spaceId,
-    });
-    const noteId = randomUUID();
-    const t0 = Date.now();
-    await getDb().insert(wpnNotes).values({
-      id: noteId,
-      userId,
-      orgId,
-      spaceId,
-      project_id: projectId,
-      parent_id: null,
-      type: "page",
-      title: "Reconnect recovery test",
-      content: "",
-      sibling_index: 0,
-      created_at_ms: t0,
-      updated_at_ms: t0,
-      deleted: false,
-    });
+    const { userId, orgId, noteId, emailPrefix } = await setupOrgProject();
 
     const app = await buildSyncApiApp({
       jwtSecret,
@@ -208,11 +212,10 @@ test(
       jwtSecret,
       {
         sub: userId,
-        email: `rc-test@example.test`,
+        email: `${emailPrefix}@example.test`,
         typ: "spaceWs",
         principal: { type: "user" },
         activeOrgId: orgId,
-        activeSpaceId: spaceId,
       },
       "5m",
     );
@@ -246,7 +249,6 @@ test(
       // mutations — those updates are buffered in the provider and will be
       // flushed on reconnect.
       provA.disconnect();
-      // Wait briefly to make sure A is fully disconnected.
       await waitFor(() => !provA.isConnected, 2000);
       docA.getText("content").insert(
         docA.getText("content").length,
@@ -258,16 +260,12 @@ test(
         docB.getText("content").length,
         "B-edit ",
       );
-      // Give B's edit time to land in the snapshot.
       await new Promise((r) => setTimeout(r, 250));
 
       // Reconnect A.
       provA.connect();
       await waitFor(() => provA.synced && provA.isConnected, 8000);
 
-      // Both A and B converge to the same merged state. CRDT semantics
-      // guarantee no edits are lost; ordering depends on the merge but the
-      // two strings must be equal.
       await waitFor(
         () =>
           docA.getText("content").toString() ===
@@ -275,7 +273,6 @@ test(
         5000,
       );
       const merged = docA.getText("content").toString();
-      // All three substrings present.
       assert.ok(merged.includes("online "), `merged missing online: "${merged}"`);
       assert.ok(
         merged.includes("offline-edit "),

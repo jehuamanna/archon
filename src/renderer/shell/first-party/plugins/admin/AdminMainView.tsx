@@ -2,12 +2,9 @@ import React from "react";
 import { useSelector } from "react-redux";
 import { AuditLogPanel } from "../../../../admin/AuditLogPanel";
 import { MasterConsolePanel } from "../../../../admin/MasterConsolePanel";
+import { MyAccountPanel } from "../../../../admin/MyAccountPanel";
 import { PeoplePanel } from "../../../../admin/PeoplePanel";
-import { ProjectSharePanel } from "../../../../admin/ProjectSharePanel";
-import { SpacePeoplePanel } from "../../../../admin/SpacePeoplePanel";
-import { SpaceSettingsPanel } from "../../../../admin/SpaceSettingsPanel";
 import { TeamsPanel } from "../../../../admin/TeamsPanel";
-import { WorkspaceSharePanel } from "../../../../admin/WorkspaceSharePanel";
 import type { RootState } from "../../../../store";
 import type { ShellViewComponentProps } from "../../../views/ShellViewRegistry";
 import { adminSelectionStore, type AdminSelection } from "./adminSelectionStore";
@@ -25,23 +22,23 @@ function useSelection(): AdminSelection {
   );
 }
 
+/**
+ * Post-migration admin main view. The selection set narrowed to a few
+ * org-level landings (people, teams, departments, activity) + the
+ * master-admin console. Space / workspace / project share panels were
+ * removed: spaces and workspaces no longer exist as data-model entities,
+ * and project access is managed via `team_projects` grants inline in
+ * `TeamsPanel`.
+ */
 export function AdminMainView(
   _props: ShellViewComponentProps,
 ): React.ReactElement {
   const selection = useSelection();
   const orgState = useSelector((s: RootState) => s.orgMembership);
-  const spaceState = useSelector((s: RootState) => s.spaceMembership);
   const isMasterAdmin = useSelector(
     (s: RootState) => s.cloudAuth.isMasterAdmin,
   );
-  const currentUserId = useSelector((s: RootState) => s.cloudAuth.userId);
   const activeOrg = orgState.orgs.find((o) => o.orgId === orgState.activeOrgId);
-  const canManageOrg = activeOrg?.role === "admin";
-  const canManageCreator = (creatorUserId?: string | null): boolean =>
-    canManageOrg ||
-    (currentUserId !== null &&
-      typeof creatorUserId === "string" &&
-      creatorUserId === currentUserId);
 
   if (selection.kind === "none") {
     return (
@@ -61,20 +58,27 @@ export function AdminMainView(
           </p>
         </header>
         <div className={card}>
-          <p className="text-sm">
-            Pick a node from the left to manage it.
-          </p>
+          <p className="text-sm">Pick a node from the left to manage it.</p>
           <ul className="mt-2 list-disc pl-5 text-xs text-muted-foreground">
             {isMasterAdmin ? <li>Master console — platform-wide controls</li> : null}
             {activeOrg ? (
               <>
-                <li>Organization · People, Teams, Activity</li>
-                <li>Space · Members</li>
-                <li>Workspace / Project · Shares & visibility</li>
+                <li>People — org membership + roles</li>
+                <li>Teams — members + project grants</li>
+                <li>Departments — team grouping (admin only)</li>
+                <li>Activity — audit log</li>
               </>
             ) : null}
           </ul>
         </div>
+      </div>
+    );
+  }
+
+  if (selection.kind === "account") {
+    return (
+      <div className={wrap}>
+        <MyAccountPanel />
       </div>
     );
   }
@@ -115,62 +119,28 @@ export function AdminMainView(
           <TeamsPanel />
         </div>
       );
+    case "org-departments":
+      // Department CRUD lives inline in `TeamsPanel`'s department picker
+      // until a dedicated DepartmentsPanel ships in a follow-up. Showing
+      // the Teams panel keeps the admin flow continuous.
+      return (
+        <div className={wrap}>
+          <header>
+            <h1 className={heading}>Departments</h1>
+            <p className={muted}>
+              Departments group teams within an org. Manage them from the
+              Teams panel below — pick a team chip to see its parent
+              department, and use the department selector when creating a
+              new team.
+            </p>
+          </header>
+          <TeamsPanel />
+        </div>
+      );
     case "org-activity":
       return (
         <div className={wrap}>
           <AuditLogPanel />
-        </div>
-      );
-    case "space":
-      return (
-        <div className={wrap}>
-          <SpaceSettingsPanel
-            spaceId={selection.spaceId}
-            canManage={canManageOrg}
-          />
-        </div>
-      );
-    case "space-members":
-      return (
-        <div className={wrap}>
-          <SpacePeoplePanel
-            spaceId={selection.spaceId}
-            canManage={canManageOrg}
-          />
-        </div>
-      );
-    case "workspace-shares":
-      return (
-        <div className={wrap}>
-          <header>
-            <h1 className={heading}>
-              {selection.workspaceName ?? "Workspace"} — shares
-            </h1>
-            <p className={muted}>Visibility and per-member access for this workspace.</p>
-          </header>
-          <WorkspaceSharePanel
-            workspaceId={selection.workspaceId}
-            spaceId={selection.spaceId ?? spaceState.activeSpaceId}
-            initialVisibility={selection.initialVisibility}
-            canManage={canManageCreator(selection.creatorUserId)}
-          />
-        </div>
-      );
-    case "project-shares":
-      return (
-        <div className={wrap}>
-          <header>
-            <h1 className={heading}>
-              {selection.projectName ?? "Project"} — shares
-            </h1>
-            <p className={muted}>Visibility and per-member access for this project.</p>
-          </header>
-          <ProjectSharePanel
-            projectId={selection.projectId}
-            spaceId={selection.spaceId ?? spaceState.activeSpaceId}
-            initialVisibility={selection.initialVisibility}
-            canManage={canManageCreator(selection.creatorUserId)}
-          />
         </div>
       );
     default: {

@@ -77,10 +77,10 @@ export type RealtimeEvent =
   | EdgeRemovedEvent;
 
 /**
- * Canonical PG NOTIFY channel name for a space. Using a `rt:` prefix keeps
+ * Canonical PG NOTIFY channel name for an org. Using a `rt:` prefix keeps
  * realtime channels separate from the existing `mdx:` channels so a
  * single connection LISTENing to multiple namespaces is visible at a glance.
  */
-export function channelForSpace(spaceId: string): string {
-  return `rt:space:${spaceId}`;
+export function channelForOrg(orgId: string): string {
+  return `rt:org:${orgId}`;
 }

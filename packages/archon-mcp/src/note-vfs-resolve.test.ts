@@ -14,7 +14,6 @@ function makeCatalog(rows: WpnNoteWithContextRow[]) {
   return byCanonical;
 }
 
-const rowWS = "Archon Studio";
 const rowP = "Archon";
 
 const row = (id: string, title: string): WpnNoteWithContextRow => ({
@@ -23,8 +22,6 @@ const row = (id: string, title: string): WpnNoteWithContextRow => ({
   type: "markdown",
   project_id: "p1",
   project_name: rowP,
-  workspace_id: "w1",
-  workspace_name: rowWS,
 });
 
 const treeItem = (
@@ -42,14 +39,14 @@ const treeItem = (
 });
 
 test("normalizeVfsSegment replaces forward slash with U+2215", () => {
-  assert.equal(normalizeVfsSegment("Sign/signup", "x"), "Sign\u2215signup");
+  assert.equal(normalizeVfsSegment("Sign/signup", "x"), "Sign∕signup");
   assert.equal(normalizeVfsSegment("   ", "fallback"), "fallback");
 });
 
-test("canonicalVfsPathFromRow builds W/P/T", () => {
+test("canonicalVfsPathFromRow builds Project/Title", () => {
   assert.equal(
     canonicalVfsPathFromRow(row("id1", "Feature")),
-    "Archon Studio/Archon/Feature",
+    "Archon/Feature",
   );
 });
 
@@ -61,10 +58,10 @@ test("parseVfsHashSegments decodes segments", () => {
 });
 
 test("parseVfsHashSegments strips heading slug on absolute path", () => {
-  const p = parseVfsHashSegments("Archon%20Studio/Archon/Feature/section-one");
+  const p = parseVfsHashSegments("Archon/Feature/section-one");
   assert.ok(p);
   assert.equal(p.kind, "absolute");
-  assert.deepEqual(p.segments, ["Archon Studio", "Archon", "Feature"]);
+  assert.deepEqual(p.segments, ["Archon", "Feature"]);
   assert.equal(p.headingSlug, "section-one");
 });
 
@@ -80,12 +77,12 @@ test("resolve same-project-relative via catalog", async () => {
   assert.deepEqual(res, { ok: true, noteId: "cid" });
 });
 
-test("resolve absolute canonical via catalog", async () => {
+test("resolve absolute canonical via catalog (2-segment Project/Title)", async () => {
   const parent = row("pid", "Feature");
   const other = row("oid", "Target");
   const byCanonical = makeCatalog([parent, other]);
   const res = await resolveVfsHrefToNoteId(
-    "Archon%20Studio/Archon/Target",
+    "Archon/Target",
     parent,
     { catalogByCanonical: byCanonical, getProjectTree: async () => [] },
   );
@@ -94,7 +91,7 @@ test("resolve absolute canonical via catalog", async () => {
 
 test("resolve same-project-relative handles normalized slash-in-title", async () => {
   const parent = row("pid", "Feature");
-  const slashed = row("sid", "Sign\u2215signup here");
+  const slashed = row("sid", "Sign∕signup here");
   const byCanonical = makeCatalog([parent, slashed]);
   const res = await resolveVfsHrefToNoteId(
     "./Sign%E2%88%95signup%20here",

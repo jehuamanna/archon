@@ -36,27 +36,28 @@ export const loadMyOrgsThunk = createAsyncThunk(
 );
 
 export const switchActiveOrgThunk = createAsyncThunk<
-  { activeOrgId: string; activeSpaceId: string | null },
+  { activeOrgId: string; activeTeamId: string | null },
   { orgId: string },
   OrgMembershipThunkExtra
 >(
   "orgMembership/switch",
   async ({ orgId }, { dispatch }) => {
     const r = await setActiveOrgRemote(orgId);
-    // Propagate the new space claim into Redux so WpnExplorer's
-    // useEffect([activeSpaceId]) refires and loads the new org's tree.
-    if (r.activeSpaceId) {
-      dispatch(setLocalActiveSpace({ spaceId: r.activeSpaceId }));
+    // Mirror the JWT-carried activeTeamId into the legacy
+    // spaceMembershipSlice so the not-yet-ported explorer / sidebar /
+    // editor `useEffect([activeSpaceId])` hooks still refire on org
+    // switch. Removed once #5 ports those consumers to a team-aware
+    // selector.
+    if (r.activeTeamId) {
+      dispatch(setLocalActiveSpace({ spaceId: r.activeTeamId }));
     } else {
-      // Edge case: server couldn't resolve a default space for this org.
-      // Rehydrate the space list so the default can be picked client-side.
       void dispatch(loadOrgSpacesThunk({ orgId }));
     }
     // Drop the previous scope's cloud-notes bucket and resync under the new
     // scope headers so the flat cloud-notes plugin doesn't leak across orgs.
     dispatch(resetCloudNotes());
     void dispatch(runCloudSyncThunk());
-    return { activeOrgId: r.activeOrgId, activeSpaceId: r.activeSpaceId };
+    return { activeOrgId: r.activeOrgId, activeTeamId: r.activeTeamId };
   },
 );
 

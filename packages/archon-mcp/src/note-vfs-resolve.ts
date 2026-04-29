@@ -3,16 +3,21 @@ import type { WpnNoteListItem, WpnNoteWithContextRow } from "./wpn-client.js";
 export function normalizeVfsSegment(raw: string, fallback: string): string {
   const t = raw.trim();
   const base = t.length > 0 ? t : fallback;
-  return base.replace(/\//g, "\u2215");
+  return base.replace(/\//g, "∕");
 }
 
+/**
+ * Canonical 2-segment `Project/Title` for a notes-with-context row.
+ * Pre-migration this was 3-segment `Workspace/Project/Title`; the workspace
+ * prefix is gone with the org/team flatten and the shared note-vfs module
+ * was already updated to match (commit f136420).
+ */
 export function canonicalVfsPathFromRow(
-  row: Pick<WpnNoteWithContextRow, "workspace_name" | "project_name" | "title">,
+  row: Pick<WpnNoteWithContextRow, "project_name" | "title">,
 ): string {
-  const ws = normalizeVfsSegment(row.workspace_name, "Workspace");
   const proj = normalizeVfsSegment(row.project_name, "Project");
   const title = normalizeVfsSegment(row.title, "Untitled");
-  return `${ws}/${proj}/${title}`;
+  return `${proj}/${title}`;
 }
 
 const HEADING_SLUG_RE = /^[a-z0-9-]+$/i;
@@ -53,12 +58,15 @@ export function parseVfsHashSegments(pathAfterW: string): ParsedVfsHash | null {
       headingSlug = last;
     }
   } else if (isRelSame) {
+    // ./Title or ./Title/heading-slug — heading present when 3+ parts and last matches.
     if (decoded.length >= 3 && HEADING_SLUG_RE.test(last)) {
       segments = decoded.slice(0, -1);
       headingSlug = last;
     }
   } else {
-    if (decoded.length >= 4 && HEADING_SLUG_RE.test(last)) {
+    // Absolute Project/Title or Project/Title/heading-slug — heading present
+    // when 3+ parts and the last segment matches the slug pattern.
+    if (decoded.length >= 3 && HEADING_SLUG_RE.test(last)) {
       segments = decoded.slice(0, -1);
       headingSlug = last;
     }
@@ -80,7 +88,7 @@ export type ResolveVfsContext = {
 
 export type ResolveVfsBase = Pick<
   WpnNoteWithContextRow,
-  "id" | "project_id" | "project_name" | "workspace_name"
+  "id" | "project_id" | "project_name"
 >;
 
 export type VfsResolveResult =
@@ -106,10 +114,9 @@ export async function resolveVfsHrefToNoteId(
         reason: "same-project ref with nested path not supported",
       };
     }
-    const ws = normalizeVfsSegment(base.workspace_name, "Workspace");
     const proj = normalizeVfsSegment(base.project_name, "Project");
     const title = normalizeVfsSegment(titleSegs[0]!, "Untitled");
-    const canonical = `${ws}/${proj}/${title}`;
+    const canonical = `${proj}/${title}`;
     const hit = ctx.catalogByCanonical.get(canonical);
     return hit
       ? { ok: true, noteId: hit }
@@ -173,17 +180,17 @@ export async function resolveVfsHrefToNoteId(
       : { ok: false, reason: "empty resolve" };
   }
 
-  if (parsed.segments.length < 3) {
-    return { ok: false, reason: "absolute path needs Workspace/Project/Title" };
+  // Absolute: Project/Title (2 segments, post-migration).
+  if (parsed.segments.length < 2) {
+    return { ok: false, reason: "absolute path needs Project/Title" };
   }
-  const ws = normalizeVfsSegment(parsed.segments[0]!, "Workspace");
-  const proj = normalizeVfsSegment(parsed.segments[1]!, "Project");
-  const titleSegs = parsed.segments.slice(2);
+  const proj = normalizeVfsSegment(parsed.segments[0]!, "Project");
+  const titleSegs = parsed.segments.slice(1);
   if (titleSegs.length > 1) {
     return { ok: false, reason: "nested titles in absolute path not supported" };
   }
   const title = normalizeVfsSegment(titleSegs[0]!, "Untitled");
-  const canonical = `${ws}/${proj}/${title}`;
+  const canonical = `${proj}/${title}`;
   const hit = ctx.catalogByCanonical.get(canonical);
   return hit
     ? { ok: true, noteId: hit }

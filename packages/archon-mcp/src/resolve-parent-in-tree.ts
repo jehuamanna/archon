@@ -120,26 +120,29 @@ export function resolveParentInTree(
 }
 
 export type ParsedParentWpnPath =
-  | { ok: true; workspaceName: string; projectName: string; parentPathTitles: string[] }
+  | { ok: true; projectName: string; parentPathTitles: string[] }
   | { ok: false; error: string };
 
-/** Split on ` / ` (space-slash-space). Titles containing that substring cannot be represented here. */
+/**
+ * Split on ` / ` (space-slash-space). Post-migration the wpn path is
+ * 2-segment-rooted: `Project / Title1 / …` — no workspace prefix. Titles
+ * containing the substring ` / ` cannot be represented here.
+ */
 export function parseParentWpnPath(s: string): ParsedParentWpnPath {
   const parts = s
     .split(" / ")
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
-  if (parts.length < 3) {
+  if (parts.length < 2) {
     return {
       ok: false,
       error:
-        'parentWpnPath must be "Workspace / Project / Title1 / …" with workspace, project, and at least one note title.',
+        'parentWpnPath must be "Project / Title1 / …" with project and at least one note title.',
     };
   }
   return {
     ok: true,
-    workspaceName: parts[0]!,
-    projectName: parts[1]!,
-    parentPathTitles: parts.slice(2),
+    projectName: parts[0]!,
+    parentPathTitles: parts.slice(1),
   };
 }

@@ -84,7 +84,6 @@ export async function registerMeAssetsRoutes(
         .send({ error: "Expected multipart/form-data upload" });
     }
 
-    let workspaceId: string | undefined;
     let projectId: string | undefined;
     let noteId: string | undefined;
     let variant: "original" | "thumb" = "original";
@@ -97,8 +96,7 @@ export async function registerMeAssetsRoutes(
     for await (const part of parts) {
       if (part.type === "field") {
         const v = typeof part.value === "string" ? part.value : "";
-        if (part.fieldname === "workspaceId") workspaceId = v;
-        else if (part.fieldname === "projectId") projectId = v;
+        if (part.fieldname === "projectId") projectId = v;
         else if (part.fieldname === "noteId") noteId = v;
         else if (part.fieldname === "variant") {
           if (v !== "original" && v !== "thumb") {
@@ -135,10 +133,10 @@ export async function registerMeAssetsRoutes(
       }
     }
 
-    if (!projectId || !workspaceId || !noteId) {
+    if (!projectId || !noteId) {
       return reply
         .status(400)
-        .send({ error: "Missing required field: workspaceId, projectId, noteId" });
+        .send({ error: "Missing required field: projectId, noteId" });
     }
     if (!fileBuf || !mimeType) {
       return reply.status(400).send({ error: "Missing file part" });
@@ -149,27 +147,13 @@ export async function registerMeAssetsRoutes(
       });
     }
 
-    const writeResult = await assertCanWriteProject(reply, auth, projectId);
-    if (!writeResult) return;
-    const { workspace, project } = writeResult;
-
-    if (project.workspace_id !== workspaceId) {
-      return reply
-        .status(400)
-        .send({ error: "workspaceId does not match project's workspace" });
-    }
-    if (!workspace.orgId || !workspace.spaceId) {
-      return reply.status(400).send({
-        error: "Workspace is not org/space-scoped; image uploads require both",
-      });
-    }
+    const project = await assertCanWriteProject(reply, auth, projectId);
+    if (!project) return;
 
     let key: string;
     try {
       key = buildImageAssetKey({
-        orgId: workspace.orgId,
-        spaceId: workspace.spaceId,
-        workspaceId,
+        orgId: project.orgId,
         projectId,
         noteId,
         variant,
@@ -260,13 +244,9 @@ async function signKeyForCallerWithKey(
     await reply.status(400).send({ error: "Invalid asset key shape" });
     return null;
   }
-  const readResult = await assertCanReadProject(reply, auth, parsed.projectId);
-  if (!readResult) return null;
-  if (
-    readResult.workspace.orgId !== parsed.orgId ||
-    readResult.workspace.spaceId !== parsed.spaceId ||
-    readResult.workspace.id !== parsed.workspaceId
-  ) {
+  const project = await assertCanReadProject(reply, auth, parsed.projectId);
+  if (!project) return null;
+  if (project.orgId !== parsed.orgId) {
     await reply
       .status(403)
       .send({ error: "Asset key scope does not match project" });

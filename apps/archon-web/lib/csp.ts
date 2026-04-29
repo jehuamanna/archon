@@ -32,8 +32,16 @@ function r2AssetSources(): string[] {
   return out;
 }
 
+function syncOriginAsWs(httpOrigin: string | null): string | null {
+  if (!httpOrigin) return null;
+  if (httpOrigin.startsWith("https://")) return `wss://${httpOrigin.slice(8)}`;
+  if (httpOrigin.startsWith("http://")) return `ws://${httpOrigin.slice(7)}`;
+  return null;
+}
+
 export function buildContentSecurityPolicy(): string {
   const syncOrigin = tryOrigin(process.env.NEXT_PUBLIC_ARCHON_SYNC_API_URL);
+  const syncWsOrigin = syncOriginAsWs(syncOrigin);
   const r2Sources = r2AssetSources();
 
   const connectParts = [
@@ -42,17 +50,17 @@ export function buildContentSecurityPolicy(): string {
     "blob:",
     "https://api.github.com",
     ...(syncOrigin ? [syncOrigin] : []),
+    ...(syncWsOrigin ? [syncWsOrigin] : []),
     ...r2Sources,
   ];
   if (process.env.NODE_ENV !== "production") {
-    connectParts.push(
-      "ws://localhost:*",
-      "ws://127.0.0.1:*",
-      "wss://localhost:*",
-      "wss://127.0.0.1:*",
-      "http://localhost:*",
-      "http://127.0.0.1:*",
-    );
+    /**
+     * Scheme-only sources allow any `http:` / `ws:` origin so dev access from
+     * LAN IPs (e.g. `http://172.16.5.144:3000` hitting sync-api on the same
+     * host:4010) isn't blocked. Production keeps the explicit `syncOrigin`
+     * allowlist above.
+     */
+    connectParts.push("http:", "https:", "ws:", "wss:");
   }
 
   const imgParts = ["'self'", "data:", "blob:", "archon-asset:", ...r2Sources];

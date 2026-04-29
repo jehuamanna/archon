@@ -1,6 +1,7 @@
 import React from "react";
 import {
   listOrgInvites,
+  regenerateOrgInvite,
   revokeOrgInvite,
   type OrgInviteRow,
 } from "../auth/auth-client";
@@ -40,6 +41,11 @@ export function PendingInvitesList(props: {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [reloadKey, setReloadKey] = React.useState(0);
+  const [shareLink, setShareLink] = React.useState<{
+    email: string;
+    link: string;
+    expiresAt: string;
+  } | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -64,6 +70,25 @@ export function PendingInvitesList(props: {
     setError(null);
     try {
       await revokeOrgInvite({ orgId, inviteId });
+      setReloadKey((k) => k + 1);
+    } catch (err) {
+      setError((err as Error).message);
+    }
+  }
+
+  async function handleRegenerate(inviteId: string): Promise<void> {
+    setError(null);
+    try {
+      const r = await regenerateOrgInvite({ orgId, inviteId });
+      const link =
+        typeof window !== "undefined"
+          ? `${window.location.origin}/invite/${encodeURIComponent(r.token)}`
+          : `/invite/${encodeURIComponent(r.token)}`;
+      setShareLink({
+        email: r.email,
+        link,
+        expiresAt: r.expiresAt,
+      });
       setReloadKey((k) => k + 1);
     } catch (err) {
       setError((err as Error).message);
@@ -95,18 +120,53 @@ export function PendingInvitesList(props: {
             </div>
             <div className="flex items-center gap-1">
               {i.status === "pending" ? (
-                <button
-                  type="button"
-                  className={btnDanger}
-                  onClick={() => void handleRevoke(i.inviteId)}
-                >
-                  Revoke
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className={btn}
+                    onClick={() => void handleRegenerate(i.inviteId)}
+                    title="Mint a fresh link — old link instantly stops working."
+                  >
+                    Regenerate link
+                  </button>
+                  <button
+                    type="button"
+                    className={btnDanger}
+                    onClick={() => void handleRevoke(i.inviteId)}
+                  >
+                    Revoke
+                  </button>
+                </>
               ) : null}
             </div>
           </div>
         );
       })}
+      {shareLink ? (
+        <div className="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-[11px]">
+          <div className="font-semibold">Invite link for {shareLink.email}</div>
+          <code className="mt-1 block break-all rounded bg-background/50 px-1 py-0.5 font-mono text-[10px]">
+            {shareLink.link}
+          </code>
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              type="button"
+              className={btn}
+              onClick={() => {
+                if (typeof navigator !== "undefined" && navigator.clipboard) {
+                  void navigator.clipboard.writeText(shareLink.link);
+                }
+              }}
+            >
+              Copy
+            </button>
+            <span className={muted}>
+              expires {new Date(shareLink.expiresAt).toLocaleString()} — shown
+              once; regenerate again if lost.
+            </span>
+          </div>
+        </div>
+      ) : null}
       {error ? (
         <div className="mt-2 rounded border border-red-500/40 bg-red-500/10 p-2 text-[11px] text-red-700 dark:text-red-200">
           {error}

@@ -18,12 +18,22 @@
  * older than `keepCount` so the log doesn't grow unboundedly.
  */
 import { and, asc, desc, eq, gt, lt, sql } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import { getDb } from "../pg.js";
+import * as schema from "../db/schema.js";
 import { yjsState, yjsStateUpdates } from "../db/schema.js";
+
+/**
+ * Subset of drizzle's db handle the adapter consumes. Accepting either the
+ * pool-bound `getDb()` instance or a transaction-scoped `tx` lets callers
+ * (e.g. `onStoreDocument`) atomically persist the Yjs snapshot alongside
+ * other writes that need to stay in sync (`wpn_notes.content`).
+ */
+type Db = NodePgDatabase<typeof schema>;
 
 export interface YjsPgAdapter {
   loadDoc(noteId: string): Promise<Buffer | null>;
-  storeDoc(noteId: string, bytes: Buffer): Promise<void>;
+  storeDoc(noteId: string, bytes: Buffer, db?: Db): Promise<void>;
   appendUpdate(noteId: string, updateBytes: Buffer): Promise<bigint>;
   loadUpdatesSince(
     noteId: string,
@@ -51,11 +61,14 @@ export function createYjsPgAdapter(): YjsPgAdapter {
         : Buffer.from(row.docBytes);
     },
 
-    async storeDoc(noteId, bytes) {
+    async storeDoc(noteId, bytes, db) {
       // Upsert: if the row exists bump version + updatedAt, else insert at
       // version 1. We keep `version` monotonic so `loadUpdatesSince` queries
-      // can be expressed in terms of it later if needed.
-      await getDb()
+      // can be expressed in terms of it later if needed. Accepts an optional
+      // tx-scoped `db` so callers can atomically pair this with other writes
+      // (e.g. the wpn_notes.content materialised view in `onStoreDocument`).
+      const handle = db ?? getDb();
+      await handle
         .insert(yjsState)
         .values({
           noteId,

@@ -8,7 +8,12 @@ import {
 import { clearAllElectronAppPinSettings } from "./electron-app-pin-storage";
 import { clearPersistedWebSyncWpnPreference } from "../archon-web-shim";
 import { showGlobalToast } from "../toast/toast-service";
-import { setAccessToken, setActiveOrgId, setActiveSpaceId } from "./auth-session";
+import {
+  setAccessToken,
+  setActiveOrgId,
+  setActiveSpaceId,
+  setActiveTeamId,
+} from "./auth-session";
 import { stopSilentRefreshScheduler } from "./silent-refresh-scheduler";
 
 export type TerminationReason =
@@ -28,6 +33,8 @@ type Deps = {
   resetCloudNotes: () => { type: string };
   clearOrgMembership: () => { type: string };
   clearSpaceMembership: () => { type: string };
+  clearTeam: () => { type: string };
+  clearDepartment: () => { type: string };
   authTerminationStarted: (reason: TerminationReason) => { type: string };
   authTerminationCompleted: () => { type: string };
 };
@@ -114,9 +121,12 @@ export async function terminateSession(
     clearAllElectronAppPinSettings();
     setActiveOrgId(null);
     setActiveSpaceId(null);
+    setActiveTeamId(null);
     deps.store.dispatch(deps.resetCloudNotes());
     deps.store.dispatch(deps.clearOrgMembership());
     deps.store.dispatch(deps.clearSpaceMembership());
+    deps.store.dispatch(deps.clearTeam());
+    deps.store.dispatch(deps.clearDepartment());
     clearPersistedWebSyncWpnPreference();
     deps.store.dispatch(deps.authTerminationCompleted());
 

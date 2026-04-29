@@ -1,5 +1,6 @@
 "use client";
 
+import "../lib/crypto-uuid-polyfill";
 import dynamic from "next/dynamic";
 import type { ReactNode } from "react";
 import { PwaServiceWorkerRegister } from "./pwa-register";

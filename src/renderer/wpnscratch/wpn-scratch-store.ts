@@ -1054,7 +1054,7 @@ export async function scratchWpnImportFromBundle(
   let importedNotes = 0;
   const t = nowMs();
 
-  for (const wsEntry of metadata.workspaces) {
+  for (const wsEntry of metadata.workspaces ?? []) {
     let wsName = wsEntry.name;
     if (existingNames.has(wsName)) {
       let suffix = 1;

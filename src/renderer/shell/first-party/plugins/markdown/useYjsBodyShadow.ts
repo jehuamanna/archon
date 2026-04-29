@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
+import type { Awareness } from "y-protocols/awareness";
+import { IndexeddbPersistence } from "y-indexeddb";
 import { createSyncBaseUrlResolver } from "@archon/platform";
 import { authedFetch } from "../../../../auth/auth-retry";
 
@@ -36,14 +38,43 @@ const resolveSyncBase = createSyncBaseUrlResolver();
  * cost: one Y.Doc per note touched in this session — small, and HMR
  * resets the module, so dev iteration doesn't accumulate.
  */
-const noteDocCache = new Map<string, { doc: Y.Doc; ytext: Y.Text }>();
+const noteDocCache = new Map<
+  string,
+  { doc: Y.Doc; ytext: Y.Text; idb: IndexeddbPersistence | null }
+>();
 
-function getOrCreateNoteDoc(noteId: string): { doc: Y.Doc; ytext: Y.Text } {
+/**
+ * Per-noteId IndexedDB store name. Prefixed so a single browser origin can
+ * host multiple workspaces / users without cross-leakage of cached docs.
+ */
+function idbNameForNote(noteId: string): string {
+  return `archon-yjs:${noteId}`;
+}
+
+function getOrCreateNoteDoc(noteId: string): {
+  doc: Y.Doc;
+  ytext: Y.Text;
+  idb: IndexeddbPersistence | null;
+} {
   const cached = noteDocCache.get(noteId);
   if (cached) return cached;
   const doc = new Y.Doc();
   const ytext = doc.getText("content");
-  const entry = { doc, ytext };
+  // Local IndexedDB persistence: survives tab-close before the WS round-trip,
+  // and merges back via Yjs CRDT when the user reconnects. SSR-safe: skip
+  // when `indexedDB` isn't available (Node, server-render, locked-down
+  // browsers). Falls through to in-memory + WS-only persistence.
+  let idb: IndexeddbPersistence | null = null;
+  if (typeof indexedDB !== "undefined") {
+    try {
+      idb = new IndexeddbPersistence(idbNameForNote(noteId), doc);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[yjs-body] IndexedDB persistence init failed:", err);
+      idb = null;
+    }
+  }
+  const entry = { doc, ytext, idb };
   noteDocCache.set(noteId, entry);
   return entry;
 }
@@ -103,6 +134,11 @@ async function mintSpaceWsToken(
 }
 
 export interface YjsBodyShadow {
+  /** Live `Y.Doc` for this note. Stable across hook re-runs. Image-style
+   * editors that don't need `Y.Text("content")` can grab a `Y.Map` off
+   * this directly (e.g. `doc.getMap("metadata")`) and ride the same
+   * Hocuspocus room. Null while the hook is inert. */
+  doc: Y.Doc | null;
   /** Live `Y.Text("content")` bound to this note. Stable across hook
    * re-runs for the same noteId — pass to `yCollab()` as the first
    * argument. Null while the hook is inert (no `noteId` / no `spaceId`). */
@@ -111,6 +147,29 @@ export interface YjsBodyShadow {
    * HTTP autosave fallback: when false, the editor saves via REST
    * `saveNoteContent` because Y.Doc edits won't reach the server. */
   connected: boolean;
+  /** HocuspocusProvider's awareness instance — feed it to `yCollab` as
+   * the second argument so remote cursors and selections render in
+   * CodeMirror. Null while the provider is not yet up. */
+  awareness: Awareness | null;
+}
+
+export interface CollabUser {
+  id: string;
+  name: string;
+  color: string;
+}
+
+/**
+ * Deterministic per-user color via hash → HSL. Stable across reloads so a
+ * given collaborator always gets the same caret hue.
+ */
+export function colorForUserId(userId: string): string {
+  let hash = 0;
+  for (let i = 0; i < userId.length; i++) {
+    hash = (hash * 31 + userId.charCodeAt(i)) & 0xffffffff;
+  }
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 70%, 45%)`;
 }
 
 /**
@@ -123,13 +182,17 @@ export interface YjsBodyShadow {
 export function useYjsBodyShadow(
   noteId: string | null,
   spaceId: string | null,
+  user?: CollabUser | null,
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
+  const [awareness, setAwareness] = useState<Awareness | null>(null);
 
-  // The Y.Text is derived directly from noteId via the stable cache —
+  // The Y.Doc + Y.Text are derived directly from noteId via the stable cache —
   // no useState, no re-render flicker. yCollab in the editor's extensions
   // will bind to this same reference on every render until noteId changes.
-  const yText = noteId ? getOrCreateNoteDoc(noteId).ytext : null;
+  const cachedEntry = noteId ? getOrCreateNoteDoc(noteId) : null;
+  const doc = cachedEntry?.doc ?? null;
+  const yText = cachedEntry?.ytext ?? null;
 
   useEffect(() => {
     if (!noteId || !spaceId) {
@@ -174,14 +237,52 @@ export function useYjsBodyShadow(
           if (!cancelled) setConnected(false);
         },
       });
+      // Publish identity into Yjs awareness so peers can render this user's
+      // caret with a name + stable color. yCollab reads `state.user.{name,
+      // color, colorLight}` for its remote-selections theme — without these
+      // fields, peers receive the awareness packet but yRemoteSelectionsTheme
+      // skips the caret decoration, so the cursor is silently invisible.
+      if (user) {
+        try {
+          provider.awareness?.setLocalStateField("user", {
+            name: user.name,
+            color: user.color,
+            colorLight: user.color,
+            id: user.id,
+          });
+        } catch {
+          /* awareness may be null in degenerate test harnesses */
+        }
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[yjs-body] no collabUser at WS open — peers won't render this caret. Check auth.state.status in MarkdownNoteEditor.",
+          { noteId, spaceId },
+        );
+      }
+      if (!cancelled) setAwareness(provider.awareness ?? null);
       const onStatus = (): void => {
         if (cancelled || !provider) return;
         const ok = provider.synced && provider.isConnected;
+        // Snapshot peer count + whether each peer carries a `user` field so
+        // a missing remote caret is diagnosable from the console alone.
+        const states = provider.awareness?.getStates();
+        const peerSummary: Record<string, { hasUser: boolean; name?: string }> = {};
+        if (states) {
+          for (const [clientId, state] of states.entries()) {
+            const u = (state as { user?: { name?: string } } | undefined)?.user;
+            peerSummary[String(clientId)] = {
+              hasUser: !!u,
+              name: u?.name,
+            };
+          }
+        }
         // eslint-disable-next-line no-console
         console.debug("[yjs-body] status", {
           synced: provider.synced,
           connected: provider.isConnected,
           flag: ok,
+          peers: peerSummary,
         });
         setConnected(ok);
       };
@@ -193,6 +294,7 @@ export function useYjsBodyShadow(
     return () => {
       cancelled = true;
       setConnected(false);
+      setAwareness(null);
       // Disconnect the WS only — leave the cached Y.Doc alone. The
       // editor's yCollab extension may still hold the Y.Text reference
       // until React reconciles, and the next mount of this hook (e.g.
@@ -207,7 +309,78 @@ export function useYjsBodyShadow(
         provider = null;
       }
     };
+    // `user` intentionally excluded from deps: identity changes mid-session
+    // (rename, etc.) are rare and would force a needless WS reconnect.
+    // Identity refresh is handled via the dedicated effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [noteId, spaceId]);
 
-  return { yText, connected };
+  // Refresh local awareness identity in place when `user` changes without
+  // tearing down the provider. Useful when display name / color is set
+  // after the WS is already up (e.g. auth session lands after first paint).
+  useEffect(() => {
+    if (!awareness || !user) return;
+    try {
+      awareness.setLocalStateField("user", {
+        name: user.name,
+        color: user.color,
+        colorLight: user.color,
+        id: user.id,
+      });
+    } catch {
+      /* ignore */
+    }
+  }, [awareness, user?.id, user?.name, user?.color]);
+
+  return { doc, yText, connected, awareness };
+}
+
+/**
+ * Bind a single string-valued field of a Y.Map to controlled-input state.
+ * Each keystroke writes to the Map (Hocuspocus broadcasts to peers and
+ * debounces persistence); remote writes flow back via `observe` and
+ * update local state without echoing.
+ *
+ * Use for non-text-CRDT fields like `altText` / `caption` on an image
+ * note — full character-level merge isn't worth the binding complexity
+ * for short labels. For longer prose, prefer a Y.Text.
+ */
+export function useYjsMapField(
+  map: Y.Map<unknown> | null,
+  key: string,
+  fallback: string,
+): [string, (next: string) => void] {
+  const [value, setLocal] = useState<string>(() => {
+    const cur = map?.get(key);
+    return typeof cur === "string" ? cur : fallback;
+  });
+
+  // Keep local state aligned with whatever the Y.Map currently holds so a
+  // reseed (note swap, reconnect) doesn't strand the input on stale text.
+  useEffect(() => {
+    if (!map) {
+      setLocal(fallback);
+      return;
+    }
+    const cur = map.get(key);
+    setLocal(typeof cur === "string" ? cur : fallback);
+    const handler = (event: Y.YMapEvent<unknown>): void => {
+      if (!event.keysChanged.has(key)) return;
+      const next = map.get(key);
+      setLocal(typeof next === "string" ? next : fallback);
+    };
+    map.observe(handler);
+    return () => {
+      map.unobserve(handler);
+    };
+  }, [map, key, fallback]);
+
+  const setShared = (next: string): void => {
+    setLocal(next);
+    if (!map) return;
+    if (next === fallback && !map.has(key)) return;
+    map.set(key, next);
+  };
+
+  return [value, setShared];
 }

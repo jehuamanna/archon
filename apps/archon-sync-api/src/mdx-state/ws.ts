@@ -1,9 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { JwtPayload } from "../auth.js";
 import { verifyAndTranslate } from "../auth-translate.js";
-import { acquireDedicatedClient, getDb } from "../pg.js";
-import { eq } from "drizzle-orm";
-import { wpnProjects } from "../db/schema.js";
+import { acquireDedicatedClient } from "../pg.js";
 import { userCanWriteProject } from "../permission-resolver.js";
 import { MdxStateService } from "./service.js";
 
@@ -23,14 +21,8 @@ async function hasProjectAccess(
   auth: JwtPayload,
   projectId: string,
 ): Promise<boolean> {
-  const projectRows = await getDb()
-    .select({ userId: wpnProjects.userId })
-    .from(wpnProjects)
-    .where(eq(wpnProjects.id, projectId))
-    .limit(1);
-  const project = projectRows[0];
-  if (!project) return false;
-  if (project.userId === auth.sub) return true;
+  // Project access flows through team_projects in the new model;
+  // userCanWriteProject also handles existence + admin overrides.
   return userCanWriteProject(auth, projectId);
 }
 

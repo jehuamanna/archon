@@ -22,13 +22,17 @@ import cloudAuthReducer, {
 import { resetCloudNotes } from "./cloudNotesSlice";
 import { clearOrgMembership } from "./orgMembershipSlice";
 import { clearSpaceMembership } from "./spaceMembershipSlice";
+import { clearTeam } from "./teamSlice";
+import { clearDepartment } from "./departmentSlice";
 import cloudNotesReducer from "./cloudNotesSlice";
 import { cloudNotesRxListener } from "./cloudNotesRxListener";
+import departmentReducer from "./departmentSlice";
 import notesReducer from "./notesSlice";
 import notificationsReducer from "./notificationsSlice";
 import orgMembershipReducer from "./orgMembershipSlice";
 import pluginUiReducer from "./pluginUiSlice";
 import spaceMembershipReducer from "./spaceMembershipSlice";
+import teamReducer from "./teamSlice";
 import wpnClipboardReducer from "./wpnClipboardSlice";
 import wpnUndoReducer from "./wpnUndoSlice";
 
@@ -60,6 +64,8 @@ export const store = configureStore({
     notifications: notificationsReducer,
     orgMembership: orgMembershipReducer,
     spaceMembership: spaceMembershipReducer,
+    team: teamReducer,
+    department: departmentReducer,
     wpnClipboard: wpnClipboardReducer,
     wpnUndo: wpnUndoReducer,
   },
@@ -75,6 +81,8 @@ setSessionTerminationDeps({
   resetCloudNotes,
   clearOrgMembership,
   clearSpaceMembership,
+  clearTeam,
+  clearDepartment,
   authTerminationStarted,
   authTerminationCompleted,
 });

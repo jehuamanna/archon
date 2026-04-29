@@ -41,10 +41,13 @@ export type JwtPayload = {
   mcp?: boolean;
   /** Canonical realtime identity. Optional for backward compatibility. */
   principal?: Principal;
-  /** Active organization context (Phase 1). May be absent on legacy tokens. */
+  /** Active organization context. May be absent on legacy tokens. */
   activeOrgId?: string;
-  /** Active space context (Phase 2). May be absent on legacy tokens. */
-  activeSpaceId?: string;
+  /** Active team context — replaces the pre-migration `activeSpaceId`. The
+   * realtime layer keys per-document auth on the project, but this carries
+   * the team the session was last on so the explorer can land users in the
+   * right place. May be absent on legacy tokens. */
+  activeTeamId?: string;
 };
 
 export type RefreshJwtPayload = JwtPayload & { typ: "refresh"; jti: string };
@@ -80,7 +83,7 @@ export function signAccessToken(
           typ: "access",
           mcp: true,
           ...(payload.activeOrgId ? { activeOrgId: payload.activeOrgId } : {}),
-          ...(payload.activeSpaceId ? { activeSpaceId: payload.activeSpaceId } : {}),
+          ...(payload.activeTeamId ? { activeTeamId: payload.activeTeamId } : {}),
         }
       : { ...payload, typ: "access" };
   return signToken(secret, body, expiresIn);

@@ -1,0 +1,7 @@
+Placeholder — see apps/archon-sync-api/src/bundled-docs-routes.ts.
+
+The sync-api serves plugin-authoring guides from this directory at
+/api/v1/bundled-docs/*. Drop markdown files here to publish them in-app.
+Empty directory is fine; the endpoint returns an empty list.
+
+Path can be overridden via ARCHON_BUNDLED_DOCS_DIR env var.

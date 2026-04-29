@@ -1,33 +1,62 @@
-/** Workspace → project → note (v2) — DTOs for JSON workspace, Postgres, HTTP, and IPC. */
+/**
+ * Project → note DTOs for HTTP responses, Postgres rows (post-migration),
+ * IPC, and frontend store rows.
+ *
+ * Workspaces are gone with the org/team migration. Visibility ("public" /
+ * "private" / "shared") is gone too — project access flows through
+ * team_projects + team_memberships, not per-row visibility.
+ *
+ * The file path keeps its `wpn-v2-types` name for stable imports across
+ * the frontend; the contents reflect the current model.
+ */
 
-/** Phase 4/8 visibility applied to both workspaces and projects. */
-export type WpnVisibility = "public" | "private" | "shared";
-
-export type WpnWorkspaceRow = {
+/** Single canonical row per project. */
+export type ProjectRow = {
   id: string;
+  org_id: string;
+  /** First user to create the project. Used for advisory display only;
+   * access is determined by team_projects, not creator. */
+  creator_user_id: string;
   name: string;
   sort_index: number;
   color_token: string | null;
   created_at_ms: number;
   updated_at_ms: number;
-  /** Phase 4: visibility within the space. Undefined on legacy rows — treat as "public". */
-  visibility?: WpnVisibility;
-  /** Phase 4: original creator (for `private` and `shared` access checks). */
-  creatorUserId?: string;
 };
 
-export type WpnProjectRow = {
+export type ProjectPatch = {
+  name?: string;
+  sort_index?: number;
+  color_token?: string | null;
+};
+
+/**
+ * A team grant on a project. The user's effective role is the strongest of
+ * (owner > contributor > viewer) across teams they're on that share the
+ * project.
+ */
+export type TeamProjectRow = {
+  team_id: string;
+  project_id: string;
+  role: "owner" | "contributor" | "viewer";
+  granted_at: string;
+};
+
+export type DepartmentRow = {
   id: string;
-  workspace_id: string;
+  org_id: string;
   name: string;
-  sort_index: number;
   color_token: string | null;
-  created_at_ms: number;
-  updated_at_ms: number;
-  /** Phase 8: visibility within the parent workspace. */
-  visibility?: WpnVisibility;
-  /** Phase 8: original creator. */
-  creatorUserId?: string;
+  created_at: string;
+};
+
+export type TeamRow = {
+  id: string;
+  org_id: string;
+  department_id: string;
+  name: string;
+  color_token: string | null;
+  created_at: string;
 };
 
 export type WpnNoteRow = {
@@ -44,16 +73,16 @@ export type WpnNoteRow = {
 };
 
 /**
- * PLAN-06 slice 2: compact metadata slice for client-side search, present
- * only on image notes that set altText or caption (absent when empty, not
- * `{}`, to keep list payloads tight).
+ * Compact metadata slice for client-side search; present only on image
+ * notes that set altText or caption (absent when empty, to keep list
+ * payloads tight).
  */
 export type WpnNoteSearchHints = {
   altText?: string;
   caption?: string;
 };
 
-/** Flat preorder row for explorer (includes depth). */
+/** Flat preorder row for the explorer (includes depth). */
 export type WpnNoteListItem = {
   id: string;
   project_id: string;
@@ -79,16 +108,24 @@ export type WpnNoteDetail = {
   canWrite?: boolean;
 };
 
-/** Flat row for cross-project note listing (link picker, bulk load). */
+/**
+ * Flat row for cross-project note listing (link picker, bulk load).
+ *
+ * `workspace_id` / `workspace_name` are present only when the row comes
+ * from the Electron file vault (which still tracks workspaces on disk);
+ * the cloud sync-api never populates them since the workspaces table
+ * was removed by the org/team migration. Renderer code that crosses
+ * both paths should treat these fields as optional.
+ */
 export type WpnNoteWithContextListItem = {
   id: string;
   title: string;
   type: string;
   project_id: string;
   project_name: string;
-  workspace_id: string;
-  workspace_name: string;
   parent_id: string | null;
+  workspace_id?: string;
+  workspace_name?: string;
 };
 
 /** Note that links to the target note id in markdown content. */
@@ -98,14 +135,66 @@ export type WpnBacklinkSourceItem = {
   project_id: string;
 };
 
-export const WPN_SCHEMA_VERSION = 1;
+export const WPN_SCHEMA_VERSION = 2;
+
+// ── Electron file-vault types ──────────────────────────────────────────
+//
+// The cloud sync-api dropped workspaces with the org/team migration —
+// `ProjectRow` above is workspace-free. The Electron file vault
+// (offline single-user mode, persisted as `archon-workspace.json`)
+// still tracks workspaces as a top-level container; orgs/teams have no
+// meaning offline. These types describe the on-disk shape and the IPC
+// contract for the local vault path. They live alongside the cloud
+// types so renderer code that crosses both paths can import from one
+// module — but the two shapes are intentionally different.
+
+/**
+ * Electron file-vault visibility tag. Cloud access uses `team_projects`
+ * grants; the file vault keeps a coarse public/private/shared marker
+ * for backward compat with pre-migration `archon-workspace.json` files.
+ */
+export type WpnVisibility = "private" | "shared" | "public";
+
+export type WpnWorkspaceRow = {
+  id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  visibility?: WpnVisibility;
+  creatorUserId?: string;
+};
 
 export type WpnWorkspacePatch = {
   name?: string;
   sort_index?: number;
   color_token?: string | null;
+  visibility?: WpnVisibility;
 };
 
-export type WpnProjectPatch = WpnWorkspacePatch & {
+/**
+ * File-vault project row. Same fields as the cloud `ProjectRow` plus
+ * `workspace_id` (required, since the file vault has a workspaces
+ * table). Cloud code should NOT use this — it should use `ProjectRow`.
+ */
+export type WpnProjectRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  visibility?: WpnVisibility;
+  creatorUserId?: string;
+};
+
+export type WpnProjectPatch = {
+  name?: string;
+  sort_index?: number;
+  color_token?: string | null;
+  /** Move project to a different workspace (file vault only). */
   workspace_id?: string;
+  visibility?: WpnVisibility;
 };

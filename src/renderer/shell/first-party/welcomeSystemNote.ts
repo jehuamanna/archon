@@ -85,7 +85,7 @@ export async function findWelcomeNoteForActiveOrg(
     const { note } = await getArchon().wpnGetNote(hit.id);
     const row: WelcomeNoteRow = {
       noteId: note.id,
-      workspaceId: hit.workspace_id,
+      workspaceId: hit.workspace_id ?? "",
       projectId: hit.project_id,
       content: note.content ?? "",
     };
@@ -125,7 +125,7 @@ export async function saveWelcomeNote(
     await archon.saveNoteContent(existing.id, content);
     const row: WelcomeNoteRow = {
       noteId: existing.id,
-      workspaceId: existing.workspace_id,
+      workspaceId: existing.workspace_id ?? "",
       projectId: existing.project_id,
       content,
     };

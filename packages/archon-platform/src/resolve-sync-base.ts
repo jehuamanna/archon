@@ -32,10 +32,19 @@ function configuredSyncBaseUsesLoopback(base: string): boolean {
   }
 }
 
+function isAnyAddrHostname(host: string): boolean {
+  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  return h === "0.0.0.0" || h === "::";
+}
+
 /**
  * When the app is opened on a real host (e.g. https://archon.studio) but the build still baked
  * `NEXT_PUBLIC_ARCHON_SYNC_API_URL=http://127.0.0.1:8080/api/v1`, use the page origin so the browser
  * hits the gateway on the same host instead of the visitor's loopback.
+ *
+ * `0.0.0.0` / `::` are "bind any" addresses — the dev server *is* reachable on every interface,
+ * so when the browser is on a non-loopback host the page's own hostname is a valid client target.
+ * Swap the hostname only and preserve the configured port (sync-api on :4010 while the page is on :3000).
  */
 function rewriteLoopbackSyncBaseForPublicPage(base: string): string {
   if (typeof window === "undefined" || !base) {
@@ -43,6 +52,21 @@ function rewriteLoopbackSyncBaseForPublicPage(base: string): string {
   }
   if (browserHostnameIsLoopback()) {
     return base;
+  }
+  let configuredHost: string | null = null;
+  try {
+    configuredHost = new URL(base).hostname.toLowerCase();
+  } catch {
+    return base;
+  }
+  if (isAnyAddrHostname(configuredHost)) {
+    try {
+      const u = new URL(base);
+      u.hostname = window.location.hostname;
+      return normalizeSyncApiBaseUrl(u.toString());
+    } catch {
+      return base;
+    }
   }
   if (!configuredSyncBaseUsesLoopback(base)) {
     return base;

@@ -11,7 +11,7 @@ export type OpenNoteInShellOptions = {
   markdownHeadingSlug?: string;
   /** Always add a new note tab instead of focusing an existing tab for this note. */
   newTab?: boolean;
-  /** Workspace/Project/Title or ./Title — used for `#/w/...` in the address bar. */
+  /** Project/Title or ./Title — used for `#/w/...` in the address bar. */
   canonicalVfsPath?: string;
   /**
    * Override for the new-tab title. Takes precedence over the local

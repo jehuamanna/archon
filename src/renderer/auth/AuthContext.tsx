@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
-import { authLogin, authLogout, authRefresh, authSignup } from "./auth-client";
+import { authLogin, authLogout, authRefresh } from "./auth-client";
 import { setAccessToken, type AuthUser } from "./auth-session";
 import {
   isElectronUserAgent,
@@ -19,7 +19,6 @@ import { store } from "../store";
 import {
   cloudLoginThunk,
   cloudLogoutThunk,
-  cloudRegisterThunk,
   cloudRestoreSessionThunk,
 } from "../store/cloudAuthSlice";
 import { fetchNotificationsThunk } from "../store/notificationsSlice";
@@ -37,7 +36,7 @@ type AuthState =
   | { status: "authed"; user: AuthUser }
   | { status: "anon"; user: null };
 
-type WebAuthOverlayMode = "login" | "signup";
+type WebAuthOverlayMode = "login";
 
 type AuthContextValue = {
   state: AuthState;
@@ -45,7 +44,6 @@ type AuthContextValue = {
   electronRunMode: ElectronRunMode;
   chooseElectronRunMode: (mode: ElectronRunModeChoice) => void;
   login: (email: string, password: string) => Promise<void>;
-  signup: (email: string, username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshSession: () => Promise<void>;
   setAnon: () => void;
@@ -290,26 +288,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
     [],
   );
 
-  const signup = useCallback(
-    async (email: string, username: string, password: string) => {
-      if (webUsesSyncServiceAuth()) {
-        const result = await store.dispatch(cloudRegisterThunk({ email, password }));
-        if (cloudRegisterThunk.rejected.match(result)) {
-          throw new Error(result.error.message ?? "Signup failed");
-        }
-        if (typeof window !== "undefined" && !isElectronUserAgent()) {
-          window.location.reload();
-        }
-        return;
-      }
-      const u = await authSignup({ email, username, password });
-      if (typeof window !== "undefined" && !isElectronUserAgent()) {
-        window.location.reload();
-      }
-    },
-    [],
-  );
-
   const logout = useCallback(async () => {
     if (typeof window === "undefined") return;
     if (isElectronUserAgent()) {
@@ -388,7 +366,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       electronRunMode: isElectronUserAgent() ? electronRunMode : "unset",
       chooseElectronRunMode,
       login,
-      signup,
       logout,
       refreshSession,
       setAnon,
@@ -405,7 +382,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }): React
       electronRunMode,
       chooseElectronRunMode,
       login,
-      signup,
       logout,
       refreshSession,
       setAnon,

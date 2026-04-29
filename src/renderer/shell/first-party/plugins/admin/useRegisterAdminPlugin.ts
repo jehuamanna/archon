@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import type { ResourceVisibility } from "../../../../auth/auth-client";
 import { useArchonContributionRegistry } from "../../../ArchonContributionContext";
 import { useShellLayoutStore } from "../../../layout/ShellLayoutContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -19,19 +18,6 @@ import {
   ADMIN_VIEW_SIDEBAR,
 } from "./adminConstants";
 import { adminSelectionStore } from "./adminSelectionStore";
-
-function coerceVisibility(v: unknown): ResourceVisibility {
-  if (v === "public" || v === "private" || v === "shared") return v;
-  return "public";
-}
-
-function asString(v: unknown): string | undefined {
-  return typeof v === "string" && v.length > 0 ? v : undefined;
-}
-
-function asNullableString(v: unknown): string | null {
-  return typeof v === "string" && v.length > 0 ? v : null;
-}
 
 export function useRegisterAdminPlugin(): void {
   const regs = useShellRegistries();
@@ -119,40 +105,29 @@ export function useRegisterAdminPlugin(): void {
       }),
     );
 
+    // Pre-migration deep-link commands that opened workspace-share /
+    // project-share panels. Spaces + workspaces were dropped with the
+    // org/team migration and project access flows through `team_projects`
+    // grants, managed inline in `TeamsPanel`. Both commands now redirect
+    // to the org-level Teams view so the explorer's "Manage shares"
+    // affordances continue to land somewhere sensible while the explorer
+    // is itself ported (slice 5). The id constants are still exported so
+    // the WpnExplorerPanelView call sites compile until they're removed.
     disposers.push(
       contrib.registerCommand({
         id: ADMIN_CMD_OPEN_WORKSPACE_SHARES,
-        title: "Admin: Open workspace shares",
+        title: "Admin: Open workspace shares (redirected)",
         category: "Admin",
         sourcePluginId: ADMIN_PLUGIN_ID,
-        doc: "Opens the Admin plugin focused on a workspace's shares panel.",
+        doc: "Vestigial — redirects to the Teams panel. Workspace shares no longer exist; project access is managed via team_projects grants.",
         api: {
-          summary: "Open Admin → Workspace shares.",
-          args: [
-            { name: "workspaceId", type: "string", required: true },
-            { name: "spaceId", type: "string | null" },
-            { name: "initialVisibility", type: "'public'|'private'|'shared'" },
-            { name: "workspaceName", type: "string" },
-            { name: "creatorUserId", type: "string | null" },
-          ],
-          exampleInvoke: {
-            workspaceId: "ws_…",
-            spaceId: "sp_…",
-            initialVisibility: "public",
-          },
-          returns: { type: "void", description: "Activates the admin tab and selects the workspace." },
+          summary: "Redirects to Admin → Teams.",
+          args: [],
+          exampleInvoke: {},
+          returns: { type: "void", description: "Activates the Teams admin view." },
         },
-        handler: (args) => {
-          const workspaceId = asString(args?.workspaceId);
-          if (!workspaceId) return;
-          adminSelectionStore.setSelection({
-            kind: "workspace-shares",
-            workspaceId,
-            spaceId: asNullableString(args?.spaceId),
-            initialVisibility: coerceVisibility(args?.initialVisibility),
-            workspaceName: asString(args?.workspaceName),
-            creatorUserId: asNullableString(args?.creatorUserId),
-          });
+        handler: () => {
+          adminSelectionStore.setSelection({ kind: "org-teams" });
           adminSelectionStore.setCompanionFocus({ kind: "none" });
           openAdminTab();
         },
@@ -162,37 +137,18 @@ export function useRegisterAdminPlugin(): void {
     disposers.push(
       contrib.registerCommand({
         id: ADMIN_CMD_OPEN_PROJECT_SHARES,
-        title: "Admin: Open project shares",
+        title: "Admin: Open project shares (redirected)",
         category: "Admin",
         sourcePluginId: ADMIN_PLUGIN_ID,
-        doc: "Opens the Admin plugin focused on a project's shares panel.",
+        doc: "Vestigial — redirects to the Teams panel. Project access is managed via team_projects grants under each team.",
         api: {
-          summary: "Open Admin → Project shares.",
-          args: [
-            { name: "projectId", type: "string", required: true },
-            { name: "spaceId", type: "string | null" },
-            { name: "initialVisibility", type: "'public'|'private'|'shared'" },
-            { name: "projectName", type: "string" },
-            { name: "creatorUserId", type: "string | null" },
-          ],
-          exampleInvoke: {
-            projectId: "pr_…",
-            spaceId: "sp_…",
-            initialVisibility: "public",
-          },
-          returns: { type: "void", description: "Activates the admin tab and selects the project." },
+          summary: "Redirects to Admin → Teams.",
+          args: [],
+          exampleInvoke: {},
+          returns: { type: "void", description: "Activates the Teams admin view." },
         },
-        handler: (args) => {
-          const projectId = asString(args?.projectId);
-          if (!projectId) return;
-          adminSelectionStore.setSelection({
-            kind: "project-shares",
-            projectId,
-            spaceId: asNullableString(args?.spaceId),
-            initialVisibility: coerceVisibility(args?.initialVisibility),
-            projectName: asString(args?.projectName),
-            creatorUserId: asNullableString(args?.creatorUserId),
-          });
+        handler: () => {
+          adminSelectionStore.setSelection({ kind: "org-teams" });
           adminSelectionStore.setCompanionFocus({ kind: "none" });
           openAdminTab();
         },

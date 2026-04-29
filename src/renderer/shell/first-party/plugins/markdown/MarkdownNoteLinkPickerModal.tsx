@@ -97,7 +97,7 @@ export function MarkdownNoteLinkPickerModal({
           <p className="text-[13px] font-medium text-foreground">Link to note</p>
           <p className="mt-0.5 text-[11px] text-muted-foreground">
             Search by title or path. Inserts a path-based link:{" "}
-            <span className="font-mono text-[10px]">#/w/Workspace/Project/Title</span>, or{" "}
+            <span className="font-mono text-[10px]">#/w/Project/Title</span>, or{" "}
             <span className="font-mono text-[10px]">./Title</span> when the target is in the same project.
           </p>
           <input

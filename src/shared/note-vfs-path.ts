@@ -7,11 +7,11 @@ export function isSameProjectRelativeVfsPath(vfsPath: string): boolean {
 }
 
 /**
- * Maps `./Title` (same project as `base`) to canonical `Workspace/Project/Title`.
+ * Maps `./Title` (same project as `base`) to canonical `Project/Title`.
  */
 export function resolveSameProjectRelativeVfsToCanonical(
   vfsPath: string,
-  base: Pick<WpnNoteWithContextListItem, "workspace_name" | "project_name">,
+  base: Pick<WpnNoteWithContextListItem, "project_name">,
 ): string | null {
   const t = vfsPath.trim();
   if (!isSameProjectRelativeVfsPath(t)) {
@@ -19,47 +19,47 @@ export function resolveSameProjectRelativeVfsToCanonical(
   }
   const rest = t === "." ? "" : t.slice(2).trim();
   const titleSeg = normalizeVfsSegment(rest.length > 0 ? rest : "Untitled", "Untitled");
-  const ws = normalizeVfsSegment(base.workspace_name, "Workspace");
   const proj = normalizeVfsSegment(base.project_name, "Project");
-  return `${ws}/${proj}/${titleSeg}`;
+  return `${proj}/${titleSeg}`;
 }
 
 /** Single path segment: no raw `/` (replaced) so joined paths stay unambiguous. */
 export function normalizeVfsSegment(raw: string, fallback: string): string {
   const t = raw.trim();
   const base = t.length > 0 ? t : fallback;
-  return base.replace(/\//g, "\u2215");
+  return base.replace(/\//g, "∕");
 }
 
-/** Canonical `Workspace/Project/Title` matching explorer link rows. */
+/**
+ * Canonical `Project/Title` matching explorer link rows.
+ *
+ * Pre-migration this was 3-segment `Workspace/Project/Title`. Workspaces are
+ * gone with the org/team schema flatten, so the canonical path now has two
+ * segments — projects are the top-level ownership unit visible in URLs.
+ */
 export function canonicalVfsPathFromNoteContext(n: WpnNoteWithContextListItem): string {
-  const ws = normalizeVfsSegment(n.workspace_name, "Workspace");
   const proj = normalizeVfsSegment(n.project_name, "Project");
   const title = normalizeVfsSegment(n.title, "Untitled");
-  return `${ws}/${proj}/${title}`;
+  return `${proj}/${title}`;
 }
 
 export function canonicalVfsPathFromLinkRow(row: {
-  workspaceName: string;
   projectName: string;
   title: string;
 }): string {
-  const ws = normalizeVfsSegment(row.workspaceName, "Workspace");
   const proj = normalizeVfsSegment(row.projectName, "Project");
   const title = normalizeVfsSegment(row.title, "Untitled");
-  return `${ws}/${proj}/${title}`;
+  return `${proj}/${title}`;
 }
 
-/** Human- and MCP-aligned path: `Workspace / Project / Title` with normalized segments. */
+/** Human- and MCP-aligned path: `Project / Title` with normalized segments. */
 export function displayWpnNotePathParts(
-  workspaceName: string,
   projectName: string,
   title: string,
 ): string {
-  const ws = normalizeVfsSegment(workspaceName, "Workspace");
   const proj = normalizeVfsSegment(projectName, "Project");
   const t = normalizeVfsSegment(title, "Untitled");
-  return `${ws} / ${proj} / ${t}`;
+  return `${proj} / ${t}`;
 }
 
 export function resolveNoteIdByCanonicalVfsPath(
@@ -83,7 +83,7 @@ export function markdownVfsNoteHref(canonicalPath: string, markdownHeadingSlug?:
     : `#/w/${enc}`;
 }
 
-/** VFS link to another note in the same project using `./Title` (shorter than full Workspace/Project/Title). */
+/** VFS link to another note in the same project using `./Title` (shorter than full Project/Title). */
 export function markdownVfsNoteHrefSameProjectRelative(
   titleSegment: string,
   markdownHeadingSlug?: string,
@@ -203,23 +203,27 @@ export function parseVfsNoteHashPath(pathAfterW: string): ParsedVfsNoteHash | nu
   const isTreeRel = parts[0] === "..";
   if (isTreeRel) {
     // Tree-relative: ../sibling, ../../uncle, ../sibling/child
-    // Count non-".." segments after the leading ".." segments to determine heading slug
+    // Need at least one down segment (the target title); heading slug if 2+
+    // down segments and last matches slug pattern.
     let upCount = 0;
     while (upCount < parts.length && parts[upCount] === "..") upCount++;
     const downParts = parts.slice(upCount);
-    // Need at least one down segment (the target title); heading slug if 2+ down segments and last matches slug pattern
     if (downParts.length >= 2 && /^[a-z0-9-]+$/i.test(last)) {
       return { vfsPath: parts.slice(0, -1).join("/"), markdownHeadingSlug: last };
     }
     return { vfsPath: parts.join("/") };
   }
   if (isRel) {
+    // Same-project relative: `./Title` (2 parts) or `./Title/heading` (3 parts).
     if (parts.length >= 3 && /^[a-z0-9-]+$/i.test(last)) {
       return { vfsPath: parts.slice(0, -1).join("/"), markdownHeadingSlug: last };
     }
     return { vfsPath: parts.join("/") };
   }
-  if (parts.length >= 4 && /^[a-z0-9-]+$/i.test(last)) {
+  // Absolute: `Project/Title` (2 parts) or `Project/Title/heading` (3 parts).
+  // Pre-migration this was a 4-part minimum (`Workspace/Project/Title/heading`);
+  // the workspace segment is gone with the schema flatten.
+  if (parts.length >= 3 && /^[a-z0-9-]+$/i.test(last)) {
     return { vfsPath: parts.slice(0, -1).join("/"), markdownHeadingSlug: last };
   }
   return { vfsPath: parts.join("/") };

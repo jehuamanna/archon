@@ -1,25 +1,32 @@
 /**
- * Postgres WPN writes. All multi-statement operations run inside a single
- * `withTx` so partial failures don't leave the tree in a corrupt state.
+ * Postgres write helpers for projects + notes (post-migration).
  *
- *   - All ids are uuid; cycle prevention for tree moves runs as a recursive
- *     CTE inside the same transaction (no app-side guards).
- *   - On every note write (create/update/delete subtree) the helper
- *     reconcileNoteEdges runs: parse markdown content for `#/n/<id>`
- *     references via the shared markdown-internal-note-href module and
- *     delete-then-insert the edges for that source. VFS-path references
- *     (`#/w/...`) are left to the importer's Pass-3 backfill plus a future
- *     resolver — they don't break correctness, only completeness.
+ * Multi-statement operations run inside a single `withTx` so partial
+ * failures don't leave the tree in a corrupt state. All ids are uuid;
+ * cycle prevention for tree moves runs as a recursive CTE inside the
+ * same transaction (no app-side guards beyond the helpers in
+ * `wpn-tree.ts`).
+ *
+ * On every note write (create/update/delete-subtree/duplicate-subtree)
+ * `reconcileNoteEdges` runs: parse markdown content for `#/n/<id>`
+ * references via the shared markdown-internal-note-href module and
+ * delete-then-insert the edges for that source. VFS-path references
+ * (`#/w/...`) are deferred to a future resolver — they don't break
+ * correctness, only completeness.
+ *
+ * Realtime fanout: events go to a per-org channel via `notifyRealtime`
+ * with the project's `org_id` as the key. The per-event ACL filter in
+ * `realtime/filter.ts` does the project-level read check before delivery.
  */
 import * as crypto from "node:crypto";
-import { and, eq, inArray, sql, desc, asc } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { getDb, withTx } from "./pg.js";
 import {
-  wpnWorkspaces,
-  wpnProjects,
-  wpnNotes,
-  wpnExplorerState,
+  explorerState,
   noteEdges,
+  notes,
+  projects,
+  teamProjects,
 } from "./db/schema.js";
 import {
   type NoteMovePlacement,
@@ -27,6 +34,11 @@ import {
   wpnComputeChildMapAfterMove,
 } from "./wpn-tree.js";
 import { notifyRealtime } from "./realtime/notify.js";
+import {
+  normalizeVfsSegment,
+  rewriteMarkdownForWpnNoteTitleChange,
+  vfsCanonicalPathsForTitleChange,
+} from "./note-vfs-mirror.js";
 
 // ---------- public surface ----------
 
@@ -54,42 +66,30 @@ function normalizeNoteType(t: string): string {
   return String(t || "markdown").trim().toLowerCase() || "markdown";
 }
 
-interface NoteRow {
-  id: string;
-  userId: string;
-  orgId: string | null;
-  spaceId: string | null;
-  created_by_user_id: string | null;
-  updated_by_user_id: string | null;
-  project_id: string;
-  parent_id: string | null;
-  type: string;
-  title: string;
-  content: string;
-  metadata: unknown;
-  sibling_index: number;
-  created_at_ms: number;
-  updated_at_ms: number;
-  deleted: boolean | null;
-}
+type NoteRow = typeof notes.$inferSelect;
+type ProjectRow = typeof projects.$inferSelect;
 
 function toRowLite(rows: NoteRow[]): WpnNoteRowLite[] {
   return rows
     .filter((r) => r.deleted !== true)
-    .map((r) => ({ id: r.id, parent_id: r.parent_id, sibling_index: r.sibling_index }));
+    .map((r) => ({
+      id: r.id,
+      parent_id: r.parentId,
+      sibling_index: r.siblingIndex,
+    }));
 }
 
 function childrenMapFromRows(rows: NoteRow[]): Map<string | null, NoteRow[]> {
   const active = rows.filter((r) => r.deleted !== true);
   const m = new Map<string | null, NoteRow[]>();
   for (const r of active) {
-    const k = r.parent_id;
+    const k = r.parentId;
     const arr = m.get(k) ?? [];
     arr.push(r);
     m.set(k, arr);
   }
   for (const arr of m.values()) {
-    arr.sort((a, b) => a.sibling_index - b.sibling_index);
+    arr.sort((a, b) => a.siblingIndex - b.siblingIndex);
   }
   return m;
 }
@@ -107,40 +107,11 @@ function collectSubtreePreorder(rows: NoteRow[], rootId: string): string[] {
   return out;
 }
 
-/** Public projection. */
-function publicWorkspace(w: typeof wpnWorkspaces.$inferSelect): {
+/** Public projection for projects (drops settings; keeps API-shape names). */
+function publicProject(p: ProjectRow): {
   id: string;
-  orgId?: string;
-  spaceId?: string;
-  visibility?: string | null;
-  creatorUserId?: string | null;
-  name: string;
-  sort_index: number;
-  color_token: string | null;
-  created_at_ms: number;
-  updated_at_ms: number;
-} {
-  return {
-    id: w.id,
-    ...(w.orgId ? { orgId: w.orgId } : {}),
-    ...(w.spaceId ? { spaceId: w.spaceId } : {}),
-    visibility: w.visibility,
-    creatorUserId: w.creatorUserId,
-    name: w.name,
-    sort_index: w.sort_index,
-    color_token: w.color_token,
-    created_at_ms: w.created_at_ms,
-    updated_at_ms: w.updated_at_ms,
-  };
-}
-
-function publicProject(p: typeof wpnProjects.$inferSelect): {
-  id: string;
-  orgId?: string;
-  spaceId?: string;
-  visibility?: string | null;
-  creatorUserId?: string | null;
-  workspace_id: string;
+  org_id: string;
+  creator_user_id: string;
   name: string;
   sort_index: number;
   color_token: string | null;
@@ -149,16 +120,13 @@ function publicProject(p: typeof wpnProjects.$inferSelect): {
 } {
   return {
     id: p.id,
-    ...(p.orgId ? { orgId: p.orgId } : {}),
-    ...(p.spaceId ? { spaceId: p.spaceId } : {}),
-    visibility: p.visibility,
-    creatorUserId: p.creatorUserId,
-    workspace_id: p.workspace_id,
+    org_id: p.orgId,
+    creator_user_id: p.creatorUserId,
     name: p.name,
-    sort_index: p.sort_index,
-    color_token: p.color_token,
-    created_at_ms: p.created_at_ms,
-    updated_at_ms: p.updated_at_ms,
+    sort_index: p.sortIndex,
+    color_token: p.colorToken,
+    created_at_ms: p.createdAtMs,
+    updated_at_ms: p.updatedAtMs,
   };
 }
 
@@ -180,11 +148,6 @@ async function loadMarkdownLib(): Promise<NonNullable<typeof _markdownLib>> {
  * Replace every `note_edges` row whose `src = srcNoteId` with the deduped set
  * of `(srcNoteId, dst, kind='link')` edges parsed from `content` markdown.
  * Runs inside the caller's transaction.
- *
- * Only `#/n/<uuid>` references land as edges right now; vfs-path links
- * (`#/w/<vfsPath>`) need title→id resolution and are deferred to the
- * importer's Pass-3 backfill plus a future resolver. Save-path correctness
- * is preserved; the gap is "not every link makes it into note_edges yet".
  */
 async function reconcileNoteEdges(
   tx: ReturnType<typeof getDb>,
@@ -193,7 +156,6 @@ async function reconcileNoteEdges(
 ): Promise<{ added: string[]; removed: string[] }> {
   const lib = await loadMarkdownLib();
   const ids = lib.collectReferencedNoteIdsFromMarkdown(content);
-  // Defensive: drop self-references and non-uuid noise.
   const dstSet = new Set<string>();
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
   for (const id of ids) {
@@ -201,10 +163,6 @@ async function reconcileNoteEdges(
     if (!UUID_RE.test(id)) continue;
     dstSet.add(id);
   }
-  // Capture the existing edges so the post-commit emitter knows what
-  // disappeared. Without this, the fanout treats every edit as a "burn it
-  // down + rebuild" which would emit `edge.removed` for every edge even
-  // when content is unchanged.
   const existing = await tx
     .select({ dst: noteEdges.dst })
     .from(noteEdges)
@@ -228,23 +186,19 @@ async function reconcileNoteEdges(
   return { added, removed };
 }
 
-/**
- * Best-effort emission of `edge.added` / `edge.removed` events. Called from
- * the post-commit phase of writers that ran `reconcileNoteEdges`. Failures
- * are swallowed — fanout cannot block the user-facing op.
- */
+/** Best-effort emission of edge.added/edge.removed events. */
 async function emitEdgeDiff(
-  spaceId: string | null,
+  channelKey: string | null,
   srcNoteId: string,
   byUserId: string,
   diff: { added: string[]; removed: string[] },
 ): Promise<void> {
-  if (!spaceId) return;
+  if (!channelKey) return;
   if (diff.added.length === 0 && diff.removed.length === 0) return;
   const stamp = new Date().toISOString();
   for (const dst of diff.added) {
     try {
-      await notifyRealtime(spaceId, {
+      await notifyRealtime(channelKey, {
         type: "edge.added",
         src: srcNoteId,
         dst,
@@ -258,7 +212,7 @@ async function emitEdgeDiff(
   }
   for (const dst of diff.removed) {
     try {
-      await notifyRealtime(spaceId, {
+      await notifyRealtime(channelKey, {
         type: "edge.removed",
         src: srcNoteId,
         dst,
@@ -272,326 +226,132 @@ async function emitEdgeDiff(
   }
 }
 
-// ---------- workspaces ----------
-
-export async function pgWpnCreateWorkspace(
-  userId: string,
-  name: string,
-  scope?: { orgId?: string; spaceId?: string; creatorUserId?: string },
-): Promise<ReturnType<typeof publicWorkspace>> {
-  return withTx(async (tx) => {
-    const t = nowMs();
-    const last = await tx
-      .select({ s: wpnWorkspaces.sort_index })
-      .from(wpnWorkspaces)
-      .where(eq(wpnWorkspaces.userId, userId))
-      .orderBy(desc(wpnWorkspaces.sort_index))
-      .limit(1);
-    const maxSort = last[0]?.s ?? -1;
-    const id = newId();
-    const row = {
-      id,
-      userId,
-      orgId: scope?.orgId ?? null,
-      spaceId: scope?.spaceId ?? null,
-      visibility: "public",
-      creatorUserId: scope?.creatorUserId ?? userId,
-      name: name.trim() || "Workspace",
-      sort_index: maxSort + 1,
-      color_token: null,
-      created_at_ms: t,
-      updated_at_ms: t,
-      settings: {} as unknown,
-    };
-    await tx.insert(wpnWorkspaces).values(row);
-    return publicWorkspace(row as typeof wpnWorkspaces.$inferSelect);
-  });
-}
-
-export async function pgWpnUpdateWorkspace(
-  userId: string,
-  id: string,
-  patch: { name?: string; sort_index?: number; color_token?: string | null },
-): Promise<ReturnType<typeof publicWorkspace> | null> {
-  return withTx(async (tx) => {
-    const cur = await tx
-      .select()
-      .from(wpnWorkspaces)
-      .where(and(eq(wpnWorkspaces.id, id), eq(wpnWorkspaces.userId, userId)))
-      .limit(1);
-    const w = cur[0];
-    if (!w) return null;
-    const name = patch.name !== undefined ? patch.name.trim() || w.name : w.name;
-    const sort_index = patch.sort_index !== undefined ? patch.sort_index : w.sort_index;
-    const color_token = patch.color_token !== undefined ? patch.color_token : w.color_token;
-    const updated_at_ms = nowMs();
-    await tx
-      .update(wpnWorkspaces)
-      .set({ name, sort_index, color_token, updated_at_ms })
-      .where(and(eq(wpnWorkspaces.id, id), eq(wpnWorkspaces.userId, userId)));
-    return publicWorkspace({ ...w, name, sort_index, color_token, updated_at_ms });
-  });
-}
-
-/** Cascade `space_id` across the workspace and every descendant. */
-export async function pgWpnReassignWorkspaceSpace(
-  workspace_id: string,
-  targetSpaceId: string,
-): Promise<ReturnType<typeof publicWorkspace> | null> {
-  return withTx(async (tx) => {
-    const cur = await tx
-      .select()
-      .from(wpnWorkspaces)
-      .where(eq(wpnWorkspaces.id, workspace_id))
-      .limit(1);
-    const w = cur[0];
-    if (!w) return null;
-    const t = nowMs();
-    await tx
-      .update(wpnWorkspaces)
-      .set({ spaceId: targetSpaceId, updated_at_ms: t })
-      .where(eq(wpnWorkspaces.id, workspace_id));
-    const projects = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(eq(wpnProjects.workspace_id, workspace_id));
-    const project_ids = projects.map((p) => p.id);
-    await tx
-      .update(wpnProjects)
-      .set({ spaceId: targetSpaceId, updated_at_ms: t })
-      .where(eq(wpnProjects.workspace_id, workspace_id));
-    if (project_ids.length > 0) {
-      await tx
-        .update(wpnNotes)
-        .set({ spaceId: targetSpaceId })
-        .where(inArray(wpnNotes.project_id, project_ids));
-      await tx
-        .update(wpnExplorerState)
-        .set({ spaceId: targetSpaceId })
-        .where(inArray(wpnExplorerState.project_id, project_ids));
-    }
-    return publicWorkspace({ ...w, spaceId: targetSpaceId, updated_at_ms: t });
-  });
-}
-
-export async function pgWpnDeleteWorkspace(userId: string, id: string): Promise<boolean> {
-  return withTx(async (tx) => {
-    const owned = await tx
-      .select({ id: wpnWorkspaces.id })
-      .from(wpnWorkspaces)
-      .where(and(eq(wpnWorkspaces.id, id), eq(wpnWorkspaces.userId, userId)))
-      .limit(1);
-    if (owned.length === 0) return false;
-    const projects = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.workspace_id, id), eq(wpnProjects.userId, userId)));
-    const project_ids = projects.map((p) => p.id);
-    if (project_ids.length > 0) {
-      await tx.delete(wpnNotes).where(
-        and(eq(wpnNotes.userId, userId), inArray(wpnNotes.project_id, project_ids)),
-      );
-      await tx.delete(wpnExplorerState).where(
-        and(eq(wpnExplorerState.userId, userId), inArray(wpnExplorerState.project_id, project_ids)),
-      );
-    }
-    await tx.delete(wpnProjects).where(
-      and(eq(wpnProjects.userId, userId), eq(wpnProjects.workspace_id, id)),
-    );
-    await tx.delete(wpnWorkspaces).where(
-      and(eq(wpnWorkspaces.id, id), eq(wpnWorkspaces.userId, userId)),
-    );
-    return true;
-  });
-}
-
-export async function pgWpnDeleteWorkspaces(
-  userId: string,
-  ids: string[],
-): Promise<{ deletedWorkspaceIds: string[] }> {
-  if (ids.length === 0) return { deletedWorkspaceIds: [] };
-  return withTx(async (tx) => {
-    const owned = await tx
-      .select({ id: wpnWorkspaces.id })
-      .from(wpnWorkspaces)
-      .where(and(eq(wpnWorkspaces.userId, userId), inArray(wpnWorkspaces.id, ids)));
-    const ownedIds = owned.map((w) => w.id);
-    if (ownedIds.length === 0) return { deletedWorkspaceIds: [] };
-    const projects = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(
-        and(eq(wpnProjects.userId, userId), inArray(wpnProjects.workspace_id, ownedIds)),
-      );
-    const project_ids = projects.map((p) => p.id);
-    if (project_ids.length > 0) {
-      await tx.delete(wpnNotes).where(
-        and(eq(wpnNotes.userId, userId), inArray(wpnNotes.project_id, project_ids)),
-      );
-      await tx.delete(wpnExplorerState).where(
-        and(
-          eq(wpnExplorerState.userId, userId),
-          inArray(wpnExplorerState.project_id, project_ids),
-        ),
-      );
-    }
-    await tx.delete(wpnProjects).where(
-      and(eq(wpnProjects.userId, userId), inArray(wpnProjects.workspace_id, ownedIds)),
-    );
-    await tx.delete(wpnWorkspaces).where(
-      and(eq(wpnWorkspaces.userId, userId), inArray(wpnWorkspaces.id, ownedIds)),
-    );
-    return { deletedWorkspaceIds: ownedIds };
-  });
-}
-
 // ---------- projects ----------
 
 export async function pgWpnCreateProject(
-  userId: string,
-  workspace_id: string,
+  orgId: string,
   name: string,
-  opts?: { creatorUserId?: string },
-): Promise<ReturnType<typeof publicProject> | null> {
+  opts?: { creatorUserId: string; teamId?: string; teamRole?: "owner" | "contributor" | "viewer" },
+): Promise<ReturnType<typeof publicProject>> {
+  const creator = opts?.creatorUserId;
+  if (!creator) throw new Error("creatorUserId required");
   return withTx(async (tx) => {
-    const wsRows = await tx
-      .select()
-      .from(wpnWorkspaces)
-      .where(and(eq(wpnWorkspaces.id, workspace_id), eq(wpnWorkspaces.userId, userId)))
-      .limit(1);
-    const ws = wsRows[0];
-    if (!ws) return null;
     const t = nowMs();
     const last = await tx
-      .select({ s: wpnProjects.sort_index })
-      .from(wpnProjects)
-      .where(
-        and(eq(wpnProjects.userId, userId), eq(wpnProjects.workspace_id, workspace_id)),
-      )
-      .orderBy(desc(wpnProjects.sort_index))
+      .select({ s: projects.sortIndex })
+      .from(projects)
+      .where(eq(projects.orgId, orgId))
+      .orderBy(desc(projects.sortIndex))
       .limit(1);
     const maxSort = last[0]?.s ?? -1;
     const id = newId();
-    const row = {
+    const row: ProjectRow = {
       id,
-      userId,
-      orgId: ws.orgId,
-      spaceId: ws.spaceId,
-      visibility: "public",
-      creatorUserId: opts?.creatorUserId ?? userId,
-      workspace_id,
+      orgId,
+      creatorUserId: creator,
       name: name.trim() || "Project",
-      sort_index: maxSort + 1,
-      color_token: null,
-      created_at_ms: t,
-      updated_at_ms: t,
+      sortIndex: maxSort + 1,
+      colorToken: null,
+      createdAtMs: t,
+      updatedAtMs: t,
       settings: {} as unknown,
     };
-    await tx.insert(wpnProjects).values(row);
-    return publicProject(row as typeof wpnProjects.$inferSelect);
+    await tx.insert(projects).values(row);
+    if (opts?.teamId) {
+      await tx
+        .insert(teamProjects)
+        .values({
+          teamId: opts.teamId,
+          projectId: id,
+          role: opts.teamRole ?? "owner",
+          grantedByUserId: creator,
+          grantedAt: new Date(),
+        })
+        .onConflictDoNothing({
+          target: [teamProjects.teamId, teamProjects.projectId],
+        });
+    }
+    return publicProject(row);
   });
 }
 
 export async function pgWpnUpdateProject(
-  userId: string,
   id: string,
-  patch: {
-    name?: string;
-    sort_index?: number;
-    color_token?: string | null;
-    workspace_id?: string;
-  },
+  patch: { name?: string; sortIndex?: number; colorToken?: string | null },
 ): Promise<ReturnType<typeof publicProject> | null> {
   return withTx(async (tx) => {
-    const curRows = await tx
-      .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, id), eq(wpnProjects.userId, userId)))
-      .limit(1);
-    const cur = curRows[0];
-    if (!cur) return null;
-    if (patch.workspace_id !== undefined) {
-      const ws = await tx
-        .select({ id: wpnWorkspaces.id })
-        .from(wpnWorkspaces)
-        .where(
-          and(
-            eq(wpnWorkspaces.id, patch.workspace_id),
-            eq(wpnWorkspaces.userId, userId),
-          ),
-        )
-        .limit(1);
-      if (ws.length === 0) return null;
-    }
-    const name = patch.name !== undefined ? patch.name.trim() || cur.name : cur.name;
-    const sort_index = patch.sort_index !== undefined ? patch.sort_index : cur.sort_index;
-    const color_token =
-      patch.color_token !== undefined ? patch.color_token : cur.color_token;
-    const workspace_id =
-      patch.workspace_id !== undefined ? patch.workspace_id : cur.workspace_id;
-    const updated_at_ms = nowMs();
+    const cur = await tx.select().from(projects).where(eq(projects.id, id)).limit(1);
+    const p = cur[0];
+    if (!p) return null;
+    const name = patch.name !== undefined ? patch.name.trim() || p.name : p.name;
+    const sortIndex = patch.sortIndex !== undefined ? patch.sortIndex : p.sortIndex;
+    const colorToken =
+      patch.colorToken !== undefined ? patch.colorToken : p.colorToken;
+    const updatedAtMs = nowMs();
     await tx
-      .update(wpnProjects)
-      .set({ name, sort_index, color_token, workspace_id, updated_at_ms })
-      .where(and(eq(wpnProjects.id, id), eq(wpnProjects.userId, userId)));
-    return publicProject({ ...cur, name, sort_index, color_token, workspace_id, updated_at_ms });
+      .update(projects)
+      .set({ name, sortIndex, colorToken, updatedAtMs })
+      .where(eq(projects.id, id));
+    return publicProject({ ...p, name, sortIndex, colorToken, updatedAtMs });
+  });
+}
+
+/**
+ * Delete a project. FK CASCADE handles notes / explorer_state /
+ * team_projects / mdx_state_* / yjs_state cleanup.
+ */
+export async function pgWpnDeleteProject(id: string): Promise<boolean> {
+  return withTx(async (tx) => {
+    const result = await tx
+      .delete(projects)
+      .where(eq(projects.id, id))
+      .returning({ id: projects.id });
+    return result.length > 0;
   });
 }
 
 export async function pgWpnDeleteProjects(
-  userId: string,
   ids: string[],
 ): Promise<{ deletedProjectIds: string[] }> {
   if (ids.length === 0) return { deletedProjectIds: [] };
   return withTx(async (tx) => {
-    const owned = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.userId, userId), inArray(wpnProjects.id, ids)));
-    const ownedIds = owned.map((p) => p.id);
-    if (ownedIds.length === 0) return { deletedProjectIds: [] };
-    await tx.delete(wpnNotes).where(
-      and(eq(wpnNotes.userId, userId), inArray(wpnNotes.project_id, ownedIds)),
-    );
-    await tx.delete(wpnExplorerState).where(
-      and(
-        eq(wpnExplorerState.userId, userId),
-        inArray(wpnExplorerState.project_id, ownedIds),
-      ),
-    );
-    await tx.delete(wpnProjects).where(
-      and(eq(wpnProjects.userId, userId), inArray(wpnProjects.id, ownedIds)),
-    );
-    return { deletedProjectIds: ownedIds };
+    const deleted = await tx
+      .delete(projects)
+      .where(inArray(projects.id, ids))
+      .returning({ id: projects.id });
+    return { deletedProjectIds: deleted.map((r) => r.id) };
   });
 }
 
-export async function pgWpnDeleteProject(userId: string, id: string): Promise<boolean> {
-  return withTx(async (tx) => {
-    const p = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, id), eq(wpnProjects.userId, userId)))
-      .limit(1);
-    if (p.length === 0) return false;
-    await tx.delete(wpnNotes).where(
-      and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, id)),
-    );
-    await tx.delete(wpnExplorerState).where(
-      and(eq(wpnExplorerState.userId, userId), eq(wpnExplorerState.project_id, id)),
-    );
-    await tx.delete(wpnProjects).where(
-      and(eq(wpnProjects.id, id), eq(wpnProjects.userId, userId)),
-    );
-    return true;
-  });
+export async function pgWpnGetProjectSettings(
+  id: string,
+): Promise<Record<string, unknown> | null> {
+  const rows = await getDb()
+    .select({ settings: projects.settings })
+    .from(projects)
+    .where(eq(projects.id, id))
+    .limit(1);
+  const s = rows[0]?.settings;
+  if (!s || typeof s !== "object" || Array.isArray(s)) return null;
+  return s as Record<string, unknown>;
+}
+
+export async function pgWpnPatchProjectSettings(
+  id: string,
+  settings: Record<string, unknown>,
+): Promise<boolean> {
+  const result = await getDb()
+    .update(projects)
+    .set({ settings, updatedAtMs: nowMs() })
+    .where(eq(projects.id, id))
+    .returning({ id: projects.id });
+  return result.length > 0;
 }
 
 // ---------- notes ----------
 
 export async function pgWpnCreateNote(
-  userId: string,
-  project_id: string,
+  projectId: string,
   payload: {
     anchorId?: string;
     relation: "child" | "sibling" | "root";
@@ -600,53 +360,53 @@ export async function pgWpnCreateNote(
     title?: string;
     metadata?: Record<string, unknown>;
   },
-  authorship?: { editorUserId?: string },
+  authorship: { editorUserId: string },
 ): Promise<{ id: string }> {
+  const editorId = authorship.editorUserId;
   const result = await withTx(async (tx) => {
     const projRows = await tx
       .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)))
+      .from(projects)
+      .where(eq(projects.id, projectId))
       .limit(1);
     const project = projRows[0];
     if (!project) throw new Error("Project not found");
 
     const rawRows = (await tx
       .select()
-      .from(wpnNotes)
-      .where(and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, project_id)))) as NoteRow[];
+      .from(notes)
+      .where(eq(notes.projectId, projectId))) as NoteRow[];
     const id = newId();
     const t = nowMs();
     const title = (payload.title ?? "").trim() || "Untitled";
     const content = payload.content ?? "";
     const metadata =
-      payload.metadata && Object.keys(payload.metadata).length > 0 ? payload.metadata : null;
+      payload.metadata && Object.keys(payload.metadata).length > 0
+        ? payload.metadata
+        : null;
     const type = normalizeNoteType(payload.type);
-    const editorId = authorship?.editorUserId ?? userId;
-    const baseRow = {
+    const baseRow: Omit<NoteRow, "parentId" | "siblingIndex"> = {
       id,
-      userId,
       orgId: project.orgId,
-      spaceId: project.spaceId,
-      created_by_user_id: editorId,
-      updated_by_user_id: editorId,
-      project_id,
+      projectId,
+      createdByUserId: editorId,
+      updatedByUserId: editorId,
       type,
       title,
       content,
       metadata: metadata as unknown,
-      created_at_ms: t,
-      updated_at_ms: t,
-      deleted: null as boolean | null,
+      createdAtMs: t,
+      updatedAtMs: t,
+      deleted: null,
     };
 
     if (payload.relation === "root") {
-      const roots = rawRows.filter((r) => r.parent_id === null && r.deleted !== true);
-      const sibling_index =
-        roots.length === 0 ? 0 : Math.max(...roots.map((r) => r.sibling_index)) + 1;
-      await tx.insert(wpnNotes).values({ ...baseRow, parent_id: null, sibling_index });
+      const roots = rawRows.filter((r) => r.parentId === null && r.deleted !== true);
+      const siblingIndex =
+        roots.length === 0 ? 0 : Math.max(...roots.map((r) => r.siblingIndex)) + 1;
+      await tx.insert(notes).values({ ...baseRow, parentId: null, siblingIndex });
       await reconcileNoteEdges(tx, id, content);
-      return { id };
+      return { id, orgId: project.orgId };
     }
 
     if (!payload.anchorId) throw new Error("anchorId required for child/sibling");
@@ -655,22 +415,22 @@ export async function pgWpnCreateNote(
 
     if (payload.relation === "child") {
       const kids = rawRows.filter(
-        (r) => r.parent_id === anchor.id && r.deleted !== true,
+        (r) => r.parentId === anchor.id && r.deleted !== true,
       );
-      const sibling_index =
-        kids.length === 0 ? 0 : Math.max(...kids.map((r) => r.sibling_index)) + 1;
+      const siblingIndex =
+        kids.length === 0 ? 0 : Math.max(...kids.map((r) => r.siblingIndex)) + 1;
       await tx
-        .insert(wpnNotes)
-        .values({ ...baseRow, parent_id: anchor.id, sibling_index });
+        .insert(notes)
+        .values({ ...baseRow, parentId: anchor.id, siblingIndex });
       await reconcileNoteEdges(tx, id, content);
-      return { id };
+      return { id, orgId: project.orgId };
     }
 
-    // sibling
-    const parent_id = anchor.parent_id;
+    // sibling: insert after anchor among its parent's children, renumber.
+    const parentId = anchor.parentId;
     const sibs = rawRows
-      .filter((r) => r.parent_id === parent_id && r.deleted !== true)
-      .sort((a, b) => a.sibling_index - b.sibling_index);
+      .filter((r) => r.parentId === parentId && r.deleted !== true)
+      .sort((a, b) => a.siblingIndex - b.siblingIndex);
     const ai = sibs.findIndex((x) => x.id === payload.anchorId);
     if (ai < 0) throw new Error("Invalid anchor");
     const orderedIds = [
@@ -678,41 +438,34 @@ export async function pgWpnCreateNote(
       id,
       ...sibs.slice(ai + 1).map((r) => r.id),
     ];
-    await tx.insert(wpnNotes).values({ ...baseRow, parent_id, sibling_index: 0 });
+    await tx.insert(notes).values({ ...baseRow, parentId, siblingIndex: 0 });
     for (let i = 0; i < orderedIds.length; i++) {
       await tx
-        .update(wpnNotes)
-        .set({ sibling_index: i, parent_id, updated_at_ms: t })
-        .where(
-          and(
-            eq(wpnNotes.id, orderedIds[i]!),
-            eq(wpnNotes.userId, userId),
-            eq(wpnNotes.project_id, project_id),
-          ),
-        );
+        .update(notes)
+        .set({ siblingIndex: i, parentId, updatedAtMs: t })
+        .where(and(eq(notes.id, orderedIds[i]!), eq(notes.projectId, projectId)));
     }
     await reconcileNoteEdges(tx, id, content);
-    return { id };
+    return { id, orgId: project.orgId };
   });
-  // Best-effort fanout — failures are logged inside notifyRealtime, never thrown.
+  // Best-effort fanout — failures are swallowed.
   try {
     const after = await getDb()
       .select({
-        id: wpnNotes.id,
-        spaceId: wpnNotes.spaceId,
-        parentId: wpnNotes.parent_id,
-        title: wpnNotes.title,
-        type: wpnNotes.type,
-        siblingIndex: wpnNotes.sibling_index,
-        createdByUserId: wpnNotes.created_by_user_id,
-        projectId: wpnNotes.project_id,
+        id: notes.id,
+        parentId: notes.parentId,
+        title: notes.title,
+        type: notes.type,
+        siblingIndex: notes.siblingIndex,
+        createdByUserId: notes.createdByUserId,
+        projectId: notes.projectId,
       })
-      .from(wpnNotes)
-      .where(eq(wpnNotes.id, result.id))
+      .from(notes)
+      .where(eq(notes.id, result.id))
       .limit(1);
     const row = after[0];
-    if (row?.spaceId) {
-      await notifyRealtime(row.spaceId, {
+    if (row) {
+      await notifyRealtime(result.orgId, {
         type: "note.created",
         noteId: row.id,
         projectId: row.projectId,
@@ -720,27 +473,17 @@ export async function pgWpnCreateNote(
         title: row.title,
         noteType: row.type,
         siblingIndex: row.siblingIndex,
-        createdByUserId: row.createdByUserId ?? userId,
+        createdByUserId: row.createdByUserId ?? editorId,
         emittedAt: new Date().toISOString(),
       });
     }
   } catch {
     /* fanout failures must not surface to the writer */
   }
-  return result;
+  return { id: result.id };
 }
 
-export async function pgWpnUpdateNote(
-  userId: string,
-  noteId: string,
-  patch: {
-    title?: string;
-    content?: string;
-    metadata?: Record<string, unknown> | null;
-    type?: string;
-  },
-  authorship?: { editorUserId?: string },
-): Promise<{
+export type WpnUpdateNotePublic = {
   id: string;
   project_id: string;
   parent_id: string | null;
@@ -751,36 +494,36 @@ export async function pgWpnUpdateNote(
   sibling_index: number;
   created_at_ms: number;
   updated_at_ms: number;
-} | null> {
-  let renamed: { spaceId: string | null; oldTitle: string; newTitle: string; projectId: string } | null = null;
-  let edgeDiff: { spaceId: string | null; diff: { added: string[]; removed: string[] } } | null = null;
+};
+
+export type WpnUpdateNoteRename = {
+  orgId: string;
+  projectId: string;
+  oldTitle: string;
+  newTitle: string;
+};
+
+export async function pgWpnUpdateNote(
+  noteId: string,
+  patch: {
+    title?: string;
+    content?: string;
+    metadata?: Record<string, unknown> | null;
+    type?: string;
+  },
+  authorship: { editorUserId: string },
+): Promise<{ note: WpnUpdateNotePublic; rename: WpnUpdateNoteRename | null } | null> {
+  const editorId = authorship.editorUserId;
+  let renamed: { orgId: string; oldTitle: string; newTitle: string; projectId: string } | null = null;
+  let edgeDiff: { orgId: string; diff: { added: string[]; removed: string[] } } | null = null;
   const result = await withTx(async (tx) => {
     const nRows = await tx
       .select()
-      .from(wpnNotes)
-      .where(
-        and(
-          eq(wpnNotes.id, noteId),
-          eq(wpnNotes.userId, userId),
-          sql`${wpnNotes.deleted} IS NOT TRUE`,
-        ),
-      )
+      .from(notes)
+      .where(and(eq(notes.id, noteId), sql`${notes.deleted} IS NOT TRUE`))
       .limit(1);
     const n = nRows[0] as NoteRow | undefined;
     if (!n) return null;
-    const pRows = await tx
-      .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, n.project_id), eq(wpnProjects.userId, userId)))
-      .limit(1);
-    const p = pRows[0];
-    if (!p) return null;
-    const wsRows = await tx
-      .select({ id: wpnWorkspaces.id })
-      .from(wpnWorkspaces)
-      .where(and(eq(wpnWorkspaces.id, p.workspace_id), eq(wpnWorkspaces.userId, userId)))
-      .limit(1);
-    if (wsRows.length === 0) return null;
 
     const title = patch.title !== undefined ? patch.title.trim() || n.title : n.title;
     const content = patch.content !== undefined ? patch.content : n.content;
@@ -792,138 +535,226 @@ export async function pgWpnUpdateNote(
     }
     if (patch.title !== undefined && title !== n.title) {
       const clash = await tx
-        .select({ id: wpnNotes.id })
-        .from(wpnNotes)
+        .select({ id: notes.id })
+        .from(notes)
         .where(
           and(
-            eq(wpnNotes.userId, userId),
-            eq(wpnNotes.project_id, n.project_id),
-            n.parent_id === null
-              ? sql`${wpnNotes.parent_id} IS NULL`
-              : eq(wpnNotes.parent_id, n.parent_id),
-            eq(wpnNotes.title, title),
-            sql`${wpnNotes.id} <> ${noteId}`,
-            sql`${wpnNotes.deleted} IS NOT TRUE`,
+            eq(notes.projectId, n.projectId),
+            n.parentId === null
+              ? sql`${notes.parentId} IS NULL`
+              : eq(notes.parentId, n.parentId),
+            eq(notes.title, title),
+            sql`${notes.id} <> ${noteId}`,
+            sql`${notes.deleted} IS NOT TRUE`,
           ),
         )
         .limit(1);
       if (clash.length > 0) throw new WpnDuplicateSiblingTitleError();
     }
-    const updated_at_ms = nowMs();
-    const setFields: Record<string, unknown> = {
-      title,
-      content,
-      type,
-      metadata,
-      updated_at_ms,
-    };
-    if (authorship?.editorUserId) setFields.updated_by_user_id = authorship.editorUserId;
+    const updatedAtMs = nowMs();
     await tx
-      .update(wpnNotes)
-      .set(setFields)
-      .where(and(eq(wpnNotes.id, noteId), eq(wpnNotes.userId, userId)));
+      .update(notes)
+      .set({
+        title,
+        content,
+        type,
+        metadata,
+        updatedAtMs,
+        updatedByUserId: editorId,
+      })
+      .where(eq(notes.id, noteId));
 
     if (patch.content !== undefined) {
       const diff = await reconcileNoteEdges(tx, noteId, content);
-      edgeDiff = { spaceId: n.spaceId, diff };
+      edgeDiff = { orgId: n.orgId, diff };
     }
-
     if (patch.title !== undefined && title !== n.title) {
       renamed = {
-        spaceId: n.spaceId,
+        orgId: n.orgId,
         oldTitle: n.title,
         newTitle: title,
-        projectId: n.project_id,
+        projectId: n.projectId,
       };
     }
 
     return {
       id: n.id,
-      project_id: n.project_id,
-      parent_id: n.parent_id,
+      project_id: n.projectId,
+      parent_id: n.parentId,
       type,
       title,
       content,
       metadata: metadata ?? undefined,
-      sibling_index: n.sibling_index,
-      created_at_ms: n.created_at_ms,
-      updated_at_ms: updated_at_ms,
+      sibling_index: n.siblingIndex,
+      created_at_ms: n.createdAtMs,
+      updated_at_ms: updatedAtMs,
     };
   });
-  if (renamed && (renamed as { spaceId: string | null }).spaceId) {
+  if (renamed) {
+    const r = renamed as { orgId: string; oldTitle: string; newTitle: string; projectId: string };
     try {
-      await notifyRealtime((renamed as { spaceId: string }).spaceId, {
+      await notifyRealtime(r.orgId, {
         type: "note.renamed",
         noteId,
-        projectId: (renamed as { projectId: string }).projectId,
-        oldTitle: (renamed as { oldTitle: string }).oldTitle,
-        newTitle: (renamed as { newTitle: string }).newTitle,
-        byUserId: userId,
+        projectId: r.projectId,
+        oldTitle: r.oldTitle,
+        newTitle: r.newTitle,
+        byUserId: editorId,
         emittedAt: new Date().toISOString(),
       });
     } catch {
-      /* fanout failures must not surface to the writer */
+      /* swallow */
     }
   }
   if (edgeDiff) {
-    await emitEdgeDiff(
-      (edgeDiff as { spaceId: string | null }).spaceId,
-      noteId,
-      userId,
-      (edgeDiff as { diff: { added: string[]; removed: string[] } }).diff,
-    );
+    const e = edgeDiff as { orgId: string; diff: { added: string[]; removed: string[] } };
+    await emitEdgeDiff(e.orgId, noteId, editorId, e.diff);
   }
-  return result;
+  if (!result) return null;
+  return { note: result, rename: renamed };
 }
 
-export async function pgWpnDeleteNotes(userId: string, ids: string[]): Promise<void> {
+/**
+ * Apply VFS link rewrites across the renamed note's org after a title change.
+ *
+ * Scope: every non-deleted note in projects belonging to `orgId`. Org-wide
+ * (not editor-scoped) — links to the renamed note from any project in the
+ * same org should resolve to the new title, regardless of whether the editor
+ * happens to have read access to those other projects.
+ *
+ * Excludes the renamed note itself (its title is already current). Each
+ * changed note bumps `updated_at_ms` and refreshes its `note_edges` so the
+ * graph stays consistent with the new content. Failures on individual rows
+ * log and continue — partial cascades are recoverable by re-running.
+ */
+export async function pgWpnApplyVfsRewriteForRename(args: {
+  orgId: string;
+  projectId: string;
+  projectName: string;
+  oldTitle: string;
+  newTitle: string;
+  editorUserId: string;
+  excludeNoteId: string;
+}): Promise<{ updatedNoteIds: string[] }> {
+  const paths = vfsCanonicalPathsForTitleChange(
+    { project_name: args.projectName },
+    args.oldTitle,
+    args.newTitle,
+  );
+  if (!paths) return { updatedNoteIds: [] };
+  const oldSeg = normalizeVfsSegment(args.oldTitle, "Untitled");
+  const newSeg = normalizeVfsSegment(args.newTitle, "Untitled");
+
+  // Pull every candidate row in one query. Org scope: filter by joining
+  // notes → projects on org_id rather than relying on an editor-bound list.
+  const rows = await getDb()
+    .select({
+      id: notes.id,
+      projectId: notes.projectId,
+      content: notes.content,
+    })
+    .from(notes)
+    .innerJoin(projects, eq(projects.id, notes.projectId))
+    .where(
+      and(
+        eq(projects.orgId, args.orgId),
+        sql`${notes.deleted} IS NOT TRUE`,
+        sql`${notes.id} <> ${args.excludeNoteId}`,
+      ),
+    );
+
+  const updatedNoteIds: string[] = [];
+  const t = nowMs();
+  for (const row of rows) {
+    const c0 = row.content ?? "";
+    const c1 = rewriteMarkdownForWpnNoteTitleChange(
+      c0,
+      row.projectId,
+      args.projectId,
+      paths.oldCanonical,
+      paths.newCanonical,
+      oldSeg,
+      newSeg,
+    );
+    if (c1 === c0) continue;
+    try {
+      await withTx(async (tx) => {
+        await tx
+          .update(notes)
+          .set({
+            content: c1,
+            updatedAtMs: t,
+            updatedByUserId: args.editorUserId,
+          })
+          .where(eq(notes.id, row.id));
+        const diff = await reconcileNoteEdges(tx, row.id, c1);
+        if (diff.added.length > 0 || diff.removed.length > 0) {
+          // Edge fanout best-effort — same swallow policy as pgWpnUpdateNote.
+          try {
+            await emitEdgeDiff(args.orgId, row.id, args.editorUserId, diff);
+          } catch {
+            /* swallow */
+          }
+        }
+      });
+      updatedNoteIds.push(row.id);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[wpn-pg-writes] rewrite cascade failed on note ${row.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+  return { updatedNoteIds };
+}
+
+export async function pgWpnDeleteNotes(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const unique = [...new Set(ids)];
   // Capture pre-delete metadata for the fanout — once the rows are gone we
-  // can't reconstruct projectId/spaceId.
+  // can't reconstruct projectId/orgId.
   const preDelete = await getDb()
     .select({
-      id: wpnNotes.id,
-      spaceId: wpnNotes.spaceId,
-      projectId: wpnNotes.project_id,
+      id: notes.id,
+      orgId: notes.orgId,
+      projectId: notes.projectId,
+      updatedByUserId: notes.updatedByUserId,
     })
-    .from(wpnNotes)
-    .where(and(eq(wpnNotes.userId, userId), inArray(wpnNotes.id, unique)));
+    .from(notes)
+    .where(inArray(notes.id, unique));
   await withTx(async (tx) => {
-    // FK ON DELETE CASCADE on note_edges handles edge cleanup automatically.
-    await tx.delete(wpnNotes).where(
-      and(eq(wpnNotes.userId, userId), inArray(wpnNotes.id, unique)),
-    );
+    // FK ON DELETE CASCADE on note_edges + yjs_state handles cleanup.
+    await tx.delete(notes).where(inArray(notes.id, unique));
   });
   for (const row of preDelete) {
-    if (!row.spaceId) continue;
     try {
-      await notifyRealtime(row.spaceId, {
+      await notifyRealtime(row.orgId, {
         type: "note.deleted",
         noteId: row.id,
         projectId: row.projectId,
-        byUserId: userId,
+        byUserId: row.updatedByUserId ?? "",
         emittedAt: new Date().toISOString(),
       });
     } catch {
-      /* fanout failures must not surface to the writer */
+      /* swallow */
     }
   }
 }
 
 export async function pgWpnMoveNote(
-  userId: string,
-  project_id: string,
+  projectId: string,
   draggedId: string,
   targetId: string,
   placement: NoteMovePlacement,
+  authorship: { editorUserId: string },
 ): Promise<void> {
+  const editorId = authorship.editorUserId;
   let beforeState: { fromParentId: string | null; fromSiblingIndex: number } | null = null;
   await withTx(async (tx) => {
     const beforeRows = await tx
-      .select({ pid: wpnNotes.parent_id, si: wpnNotes.sibling_index })
-      .from(wpnNotes)
-      .where(and(eq(wpnNotes.id, draggedId), eq(wpnNotes.userId, userId)))
+      .select({ pid: notes.parentId, si: notes.siblingIndex })
+      .from(notes)
+      .where(eq(notes.id, draggedId))
       .limit(1);
     if (beforeRows[0]) {
       beforeState = {
@@ -932,256 +763,81 @@ export async function pgWpnMoveNote(
       };
     }
     const projRows = await tx
-      .select({ id: wpnProjects.id })
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)))
+      .select({ id: projects.id })
+      .from(projects)
+      .where(eq(projects.id, projectId))
       .limit(1);
     if (projRows.length === 0) throw new Error("Project not found");
     const rawRows = (await tx
       .select()
-      .from(wpnNotes)
-      .where(
-        and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, project_id)),
-      )) as NoteRow[];
+      .from(notes)
+      .where(eq(notes.projectId, projectId))) as NoteRow[];
     const lites = toRowLite(rawRows.filter((r) => r.deleted !== true));
     const childMap = wpnComputeChildMapAfterMove(lites, draggedId, targetId, placement);
     const t = nowMs();
-    const walk = async (parent_id: string | null, ids: string[]): Promise<void> => {
+    const walk = async (parentId: string | null, ids: string[]): Promise<void> => {
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i]!;
         await tx
-          .update(wpnNotes)
-          .set({ parent_id, sibling_index: i, updated_at_ms: t })
-          .where(
-            and(
-              eq(wpnNotes.id, id),
-              eq(wpnNotes.userId, userId),
-              eq(wpnNotes.project_id, project_id),
-            ),
-          );
+          .update(notes)
+          .set({ parentId, siblingIndex: i, updatedAtMs: t })
+          .where(and(eq(notes.id, id), eq(notes.projectId, projectId)));
         await walk(id, childMap.get(id) ?? []);
       }
     };
     await walk(null, childMap.get(null) ?? []);
   });
   if (beforeState) {
+    const b = beforeState as { fromParentId: string | null; fromSiblingIndex: number };
     try {
       const after = await getDb()
         .select({
-          pid: wpnNotes.parent_id,
-          si: wpnNotes.sibling_index,
-          spaceId: wpnNotes.spaceId,
+          pid: notes.parentId,
+          si: notes.siblingIndex,
+          orgId: notes.orgId,
         })
-        .from(wpnNotes)
-        .where(eq(wpnNotes.id, draggedId))
+        .from(notes)
+        .where(eq(notes.id, draggedId))
         .limit(1);
       const a = after[0];
-      if (a?.spaceId) {
-        await notifyRealtime(a.spaceId, {
+      if (a) {
+        await notifyRealtime(a.orgId, {
           type: "note.moved",
           noteId: draggedId,
-          projectId: project_id,
-          fromParentId: (beforeState as { fromParentId: string | null }).fromParentId,
+          projectId,
+          fromParentId: b.fromParentId,
           toParentId: a.pid,
-          fromSiblingIndex: (beforeState as { fromSiblingIndex: number }).fromSiblingIndex,
+          fromSiblingIndex: b.fromSiblingIndex,
           toSiblingIndex: a.si,
-          byUserId: userId,
+          byUserId: editorId,
           emittedAt: new Date().toISOString(),
         });
       }
     } catch {
-      /* fanout failures must not surface to the writer */
-    }
-  }
-}
-
-export async function pgWpnMoveNoteToProject(
-  userId: string,
-  sourceNoteId: string,
-  targetProjectId: string,
-  targetParentId: string | null,
-): Promise<void> {
-  let moveBefore: {
-    fromParentId: string | null;
-    fromSiblingIndex: number;
-    fromProjectId: string;
-  } | null = null;
-  await withTx(async (tx) => {
-    const srcRows = await tx
-      .select()
-      .from(wpnNotes)
-      .where(and(eq(wpnNotes.id, sourceNoteId), eq(wpnNotes.userId, userId)))
-      .limit(1);
-    const source = srcRows[0] as NoteRow | undefined;
-    if (!source || source.deleted === true) throw new Error("Note not found");
-    const sourceProjectId = source.project_id;
-    moveBefore = {
-      fromParentId: source.parent_id,
-      fromSiblingIndex: source.sibling_index,
-      fromProjectId: sourceProjectId,
-    };
-    if (
-      sourceProjectId === targetProjectId &&
-      (source.parent_id ?? null) === (targetParentId ?? null)
-    ) {
-      return; // no-op
-    }
-    const targetProjRows = await tx
-      .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, targetProjectId), eq(wpnProjects.userId, userId)))
-      .limit(1);
-    const targetProject = targetProjRows[0];
-    if (!targetProject) throw new Error("Target project not found");
-    if (targetParentId) {
-      const parentRows = await tx
-        .select({ id: wpnNotes.id, deleted: wpnNotes.deleted })
-        .from(wpnNotes)
-        .where(
-          and(
-            eq(wpnNotes.id, targetParentId),
-            eq(wpnNotes.userId, userId),
-            eq(wpnNotes.project_id, targetProjectId),
-          ),
-        )
-        .limit(1);
-      const parent = parentRows[0];
-      if (!parent || parent.deleted === true) {
-        throw new Error("Target parent note not found in target project");
-      }
-    }
-
-    const sourceRows = (await tx
-      .select()
-      .from(wpnNotes)
-      .where(
-        and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, sourceProjectId)),
-      )) as NoteRow[];
-    const subtreeIds = collectSubtreePreorder(
-      sourceRows.filter((r) => r.deleted !== true),
-      sourceNoteId,
-    );
-
-    if (
-      sourceProjectId === targetProjectId &&
-      targetParentId &&
-      subtreeIds.includes(targetParentId)
-    ) {
-      throw new Error("Cannot move a note into its own descendant");
-    }
-
-    const targetSiblings = await tx
-      .select({ sibling_index: wpnNotes.sibling_index })
-      .from(wpnNotes)
-      .where(
-        and(
-          eq(wpnNotes.userId, userId),
-          eq(wpnNotes.project_id, targetProjectId),
-          targetParentId === null
-            ? sql`${wpnNotes.parent_id} IS NULL`
-            : eq(wpnNotes.parent_id, targetParentId),
-          sql`${wpnNotes.deleted} IS NOT TRUE`,
-        ),
-      );
-    const maxIdx = targetSiblings.reduce(
-      (m, r) => (r.sibling_index > m ? r.sibling_index : m),
-      -1,
-    );
-    const newRootIdx = maxIdx + 1;
-    const t = nowMs();
-
-    await tx
-      .update(wpnNotes)
-      .set({
-        project_id: targetProjectId,
-        orgId: targetProject.orgId,
-        spaceId: targetProject.spaceId,
-        updated_at_ms: t,
-      })
-      .where(and(eq(wpnNotes.userId, userId), inArray(wpnNotes.id, subtreeIds)));
-
-    await tx
-      .update(wpnNotes)
-      .set({ parent_id: targetParentId, sibling_index: newRootIdx, updated_at_ms: t })
-      .where(and(eq(wpnNotes.userId, userId), eq(wpnNotes.id, sourceNoteId)));
-
-    // Reindex source-side siblings (root has been moved out).
-    const sourceParent = source.parent_id;
-    const sourceSiblings = await tx
-      .select({ id: wpnNotes.id, sibling_index: wpnNotes.sibling_index })
-      .from(wpnNotes)
-      .where(
-        and(
-          eq(wpnNotes.userId, userId),
-          eq(wpnNotes.project_id, sourceProjectId),
-          sourceParent === null
-            ? sql`${wpnNotes.parent_id} IS NULL`
-            : eq(wpnNotes.parent_id, sourceParent),
-          sql`${wpnNotes.deleted} IS NOT TRUE`,
-        ),
-      )
-      .orderBy(asc(wpnNotes.sibling_index));
-    for (let i = 0; i < sourceSiblings.length; i++) {
-      const s = sourceSiblings[i]!;
-      if (s.sibling_index !== i) {
-        await tx
-          .update(wpnNotes)
-          .set({ sibling_index: i, updated_at_ms: t })
-          .where(and(eq(wpnNotes.id, s.id), eq(wpnNotes.userId, userId)));
-      }
-    }
-  });
-  if (moveBefore) {
-    try {
-      const after = await getDb()
-        .select({
-          pid: wpnNotes.parent_id,
-          si: wpnNotes.sibling_index,
-          spaceId: wpnNotes.spaceId,
-          projectId: wpnNotes.project_id,
-        })
-        .from(wpnNotes)
-        .where(eq(wpnNotes.id, sourceNoteId))
-        .limit(1);
-      const a = after[0];
-      if (a?.spaceId) {
-        await notifyRealtime(a.spaceId, {
-          type: "note.moved",
-          noteId: sourceNoteId,
-          projectId: a.projectId,
-          fromParentId: (moveBefore as { fromParentId: string | null }).fromParentId,
-          toParentId: a.pid,
-          fromSiblingIndex: (moveBefore as { fromSiblingIndex: number }).fromSiblingIndex,
-          toSiblingIndex: a.si,
-          byUserId: userId,
-          emittedAt: new Date().toISOString(),
-        });
-      }
-    } catch {
-      /* fanout failures must not surface to the writer */
+      /* swallow */
     }
   }
 }
 
 export async function pgWpnDuplicateSubtree(
-  userId: string,
-  project_id: string,
+  projectId: string,
   rootNoteId: string,
+  authorship: { editorUserId: string },
 ): Promise<{ newRootId: string }> {
+  const editorId = authorship.editorUserId;
   return withTx(async (tx) => {
     const projRows = await tx
       .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)))
+      .from(projects)
+      .where(eq(projects.id, projectId))
       .limit(1);
     const project = projRows[0];
     if (!project) throw new Error("Project not found");
     const dupOrgId = project.orgId;
-    const dupSpaceId = project.spaceId;
     const rawRows = (await tx
       .select()
-      .from(wpnNotes)
-      .where(and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, project_id)))) as NoteRow[];
+      .from(notes)
+      .where(eq(notes.projectId, projectId))) as NoteRow[];
     const active = rawRows.filter((r) => r.deleted !== true);
     const rowMap = new Map(active.map((r) => [r.id, r]));
     const rootRow = rowMap.get(rootNoteId);
@@ -1191,7 +847,7 @@ export async function pgWpnDuplicateSubtree(
     const idMap = new Map<string, string>();
     for (const oid of ordered) idMap.set(oid, newId());
     const newRootId = idMap.get(rootNoteId)!;
-    const P = rootRow.parent_id;
+    const P = rootRow.parentId;
     const cmBefore = childrenMapFromRows(active);
     const siblingsAtP = (cmBefore.get(P) ?? []).map((r) => r.id);
     const idxAtP = siblingsAtP.indexOf(rootNoteId);
@@ -1205,27 +861,25 @@ export async function pgWpnDuplicateSubtree(
       const r = rowMap.get(oid)!;
       const nid = idMap.get(oid)!;
       const newParent =
-        r.parent_id === null
+        r.parentId === null
           ? null
-          : subtreeIds.has(r.parent_id)
-            ? idMap.get(r.parent_id)!
-            : r.parent_id;
-      await tx.insert(wpnNotes).values({
+          : subtreeIds.has(r.parentId)
+            ? idMap.get(r.parentId)!
+            : r.parentId;
+      await tx.insert(notes).values({
         id: nid,
-        userId,
         orgId: dupOrgId,
-        spaceId: dupSpaceId,
-        created_by_user_id: r.created_by_user_id,
-        updated_by_user_id: r.updated_by_user_id,
-        project_id,
-        parent_id: newParent,
+        projectId,
+        parentId: newParent,
+        createdByUserId: editorId,
+        updatedByUserId: editorId,
         type: r.type,
         title: r.title,
         content: r.content,
         metadata: r.metadata,
-        sibling_index: 0,
-        created_at_ms: t,
-        updated_at_ms: t,
+        siblingIndex: 0,
+        createdAtMs: t,
+        updatedAtMs: t,
         deleted: null,
       });
       await reconcileNoteEdges(tx, nid, r.content);
@@ -1234,15 +888,9 @@ export async function pgWpnDuplicateSubtree(
     for (let i = 0; i < newOrderAtP.length; i++) {
       const nid = newOrderAtP[i]!;
       await tx
-        .update(wpnNotes)
-        .set({ parent_id: P, sibling_index: i, updated_at_ms: t })
-        .where(
-          and(
-            eq(wpnNotes.id, nid),
-            eq(wpnNotes.userId, userId),
-            eq(wpnNotes.project_id, project_id),
-          ),
-        );
+        .update(notes)
+        .set({ parentId: P, siblingIndex: i, updatedAtMs: t })
+        .where(and(eq(notes.id, nid), eq(notes.projectId, projectId)));
     }
 
     for (const oid of ordered) {
@@ -1253,15 +901,9 @@ export async function pgWpnDuplicateSubtree(
       for (let i = 0; i < newKidOrder.length; i++) {
         const nid = newKidOrder[i]!;
         await tx
-          .update(wpnNotes)
-          .set({ parent_id: newPid, sibling_index: i, updated_at_ms: t })
-          .where(
-            and(
-              eq(wpnNotes.id, nid),
-              eq(wpnNotes.userId, userId),
-              eq(wpnNotes.project_id, project_id),
-            ),
-          );
+          .update(notes)
+          .set({ parentId: newPid, siblingIndex: i, updatedAtMs: t })
+          .where(and(eq(notes.id, nid), eq(notes.projectId, projectId)));
       }
     }
 
@@ -1270,77 +912,62 @@ export async function pgWpnDuplicateSubtree(
 }
 
 export async function pgWpnDuplicateProject(
-  userId: string,
   sourceProjectId: string,
-  opts: {
-    targetWorkspaceId: string;
-    newName?: string;
-    creatorUserId: string;
-  },
+  opts: { newName?: string; creatorUserId: string; teamId?: string },
 ): Promise<{ project_id: string; name: string }> {
   return withTx(async (tx) => {
     const srcRows = await tx
       .select()
-      .from(wpnProjects)
-      .where(
-        and(eq(wpnProjects.id, sourceProjectId), eq(wpnProjects.userId, userId)),
-      )
+      .from(projects)
+      .where(eq(projects.id, sourceProjectId))
       .limit(1);
     const srcProject = srcRows[0];
     if (!srcProject) throw new Error("Project not found");
-    const targetWsRows = await tx
-      .select()
-      .from(wpnWorkspaces)
-      .where(
-        and(
-          eq(wpnWorkspaces.id, opts.targetWorkspaceId),
-          eq(wpnWorkspaces.userId, userId),
-        ),
-      )
-      .limit(1);
-    const targetWs = targetWsRows[0];
-    if (!targetWs) throw new Error("Target workspace not found");
     const baseName = (opts.newName ?? "").trim() || srcProject.name;
     const t = nowMs();
     const lastP = await tx
-      .select({ s: wpnProjects.sort_index })
-      .from(wpnProjects)
-      .where(
-        and(
-          eq(wpnProjects.userId, userId),
-          eq(wpnProjects.workspace_id, opts.targetWorkspaceId),
-        ),
-      )
-      .orderBy(desc(wpnProjects.sort_index))
+      .select({ s: projects.sortIndex })
+      .from(projects)
+      .where(eq(projects.orgId, srcProject.orgId))
+      .orderBy(desc(projects.sortIndex))
       .limit(1);
     const maxSort = lastP[0]?.s ?? -1;
     const newProjectId = newId();
-    const newProj = {
+    const newProj: ProjectRow = {
       id: newProjectId,
-      userId,
-      orgId: targetWs.orgId,
-      spaceId: targetWs.spaceId,
-      visibility: srcProject.visibility ?? "public",
+      orgId: srcProject.orgId,
       creatorUserId: opts.creatorUserId,
-      workspace_id: opts.targetWorkspaceId,
       name: baseName,
-      sort_index: maxSort + 1,
-      color_token: srcProject.color_token ?? null,
-      created_at_ms: t,
-      updated_at_ms: t,
+      sortIndex: maxSort + 1,
+      colorToken: srcProject.colorToken ?? null,
+      createdAtMs: t,
+      updatedAtMs: t,
       settings:
         srcProject.settings && typeof srcProject.settings === "object"
           ? { ...(srcProject.settings as Record<string, unknown>) }
           : ({} as Record<string, unknown>),
     };
-    await tx.insert(wpnProjects).values(newProj);
+    await tx.insert(projects).values(newProj);
+
+    if (opts.teamId) {
+      await tx
+        .insert(teamProjects)
+        .values({
+          teamId: opts.teamId,
+          projectId: newProjectId,
+          role: "owner",
+          grantedByUserId: opts.creatorUserId,
+          grantedAt: new Date(),
+        })
+        .onConflictDoNothing({
+          target: [teamProjects.teamId, teamProjects.projectId],
+        });
+    }
 
     const srcNotes = (await tx
       .select()
-      .from(wpnNotes)
-      .where(
-        and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, sourceProjectId)),
-      )) as NoteRow[];
+      .from(notes)
+      .where(eq(notes.projectId, sourceProjectId))) as NoteRow[];
     const active = srcNotes.filter((r) => r.deleted !== true);
     if (active.length === 0) return { project_id: newProjectId, name: baseName };
     const idMap = new Map<string, string>();
@@ -1348,23 +975,21 @@ export async function pgWpnDuplicateProject(
     const editor = opts.creatorUserId;
     for (const n of active) {
       const newNoteId = idMap.get(n.id)!;
-      const newParent = n.parent_id === null ? null : idMap.get(n.parent_id) ?? null;
-      await tx.insert(wpnNotes).values({
+      const newParent = n.parentId === null ? null : idMap.get(n.parentId) ?? null;
+      await tx.insert(notes).values({
         id: newNoteId,
-        userId,
-        orgId: targetWs.orgId,
-        spaceId: targetWs.spaceId,
-        created_by_user_id: editor,
-        updated_by_user_id: editor,
-        project_id: newProjectId,
-        parent_id: newParent,
+        orgId: srcProject.orgId,
+        projectId: newProjectId,
+        parentId: newParent,
+        createdByUserId: editor,
+        updatedByUserId: editor,
         type: n.type,
         title: n.title,
         content: n.content,
         metadata: n.metadata,
-        sibling_index: n.sibling_index,
-        created_at_ms: t,
-        updated_at_ms: t,
+        siblingIndex: n.siblingIndex,
+        createdAtMs: t,
+        updatedAtMs: t,
         deleted: null,
       });
       await reconcileNoteEdges(tx, newNoteId, n.content);
@@ -1374,240 +999,199 @@ export async function pgWpnDuplicateProject(
   });
 }
 
-export async function pgWpnDuplicateWorkspace(
-  userId: string,
-  sourceWorkspaceId: string,
-  opts: {
-    targetSpaceId?: string;
-    newName?: string;
-    creatorUserId: string;
-  },
-): Promise<{
-  workspace_id: string;
-  name: string;
-  projects: { project_id: string; name: string; sourceProjectId: string }[];
-}> {
-  // Outer tx — duplicateProject is invoked sequentially under the same
-  // connection. Drizzle does not support nested transactions out of the box,
-  // so we open one tx and reuse it via savepoints. For simplicity we run the
-  // duplicate-workspace as a single tx that calls into helpers using
-  // withTx-equivalent inline blocks.
-  return withTx(async (tx) => {
+/**
+ * Cross-project move. Reassigns the note (and its subtree) into a target
+ * project, attached as a child of `targetParentId` (or as a root when
+ * `targetParentId` is null). Renumbers siblings on both sides.
+ */
+export async function pgWpnMoveNoteToProject(
+  sourceNoteId: string,
+  targetProjectId: string,
+  targetParentId: string | null,
+  authorship: { editorUserId: string },
+): Promise<void> {
+  const editorId = authorship.editorUserId;
+  let moveBefore: {
+    fromParentId: string | null;
+    fromSiblingIndex: number;
+    fromProjectId: string;
+    fromOrgId: string;
+  } | null = null;
+  let moveAfter: { toOrgId: string; toSiblingIndex: number } | null = null;
+  await withTx(async (tx) => {
     const srcRows = await tx
       .select()
-      .from(wpnWorkspaces)
+      .from(notes)
+      .where(eq(notes.id, sourceNoteId))
+      .limit(1);
+    const source = srcRows[0] as NoteRow | undefined;
+    if (!source || source.deleted === true) throw new Error("Note not found");
+    const sourceProjectId = source.projectId;
+    moveBefore = {
+      fromParentId: source.parentId,
+      fromSiblingIndex: source.siblingIndex,
+      fromProjectId: sourceProjectId,
+      fromOrgId: source.orgId,
+    };
+    if (
+      sourceProjectId === targetProjectId &&
+      (source.parentId ?? null) === (targetParentId ?? null)
+    ) {
+      return;
+    }
+    const targetProjRows = await tx
+      .select()
+      .from(projects)
+      .where(eq(projects.id, targetProjectId))
+      .limit(1);
+    const targetProject = targetProjRows[0];
+    if (!targetProject) throw new Error("Target project not found");
+    if (targetParentId) {
+      const parentRows = await tx
+        .select({ id: notes.id, deleted: notes.deleted })
+        .from(notes)
+        .where(
+          and(
+            eq(notes.id, targetParentId),
+            eq(notes.projectId, targetProjectId),
+          ),
+        )
+        .limit(1);
+      const parent = parentRows[0];
+      if (!parent || parent.deleted === true) {
+        throw new Error("Target parent note not found in target project");
+      }
+    }
+    // Collect the subtree under sourceNoteId.
+    const sourceRows = (await tx
+      .select()
+      .from(notes)
+      .where(eq(notes.projectId, sourceProjectId))) as NoteRow[];
+    const subtreeIds = collectSubtreePreorder(
+      sourceRows.filter((r) => r.deleted !== true),
+      sourceNoteId,
+    );
+    const t = nowMs();
+    // Compute target sibling index (append at end of targetParent's kids).
+    const targetSiblings = await tx
+      .select({ s: notes.siblingIndex })
+      .from(notes)
       .where(
         and(
-          eq(wpnWorkspaces.id, sourceWorkspaceId),
-          eq(wpnWorkspaces.userId, userId),
+          eq(notes.projectId, targetProjectId),
+          targetParentId === null
+            ? sql`${notes.parentId} IS NULL`
+            : eq(notes.parentId, targetParentId),
+          sql`${notes.deleted} IS NOT TRUE`,
         ),
       )
+      .orderBy(desc(notes.siblingIndex))
       .limit(1);
-    const srcWs = srcRows[0];
-    if (!srcWs) throw new Error("Workspace not found");
-    const targetSpaceId = opts.targetSpaceId ?? srcWs.spaceId;
-    const t = nowMs();
-    const lastWs = await tx
-      .select({ s: wpnWorkspaces.sort_index })
-      .from(wpnWorkspaces)
-      .where(eq(wpnWorkspaces.userId, userId))
-      .orderBy(desc(wpnWorkspaces.sort_index))
-      .limit(1);
-    const maxSort = lastWs[0]?.s ?? -1;
-    const newWsId = newId();
-    const baseName = (opts.newName ?? "").trim() || srcWs.name;
-    await tx.insert(wpnWorkspaces).values({
-      id: newWsId,
-      userId,
-      orgId: srcWs.orgId,
-      spaceId: targetSpaceId,
-      visibility: srcWs.visibility ?? "public",
-      creatorUserId: opts.creatorUserId,
-      name: baseName,
-      sort_index: maxSort + 1,
-      color_token: srcWs.color_token ?? null,
-      created_at_ms: t,
-      updated_at_ms: t,
-      settings:
-        srcWs.settings && typeof srcWs.settings === "object"
-          ? { ...(srcWs.settings as Record<string, unknown>) }
-          : ({} as Record<string, unknown>),
-    });
-
-    const srcProjects = await tx
-      .select()
-      .from(wpnProjects)
-      .where(
-        and(eq(wpnProjects.userId, userId), eq(wpnProjects.workspace_id, sourceWorkspaceId)),
-      )
-      .orderBy(asc(wpnProjects.sort_index));
-    const projectMap: { project_id: string; name: string; sourceProjectId: string }[] = [];
-    for (const p of srcProjects) {
-      // Inline duplicate-project with the new workspace id, reusing tx.
-      const tInner = nowMs();
-      const lastP = await tx
-        .select({ s: wpnProjects.sort_index })
-        .from(wpnProjects)
-        .where(
-          and(eq(wpnProjects.userId, userId), eq(wpnProjects.workspace_id, newWsId)),
-        )
-        .orderBy(desc(wpnProjects.sort_index))
-        .limit(1);
-      const maxProjSort = lastP[0]?.s ?? -1;
-      const newProjId = newId();
-      await tx.insert(wpnProjects).values({
-        id: newProjId,
-        userId,
-        orgId: srcWs.orgId,
-        spaceId: targetSpaceId,
-        visibility: p.visibility ?? "public",
-        creatorUserId: opts.creatorUserId,
-        workspace_id: newWsId,
-        name: p.name,
-        sort_index: maxProjSort + 1,
-        color_token: p.color_token ?? null,
-        created_at_ms: tInner,
-        updated_at_ms: tInner,
-        settings:
-          p.settings && typeof p.settings === "object"
-            ? { ...(p.settings as Record<string, unknown>) }
-            : ({} as Record<string, unknown>),
-      });
-      const srcNotes = (await tx
-        .select()
-        .from(wpnNotes)
-        .where(and(eq(wpnNotes.userId, userId), eq(wpnNotes.project_id, p.id)))) as NoteRow[];
-      const active = srcNotes.filter((r) => r.deleted !== true);
-      if (active.length > 0) {
-        const idMap = new Map<string, string>();
-        for (const n of active) idMap.set(n.id, newId());
-        for (const n of active) {
-          const newNoteId = idMap.get(n.id)!;
-          const newParent = n.parent_id === null ? null : idMap.get(n.parent_id) ?? null;
-          await tx.insert(wpnNotes).values({
-            id: newNoteId,
-            userId,
-            orgId: srcWs.orgId,
-            spaceId: targetSpaceId,
-            created_by_user_id: opts.creatorUserId,
-            updated_by_user_id: opts.creatorUserId,
-            project_id: newProjId,
-            parent_id: newParent,
-            type: n.type,
-            title: n.title,
-            content: n.content,
-            metadata: n.metadata,
-            sibling_index: n.sibling_index,
-            created_at_ms: tInner,
-            updated_at_ms: tInner,
-            deleted: null,
-          });
-          await reconcileNoteEdges(tx, newNoteId, n.content);
-        }
-      }
-      projectMap.push({ project_id: newProjId, name: p.name, sourceProjectId: p.id });
+    const newSiblingIndex = (targetSiblings[0]?.s ?? -1) + 1;
+    // Reassign every subtree note to the target project + new orgId.
+    if (subtreeIds.length > 0) {
+      await tx
+        .update(notes)
+        .set({
+          projectId: targetProjectId,
+          orgId: targetProject.orgId,
+          updatedAtMs: t,
+          updatedByUserId: editorId,
+        })
+        .where(inArray(notes.id, subtreeIds));
     }
-    return { workspace_id: newWsId, name: baseName, projects: projectMap };
+    // Reparent the dragged root onto targetParentId at newSiblingIndex.
+    await tx
+      .update(notes)
+      .set({ parentId: targetParentId, siblingIndex: newSiblingIndex })
+      .where(eq(notes.id, sourceNoteId));
+    moveAfter = { toOrgId: targetProject.orgId, toSiblingIndex: newSiblingIndex };
+    // Renumber siblings on the source side (the note left a gap).
+    if (sourceProjectId !== targetProjectId || (source.parentId ?? null) !== (targetParentId ?? null)) {
+      const remaining = await tx
+        .select({ id: notes.id })
+        .from(notes)
+        .where(
+          and(
+            eq(notes.projectId, sourceProjectId),
+            source.parentId === null
+              ? sql`${notes.parentId} IS NULL`
+              : eq(notes.parentId, source.parentId),
+            sql`${notes.deleted} IS NOT TRUE`,
+            sql`${notes.id} <> ${sourceNoteId}`,
+          ),
+        )
+        .orderBy(asc(notes.siblingIndex));
+      for (let i = 0; i < remaining.length; i++) {
+        await tx
+          .update(notes)
+          .set({ siblingIndex: i, updatedAtMs: t })
+          .where(eq(notes.id, remaining[i]!.id));
+      }
+    }
   });
+  // Fanout — emit two events: one on the source channel (with from-coords)
+  // and one on the target channel (with to-coords). Subscribers on either
+  // side stay in sync.
+  if (moveBefore && moveAfter) {
+    const mb = moveBefore as {
+      fromParentId: string | null;
+      fromSiblingIndex: number;
+      fromProjectId: string;
+      fromOrgId: string;
+    };
+    const ma = moveAfter as { toOrgId: string; toSiblingIndex: number };
+    const stamp = new Date().toISOString();
+    try {
+      await notifyRealtime(mb.fromOrgId, {
+        type: "note.moved",
+        noteId: sourceNoteId,
+        projectId: mb.fromProjectId,
+        fromParentId: mb.fromParentId,
+        toParentId: targetParentId,
+        fromSiblingIndex: mb.fromSiblingIndex,
+        toSiblingIndex: ma.toSiblingIndex,
+        byUserId: editorId,
+        emittedAt: stamp,
+      });
+    } catch {
+      /* swallow */
+    }
+    if (ma.toOrgId !== mb.fromOrgId) {
+      try {
+        await notifyRealtime(ma.toOrgId, {
+          type: "note.moved",
+          noteId: sourceNoteId,
+          projectId: targetProjectId,
+          fromParentId: mb.fromParentId,
+          toParentId: targetParentId,
+          fromSiblingIndex: mb.fromSiblingIndex,
+          toSiblingIndex: ma.toSiblingIndex,
+          byUserId: editorId,
+          emittedAt: stamp,
+        });
+      } catch {
+        /* swallow */
+      }
+    }
+  }
 }
 
-// ---------- explorer state + settings ----------
+// ---------- explorer state ----------
 
 export async function pgWpnSetExplorerExpanded(
   userId: string,
-  project_id: string,
-  expanded_idsRaw: string[],
+  projectId: string,
+  expandedIds: string[],
 ): Promise<void> {
-  const expanded = [...new Set(expanded_idsRaw)];
   await getDb()
-    .insert(wpnExplorerState)
-    .values({ userId, project_id, expanded_ids: expanded })
+    .insert(explorerState)
+    .values({ userId, projectId, expandedIds })
     .onConflictDoUpdate({
-      target: [wpnExplorerState.userId, wpnExplorerState.project_id],
-      set: { expanded_ids: expanded },
+      target: [explorerState.userId, explorerState.projectId],
+      set: { expandedIds },
     });
 }
 
-export async function pgWpnGetWorkspaceSettings(
-  userId: string,
-  workspace_id: string,
-): Promise<Record<string, unknown>> {
-  const rows = await getDb()
-    .select({ settings: wpnWorkspaces.settings })
-    .from(wpnWorkspaces)
-    .where(and(eq(wpnWorkspaces.id, workspace_id), eq(wpnWorkspaces.userId, userId)))
-    .limit(1);
-  const s = rows[0]?.settings;
-  return s && typeof s === "object" && !Array.isArray(s)
-    ? { ...(s as Record<string, unknown>) }
-    : {};
-}
-
-export async function pgWpnPatchWorkspaceSettings(
-  userId: string,
-  workspace_id: string,
-  patch: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  return withTx(async (tx) => {
-    const wsRows = await tx
-      .select()
-      .from(wpnWorkspaces)
-      .where(
-        and(eq(wpnWorkspaces.id, workspace_id), eq(wpnWorkspaces.userId, userId)),
-      )
-      .limit(1);
-    if (wsRows.length === 0) throw new Error("Workspace not found");
-    const cur = wsRows[0]!.settings;
-    const curObj =
-      cur && typeof cur === "object" && !Array.isArray(cur)
-        ? (cur as Record<string, unknown>)
-        : {};
-    const next = { ...curObj, ...patch };
-    await tx
-      .update(wpnWorkspaces)
-      .set({ settings: next, updated_at_ms: nowMs() })
-      .where(and(eq(wpnWorkspaces.id, workspace_id), eq(wpnWorkspaces.userId, userId)));
-    return next;
-  });
-}
-
-export async function pgWpnGetProjectSettings(
-  userId: string,
-  project_id: string,
-): Promise<Record<string, unknown>> {
-  const rows = await getDb()
-    .select({ settings: wpnProjects.settings })
-    .from(wpnProjects)
-    .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)))
-    .limit(1);
-  const s = rows[0]?.settings;
-  return s && typeof s === "object" && !Array.isArray(s)
-    ? { ...(s as Record<string, unknown>) }
-    : {};
-}
-
-export async function pgWpnPatchProjectSettings(
-  userId: string,
-  project_id: string,
-  patch: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  return withTx(async (tx) => {
-    const pRows = await tx
-      .select()
-      .from(wpnProjects)
-      .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)))
-      .limit(1);
-    if (pRows.length === 0) throw new Error("Project not found");
-    const cur = pRows[0]!.settings;
-    const curObj =
-      cur && typeof cur === "object" && !Array.isArray(cur)
-        ? (cur as Record<string, unknown>)
-        : {};
-    const next = { ...curObj, ...patch };
-    await tx
-      .update(wpnProjects)
-      .set({ settings: next, updated_at_ms: nowMs() })
-      .where(and(eq(wpnProjects.id, project_id), eq(wpnProjects.userId, userId)));
-    return next;
-  });
-}
+// Suppress unused-import warning for asc (kept for sort hints in future ports).
+void asc;

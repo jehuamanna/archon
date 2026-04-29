@@ -13,7 +13,7 @@ export type DocumentationShellTabState = {
    * (legacy notes or `wpn-docs:…`). Omitted once `noteId` is set. Not encoded in the URL hash (ephemeral).
    */
   bundledResolvingLogicalId?: string;
-  /** Explorer VFS path `Workspace/Project/Title`; resolved to `noteId` in the Documentation hub. */
+  /** Explorer VFS path `Project/Title`; resolved to `noteId` in the Documentation hub. */
   bundledVfsPath?: string;
 };
 

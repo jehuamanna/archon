@@ -6,58 +6,50 @@ import {
   clearImageMetadataKeys,
   deriveAssetFilename,
   ExportBytesCapExceededError,
-  planImportWorkspaces,
+  planImportProjects,
   remapExportBundleIds,
-  type ExportWorkspaceInput,
+  type ExportProjectInput,
   type WpnExportMetadata,
 } from "./export-import-helpers.js";
 
 // ────────────────────────────────────────────────────────────────────────────
-// remapExportBundleIds
+// remapExportBundleIds (v3 — project-rooted bundle)
 // ────────────────────────────────────────────────────────────────────────────
 
 function makeBundle(): WpnExportMetadata {
   return {
-    version: 2,
+    version: 3,
     exported_at_ms: 1_776_000_000_000,
-    workspaces: [
+    projects: [
       {
-        id: "ws-A",
-        name: "Testing",
+        id: "proj-A",
+        name: "Image",
         sort_index: 0,
         color_token: null,
-        projects: [
+        notes: [
           {
-            id: "proj-A",
-            name: "Image",
-            sort_index: 0,
-            color_token: null,
-            notes: [
-              {
-                id: "note-root",
-                parent_id: null,
-                type: "markdown",
-                title: "Root",
-                sibling_index: 0,
-                metadata: null,
-              },
-              {
-                id: "note-child",
-                parent_id: "note-root",
-                type: "image",
-                title: "jehu",
-                sibling_index: 0,
-                metadata: {
-                  metadataVersion: 1,
-                  r2Key: "exporter-org/exporter-space/ws-A/proj-A/note-child",
-                  mimeType: "image/png",
-                  sizeBytes: 35010,
-                  altText: "a photo",
-                },
-                assets: [
-                  { zipPath: "assets/note-child/jehu.png", mimeType: "image/png", sizeBytes: 35010 },
-                ],
-              },
+            id: "note-root",
+            parent_id: null,
+            type: "markdown",
+            title: "Root",
+            sibling_index: 0,
+            metadata: null,
+          },
+          {
+            id: "note-child",
+            parent_id: "note-root",
+            type: "image",
+            title: "jehu",
+            sibling_index: 0,
+            metadata: {
+              metadataVersion: 1,
+              r2Key: "exporter-org/proj-A/note-child",
+              mimeType: "image/png",
+              sizeBytes: 35010,
+              altText: "a photo",
+            },
+            assets: [
+              { zipPath: "assets/note-child/jehu.png", mimeType: "image/png", sizeBytes: 35010 },
             ],
           },
         ],
@@ -67,19 +59,14 @@ function makeBundle(): WpnExportMetadata {
 }
 
 describe("remapExportBundleIds", () => {
-  it("assigns fresh ids to every workspace / project / note and records them", () => {
+  it("assigns fresh ids to every project / note and records them", () => {
     let counter = 0;
     const factory = () => `new-id-${counter++}`;
     const { bundle, idRemap } = remapExportBundleIds(makeBundle(), factory);
 
-    assert.equal(bundle.workspaces.length, 1);
-    const ws = bundle.workspaces[0]!;
-    assert.match(ws.id, /^new-id-/);
-    assert.equal(idRemap.workspaces.get("ws-A"), ws.id);
-
-    const proj = ws.projects[0]!;
+    assert.equal(bundle.projects.length, 1);
+    const proj = bundle.projects[0]!;
     assert.match(proj.id, /^new-id-/);
-    assert.notEqual(proj.id, ws.id);
     assert.equal(idRemap.projects.get("proj-A"), proj.id);
 
     const root = proj.notes[0]!;
@@ -94,7 +81,7 @@ describe("remapExportBundleIds", () => {
     let counter = 0;
     const factory = () => `x${counter++}`;
     const { bundle, idRemap } = remapExportBundleIds(makeBundle(), factory);
-    const proj = bundle.workspaces[0]!.projects[0]!;
+    const proj = bundle.projects[0]!;
     const rootNew = idRemap.notes.get("note-root")!;
     const child = proj.notes[1]!;
     assert.equal(child.parent_id, rootNew);
@@ -103,7 +90,7 @@ describe("remapExportBundleIds", () => {
 
   it("preserves non-id fields (titles, metadata, assets)", () => {
     const { bundle } = remapExportBundleIds(makeBundle());
-    const child = bundle.workspaces[0]!.projects[0]!.notes[1]!;
+    const child = bundle.projects[0]!.notes[1]!;
     assert.equal(child.title, "jehu");
     assert.equal(child.type, "image");
     assert.equal(child.assets?.[0]?.zipPath, "assets/note-child/jehu.png");
@@ -111,14 +98,14 @@ describe("remapExportBundleIds", () => {
     assert.equal((child.metadata as { altText?: string }).altText, "a photo");
     assert.equal(
       (child.metadata as { r2Key?: string }).r2Key,
-      "exporter-org/exporter-space/ws-A/proj-A/note-child",
+      "exporter-org/proj-A/note-child",
     );
   });
 
   it("uses randomUUID by default when no factory is injected", () => {
     const { bundle } = remapExportBundleIds(makeBundle());
-    const wsId = bundle.workspaces[0]!.id;
-    assert.match(wsId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    const projId = bundle.projects[0]!.id;
+    assert.match(projId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
   });
 });
 
@@ -219,13 +206,16 @@ describe("chooseImportName", () => {
     assert.equal((d2 as { name: string }).name, "Testing 4");
   });
 
-  it("trims whitespace and falls back to 'Workspace' when the name is empty", () => {
+  it("trims whitespace and falls back to a generic name when empty", () => {
     const d = chooseImportName({
       name: "   ",
       existing: new Set(),
       policy: "rename",
     });
-    assert.deepEqual(d, { action: "create", name: "Workspace" });
+    assert.equal(d.action, "create");
+    if (d.action === "create") {
+      assert.ok(d.name.length > 0, "fallback name must be non-empty");
+    }
   });
 });
 
@@ -287,76 +277,68 @@ describe("deriveAssetFilename", () => {
 // buildExportManifest
 // ────────────────────────────────────────────────────────────────────────────
 
-function workspacesWithImage(opts?: {
+function projectsWithImage(opts?: {
   extraImages?: Array<{ id: string; sizeBytes: number }>;
   missingR2?: boolean;
-}): ExportWorkspaceInput[] {
-  const base = [
+}): ExportProjectInput[] {
+  const base: ExportProjectInput[] = [
     {
-      id: "ws-A",
-      name: "Testing",
+      id: "proj-A",
+      name: "Image",
       sort_index: 0,
       color_token: null,
-      projects: [
+      notes: [
         {
-          id: "proj-A",
-          name: "Image",
-          sort_index: 0,
-          color_token: null,
-          notes: [
-            {
-              id: "note-root",
-              parent_id: null,
-              type: "markdown",
-              title: "Root",
-              sibling_index: 0,
-              metadata: null,
-            },
-            {
-              id: "note-jehu",
-              parent_id: "note-root",
-              type: "image",
-              title: "jehu",
-              sibling_index: 0,
-              metadata: opts?.missingR2
-                ? { metadataVersion: 1 }
-                : {
-                    metadataVersion: 1,
-                    r2Key: "org/space/ws-A/proj-A/note-jehu",
-                    mimeType: "image/png",
-                    sizeBytes: 35010,
-                    originalFilename: "jehu.png",
-                  },
-            },
-            ...(opts?.extraImages ?? []).map((x) => ({
-              id: x.id,
-              parent_id: "note-root",
-              type: "image",
-              title: x.id,
-              sibling_index: 1,
-              metadata: {
-                metadataVersion: 1,
-                r2Key: `org/space/ws-A/proj-A/${x.id}`,
-                mimeType: "image/png",
-                sizeBytes: x.sizeBytes,
-              },
-            })),
-          ],
+          id: "note-root",
+          parent_id: null,
+          type: "markdown",
+          title: "Root",
+          sibling_index: 0,
+          metadata: null,
         },
+        {
+          id: "note-jehu",
+          parent_id: "note-root",
+          type: "image",
+          title: "jehu",
+          sibling_index: 0,
+          metadata: opts?.missingR2
+            ? { metadataVersion: 1 }
+            : {
+                metadataVersion: 1,
+                r2Key: "org/proj-A/note-jehu",
+                mimeType: "image/png",
+                sizeBytes: 35010,
+                originalFilename: "jehu.png",
+              },
+        },
+        ...(opts?.extraImages ?? []).map((x) => ({
+          id: x.id,
+          parent_id: "note-root" as string | null,
+          type: "image",
+          title: x.id,
+          sibling_index: 1,
+          metadata: {
+            metadataVersion: 1,
+            r2Key: `org/proj-A/${x.id}`,
+            mimeType: "image/png",
+            sizeBytes: x.sizeBytes,
+          } as Record<string, unknown> | null,
+        })),
       ],
     },
   ];
-  return base as ExportWorkspaceInput[];
+  return base;
 }
 
 describe("buildExportManifest", () => {
-  it("emits version 2 and an asset plan for each image note with r2Key", () => {
+  it("emits version 3 and an asset plan for each image note with r2Key", () => {
     const result = buildExportManifest({
-      workspaces: workspacesWithImage(),
+      projects: projectsWithImage(),
       exportedAtMs: 1_776_000_000_000,
       maxAssetBytes: 1_000_000,
     });
-    assert.equal(result.metadata.version, 2);
+    assert.equal(result.metadata.version, 3);
     assert.equal(result.metadata.exported_at_ms, 1_776_000_000_000);
     assert.equal(result.assets.length, 1);
     const plan = result.assets[0]!;
@@ -364,17 +346,17 @@ describe("buildExportManifest", () => {
     assert.equal(plan.mimeType, "image/png");
     assert.equal(plan.sizeBytes, 35010);
     assert.equal(plan.zipPath, "assets/note-jehu/jehu.png");
-    assert.equal(plan.r2Key, "org/space/ws-A/proj-A/note-jehu");
+    assert.equal(plan.r2Key, "org/proj-A/note-jehu");
     assert.equal(result.totalAssetBytes, 35010);
   });
 
   it("copies the assets[] entry onto the note's manifest entry", () => {
     const result = buildExportManifest({
-      workspaces: workspacesWithImage(),
+      projects: projectsWithImage(),
       exportedAtMs: 0,
       maxAssetBytes: 1_000_000,
     });
-    const notes = result.metadata.workspaces[0]!.projects[0]!.notes;
+    const notes = result.metadata.projects[0]!.notes;
     const root = notes.find((n) => n.id === "note-root")!;
     const jehu = notes.find((n) => n.id === "note-jehu")!;
     assert.equal(root.assets, undefined, "non-image notes must not carry assets");
@@ -384,14 +366,14 @@ describe("buildExportManifest", () => {
     assert.equal(jehu.assets![0]!.originalFilename, "jehu.png");
   });
 
-  it("skips image notes without r2Key (v1-style broken notes pass through)", () => {
+  it("skips image notes without r2Key (broken notes pass through)", () => {
     const result = buildExportManifest({
-      workspaces: workspacesWithImage({ missingR2: true }),
+      projects: projectsWithImage({ missingR2: true }),
       exportedAtMs: 0,
       maxAssetBytes: 1_000_000,
     });
     assert.equal(result.assets.length, 0);
-    const jehu = result.metadata.workspaces[0]!.projects[0]!.notes.find(
+    const jehu = result.metadata.projects[0]!.notes.find(
       (n) => n.id === "note-jehu",
     )!;
     assert.equal(jehu.assets, undefined);
@@ -402,7 +384,7 @@ describe("buildExportManifest", () => {
     assert.throws(
       () =>
         buildExportManifest({
-          workspaces: workspacesWithImage({
+          projects: projectsWithImage({
             extraImages: [
               { id: "note-big1", sizeBytes: 600_000 },
               { id: "note-big2", sizeBytes: 600_000 },
@@ -417,7 +399,7 @@ describe("buildExportManifest", () => {
 
   it("counts bytes cumulatively across multiple image notes", () => {
     const result = buildExportManifest({
-      workspaces: workspacesWithImage({
+      projects: projectsWithImage({
         extraImages: [
           { id: "note-extra1", sizeBytes: 1_000 },
           { id: "note-extra2", sizeBytes: 2_000 },
@@ -432,110 +414,93 @@ describe("buildExportManifest", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
-// planImportWorkspaces
+// planImportProjects (v3 — project-rooted)
 // ────────────────────────────────────────────────────────────────────────────
 
-function bundleWithWorkspaces(names: string[]): WpnExportMetadata {
+function bundleWithProjects(names: string[]): WpnExportMetadata {
   return {
-    version: 2,
+    version: 3,
     exported_at_ms: 0,
-    workspaces: names.map((name, i) => ({
-      id: `ws-${i}`,
+    projects: names.map((name, i) => ({
+      id: `proj-${i}`,
       name,
       sort_index: i,
       color_token: null,
-      projects: [
+      notes: [
         {
-          id: `proj-${i}`,
-          name: "P",
-          sort_index: 0,
-          color_token: null,
-          notes: [
-            {
-              id: `note-${i}-a`,
-              parent_id: null,
-              type: "markdown",
-              title: "Alpha",
-              sibling_index: 0,
-              metadata: null,
-            },
-          ],
+          id: `note-${i}-a`,
+          parent_id: null,
+          type: "markdown",
+          title: "Alpha",
+          sibling_index: 0,
+          metadata: null,
         },
       ],
     })),
   };
 }
 
-describe("planImportWorkspaces", () => {
-  it("creates workspaces unchanged when there's no collision", () => {
-    const plan = planImportWorkspaces({
-      bundle: bundleWithWorkspaces(["Fresh"]),
-      existingWorkspaces: [],
+describe("planImportProjects", () => {
+  it("creates projects unchanged when there's no collision", () => {
+    const plan = planImportProjects({
+      bundle: bundleWithProjects(["Fresh"]),
+      existingProjects: [],
       policy: "rename",
     });
-    assert.equal(plan.workspaces.length, 1);
-    const action = plan.workspaces[0]!;
+    assert.equal(plan.projects.length, 1);
+    const action = plan.projects[0]!;
     assert.equal(action.kind, "create");
-    assert.equal((action as { chosenName: string }).chosenName, "Fresh");
-    assert.equal((action as { renamed: boolean }).renamed, false);
-    assert.equal(plan.canonicalPathRewrites.length, 0);
+    if (action.kind === "create") {
+      assert.equal(action.chosenName, "Fresh");
+      assert.equal(action.renamed, false);
+      assert.equal(action.sourceProjectId, "proj-0");
+    }
   });
 
-  it("emits a rewrite pair for each bundled note when the workspace is renamed", () => {
-    const plan = planImportWorkspaces({
-      bundle: bundleWithWorkspaces(["Testing"]),
-      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+  it("renames the project on collision when policy is 'rename'", () => {
+    const plan = planImportProjects({
+      bundle: bundleWithProjects(["Testing"]),
+      existingProjects: [{ id: "existing", name: "Testing" }],
       policy: "rename",
     });
-    const action = plan.workspaces[0]!;
+    const action = plan.projects[0]!;
     assert.equal(action.kind, "create");
-    assert.equal(
-      (action as { chosenName: string }).chosenName,
-      "Testing 2",
-    );
-    assert.equal((action as { renamed: boolean }).renamed, true);
-    assert.deepEqual(plan.canonicalPathRewrites, [
-      {
-        oldCanonical: "Testing/P/Alpha",
-        newCanonical: "Testing 2/P/Alpha",
-      },
-    ]);
+    if (action.kind === "create") {
+      assert.equal(action.chosenName, "Testing 2");
+      assert.equal(action.renamed, true);
+    }
   });
 
-  it("skips the workspace when policy is 'skip' and a collision exists", () => {
-    const plan = planImportWorkspaces({
-      bundle: bundleWithWorkspaces(["Testing", "Fresh"]),
-      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+  it("skips the project when policy is 'skip' and a collision exists", () => {
+    const plan = planImportProjects({
+      bundle: bundleWithProjects(["Testing", "Fresh"]),
+      existingProjects: [{ id: "existing", name: "Testing" }],
       policy: "skip",
     });
-    assert.equal(plan.workspaces[0]!.kind, "skip");
-    assert.equal(plan.workspaces[1]!.kind, "create");
-    // Skipped workspaces don't emit rewrites.
-    assert.equal(plan.canonicalPathRewrites.length, 0);
+    assert.equal(plan.projects[0]!.kind, "skip");
+    assert.equal(plan.projects[1]!.kind, "create");
   });
 
-  it("reuses the existing workspace id when policy is 'overwrite'", () => {
-    const plan = planImportWorkspaces({
-      bundle: bundleWithWorkspaces(["Testing"]),
-      existingWorkspaces: [{ id: "existing-123", name: "Testing" }],
+  it("reuses the existing project id when policy is 'overwrite'", () => {
+    const plan = planImportProjects({
+      bundle: bundleWithProjects(["Testing"]),
+      existingProjects: [{ id: "existing-123", name: "Testing" }],
       policy: "overwrite",
     });
-    const action = plan.workspaces[0]!;
+    const action = plan.projects[0]!;
     assert.equal(action.kind, "reuse");
-    assert.equal(
-      (action as { existingWorkspaceId: string }).existingWorkspaceId,
-      "existing-123",
-    );
-    assert.equal(plan.canonicalPathRewrites.length, 0);
+    if (action.kind === "reuse") {
+      assert.equal(action.existingProjectId, "existing-123");
+    }
   });
 
-  it("disambiguates two bundled workspaces that collide with each other on rename", () => {
-    const plan = planImportWorkspaces({
-      bundle: bundleWithWorkspaces(["Testing", "Testing"]),
-      existingWorkspaces: [{ id: "existing", name: "Testing" }],
+  it("disambiguates two bundled projects that collide with each other on rename", () => {
+    const plan = planImportProjects({
+      bundle: bundleWithProjects(["Testing", "Testing"]),
+      existingProjects: [{ id: "existing", name: "Testing" }],
       policy: "rename",
     });
-    const names = plan.workspaces.map((a) =>
+    const names = plan.projects.map((a) =>
       a.kind === "create" ? a.chosenName : a.kind,
     );
     assert.deepEqual(names, ["Testing 2", "Testing 3"]);

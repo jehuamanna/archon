@@ -42,6 +42,22 @@ services:
       retries: 5
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    container_name: archon-redis
+    restart: unless-stopped
+    # Persistence off: Hocuspocus uses Redis only as a pub/sub fanout layer
+    # for cross-replica Yjs updates and awareness. The CRDT state of record
+    # lives in Postgres (`yjs_state` + `notes.content`); a Redis restart
+    # loses nothing durable. AOF + RDB are wasted IO here.
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
   archon-sync-api:
     build:
       context: .
@@ -54,9 +70,22 @@ services:
     environment:
       HOST: "0.0.0.0"
       PORT: "4010"
-      DATABASE_URL: ${DATABASE_URL:-postgres://archon:archon@postgres:5432/archon_sync}
+      # Service-discovery URLs are hardcoded to compose-internal hostnames so
+      # a host-side `.env` (used by `npm run sync-api:local` for host-mode
+      # dev) can't override them with `localhost`/`127.0.0.1`, which is
+      # unreachable from inside the container network. Override
+      # ARCHON_DATABASE_URL_OVERRIDE / ARCHON_REDIS_URL_OVERRIDE in `.env`
+      # to point at managed services instead — these are deliberately
+      # different names than the host-mode DATABASE_URL / REDIS_URL.
+      DATABASE_URL: ${ARCHON_DATABASE_URL_OVERRIDE:-postgres://archon:archon@postgres:5432/archon_sync}
+      REDIS_URL: ${ARCHON_REDIS_URL_OVERRIDE:-redis://redis:6379}
       JWT_SECRET: ${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}
+      ARCHON_REPLICA_ID: ${ARCHON_REPLICA_ID:-archon-sync-1}
+      ARCHON_MASTER_ADMIN_EMAIL: ${ARCHON_MASTER_ADMIN_EMAIL:-}
       ARCHON_BUNDLED_DOCS_DIR: /app/docs/bundled-plugin-authoring
+    depends_on:
+      redis:
+        condition: service_healthy
     healthcheck:
       test:
         [

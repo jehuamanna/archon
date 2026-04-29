@@ -6,7 +6,12 @@ import type {
   Note,
   NoteListItem,
 } from "../shared/archon-renderer-api";
-import type { WpnNoteDetail, WpnNoteListItem } from "../shared/wpn-v2-types";
+import type {
+  WpnNoteDetail,
+  WpnNoteListItem,
+  WpnProjectRow,
+  WpnWorkspaceRow,
+} from "../shared/wpn-v2-types";
 import { authRefresh } from "./auth/auth-client";
 import { authedFetch } from "./auth/auth-retry";
 import { getAccessToken, setAccessToken } from "./auth/auth-session";
@@ -23,6 +28,78 @@ import {
   webScratchPlainStubOverrides,
 } from "./wpnscratch/web-scratch-archon-api";
 import { wpnTrace } from "../shared/wpn-debug-trace";
+
+// ── Cloud-mode synthetic workspace ─────────────────────────────────────
+//
+// Pre-migration the cloud sync-api emitted a Workspace → Project tree; the
+// org/team migration deleted workspaces from the data model. The
+// pre-migration explorer (4,400 LOC) renders that tree level explicitly
+// and isn't worth rewriting in lockstep with the API. This shim
+// manufactures a single virtual workspace at the IPC boundary so the
+// existing explorer keeps working in cloud mode — every project gets
+// `workspace_id: SYNTHETIC_WORKSPACE_ID` injected, and a single
+// `WpnWorkspaceRow` for that synthetic id is surfaced from
+// `wpnListWorkspaces` / `wpnListWorkspacesAndProjects` / `wpnGetFullTree`.
+// Workspace mutations (create/rename/delete) throw or no-op in cloud mode.
+// File-vault paths bypass these helpers (they have real workspaces on
+// disk).
+
+/**
+ * Identifier the cloud shim uses for the single virtual workspace it
+ * surfaces to the renderer. Exported so explorer / sidebar code can
+ * detect cloud mode and hide workspace-mutation affordances (no real
+ * workspace exists to rename / duplicate / delete / export).
+ */
+export const SYNTHETIC_WORKSPACE_ID =
+  "00000000-0000-4000-8000-archonprojects";
+const SYNTHETIC_WORKSPACE_NAME = "Projects";
+
+/**
+ * `true` when `workspaceId` is the cloud shim's synthetic id. Workspace-
+ * mutation UI in the renderer should hide these affordances on a match.
+ */
+export function isSyntheticWorkspaceId(workspaceId: string): boolean {
+  return workspaceId === SYNTHETIC_WORKSPACE_ID;
+}
+
+function syntheticWorkspaceRow(): WpnWorkspaceRow {
+  const t = Date.now();
+  return {
+    id: SYNTHETIC_WORKSPACE_ID,
+    name: SYNTHETIC_WORKSPACE_NAME,
+    sort_index: 0,
+    color_token: null,
+    created_at_ms: t,
+    updated_at_ms: t,
+  };
+}
+
+function tagOneWithSyntheticWorkspace(p: WpnProjectRow): WpnProjectRow {
+  return {
+    ...p,
+    workspace_id: SYNTHETIC_WORKSPACE_ID,
+  };
+}
+
+function tagWithSyntheticWorkspace(rows: WpnProjectRow[]): WpnProjectRow[] {
+  return rows.map(tagOneWithSyntheticWorkspace);
+}
+
+function synthesizeWorkspaceWrapper(projects: WpnProjectRow[]): {
+  workspaces: WpnWorkspaceRow[];
+  projects: WpnProjectRow[];
+} {
+  return {
+    workspaces: [syntheticWorkspaceRow()],
+    projects: tagWithSyntheticWorkspace(projects),
+  };
+}
+
+async function syntheticListWorkspaces(): Promise<{
+  workspaces: WpnWorkspaceRow[];
+}> {
+  return { workspaces: [syntheticWorkspaceRow()] };
+}
 
 const noopUnsub = (): void => {};
 
@@ -859,30 +936,104 @@ export function createWebArchonApi(baseUrl: string): ArchonRendererApi {
       }
       return req("POST", "/redo");
     },
-    wpnListWorkspaces: () => wpnReq("GET", "/wpn/workspaces"),
-    wpnListWorkspacesAndProjects: () => wpnReq("GET", "/wpn/workspaces-and-projects"),
-    wpnGetFullTree: () => wpnReq("GET", "/wpn/full-tree"),
-    wpnCreateWorkspace: (name) =>
-      wpnReq("POST", "/wpn/workspaces", { name: name ?? "Workspace" }),
-    wpnUpdateWorkspace: (id, patch) =>
-      wpnReq("PATCH", `/wpn/workspaces/${encodeURIComponent(id)}`, patch),
-    wpnDeleteWorkspace: (id) =>
-      wpnReq("DELETE", `/wpn/workspaces/${encodeURIComponent(id)}`),
-    wpnDeleteWorkspaces: (ids) =>
-      wpnReq("POST", "/wpn/workspaces/delete", { ids }),
-    wpnListProjects: (workspaceId) =>
-      wpnReq(
+    /**
+     * Cloud-mode shim: the sync-api dropped workspaces (org/team
+     * migration). The pre-migration explorer renders a Workspace →
+     * Project → Note tree; rather than rewrite that 4,400-LOC view,
+     * we synthesize a single virtual workspace that holds every
+     * project. The user sees a flat project list under one synthetic
+     * group. Long-term, the explorer will drop the workspace tree
+     * level outright (deferred follow-up to slice 5 of the org/team
+     * migration).
+     */
+    wpnListWorkspaces: () => syntheticListWorkspaces(),
+    wpnListWorkspacesAndProjects: async () => {
+      const tree = await wpnReq<{
+        projects: WpnProjectRow[];
+        notesByProjectId?: Record<string, WpnNoteListItem[]>;
+        explorerStateByProjectId?: Record<
+          string,
+          { expanded_ids: string[] }
+        >;
+      }>("GET", "/wpn/full-tree");
+      return synthesizeWorkspaceWrapper(tree.projects);
+    },
+    wpnGetFullTree: async () => {
+      const tree = await wpnReq<{
+        projects: WpnProjectRow[];
+        notesByProjectId: Record<string, WpnNoteListItem[]>;
+        explorerStateByProjectId: Record<
+          string,
+          { expanded_ids: string[] }
+        >;
+      }>("GET", "/wpn/full-tree");
+      const wrapped = synthesizeWorkspaceWrapper(tree.projects);
+      return {
+        ...wrapped,
+        notesByProjectId: tree.notesByProjectId ?? {},
+        explorerStateByProjectId: tree.explorerStateByProjectId ?? {},
+      };
+    },
+    wpnCreateWorkspace: async () => {
+      throw new Error(
+        "Workspaces were removed by the org/team migration. Projects belong directly to the active org; create a project instead.",
+      );
+    },
+    wpnUpdateWorkspace: async () => {
+      throw new Error(
+        "Workspaces were removed by the org/team migration. The synthetic 'Projects' group is read-only.",
+      );
+    },
+    wpnDeleteWorkspace: async () => {
+      throw new Error(
+        "Workspaces were removed by the org/team migration. The synthetic 'Projects' group cannot be deleted.",
+      );
+    },
+    wpnDeleteWorkspaces: async () => ({
+      deleted: [],
+      denied: [],
+      notFound: [],
+    }),
+    /**
+     * Pre-migration `wpnListProjects(workspaceId)` was scoped per
+     * workspace. Post-migration the active org sees all projects via
+     * `/wpn/projects`; the synthetic workspace id is ignored.
+     */
+    wpnListProjects: async () => {
+      const r = await wpnReq<{ projects: WpnProjectRow[] }>(
         "GET",
-        `/wpn/workspaces/${encodeURIComponent(workspaceId)}/projects`,
-      ),
-    wpnCreateProject: (workspaceId, name) =>
-      wpnReq(
+        "/wpn/projects",
+      );
+      return { projects: tagWithSyntheticWorkspace(r.projects) };
+    },
+    /**
+     * Pre-migration callers passed `workspaceId`; cloud sync-api ignores
+     * that (project orgId comes from the JWT's activeOrgId). Strip it.
+     */
+    wpnCreateProject: async (_workspaceId, name) => {
+      const r = await wpnReq<{ project: WpnProjectRow }>(
         "POST",
-        `/wpn/workspaces/${encodeURIComponent(workspaceId)}/projects`,
+        "/wpn/projects",
         { name: name ?? "Project" },
-      ),
-    wpnUpdateProject: (id, patch) =>
-      wpnReq("PATCH", `/wpn/projects/${encodeURIComponent(id)}`, patch),
+      );
+      return { project: tagOneWithSyntheticWorkspace(r.project) };
+    },
+    wpnUpdateProject: async (id, patch) => {
+      // Drop `workspace_id` from PATCH bodies — the cloud sync-api has
+      // no concept of moving projects between workspaces (workspaces
+      // don't exist). Forwarding it would 400 the request.
+      const { workspace_id: _ignoredWs, ...rest } = patch as Record<
+        string,
+        unknown
+      > & { workspace_id?: unknown };
+      void _ignoredWs;
+      const r = await wpnReq<{ project: WpnProjectRow }>(
+        "PATCH",
+        `/wpn/projects/${encodeURIComponent(id)}`,
+        rest,
+      );
+      return { project: tagOneWithSyntheticWorkspace(r.project) };
+    },
     wpnDeleteProject: (id) =>
       wpnReq("DELETE", `/wpn/projects/${encodeURIComponent(id)}`),
     wpnDeleteProjects: (ids) =>

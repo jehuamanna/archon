@@ -1,57 +1,42 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useAuth } from "./AuthContext";
 
-type Mode = "login" | "signup";
-
+/**
+ * Login-only auth screen. Public signup is intentionally absent — onboarding
+ * is admin-driven (master invite or org invite). Invitees land on
+ * `/invite/[token]` (web) which handles password set + login in a single flow,
+ * so they never come through this screen.
+ */
 export function AuthScreen({
-  initialMode,
   onBack,
 }: {
-  initialMode?: Mode;
+  /** Retained for backwards compatibility with EntryScreen — ignored. */
+  initialMode?: "login";
   onBack?: () => void;
 }): React.ReactElement {
-  const { login, signup } = useAuth();
-  const [mode, setMode] = useState<Mode>(initialMode ?? "login");
+  const { login } = useAuth();
 
   const [email, setEmail] = useState("");
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (initialMode) setMode(initialMode);
-  }, [initialMode]);
-
-  const title = mode === "login" ? "Login" : "Signup";
-  const passwordMismatch =
-    mode === "signup" && confirmPassword.length > 0 && password !== confirmPassword;
   const canSubmit = useMemo(() => {
-    const e = email.trim();
-    const p = password;
-    if (!e || !p) return false;
-    if (mode === "signup" && username.trim().length < 2) return false;
-    if (mode === "signup" && confirmPassword.length === 0) return false;
-    if (mode === "signup" && p !== confirmPassword) return false;
-    return true;
-  }, [email, password, username, mode, confirmPassword]);
+    return email.trim().length > 0 && password.length > 0;
+  }, [email, password]);
 
-  async function onSubmit(e: React.FormEvent) {
+  async function onSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
     if (!canSubmit || submitting) return;
     setSubmitting(true);
     setError(null);
     try {
-      if (mode === "login") {
-        await login(email.trim(), password);
-      } else {
-        await signup(email.trim(), username.trim(), password);
-      }
+      await login(email.trim(), password);
     } catch (err) {
       const message = err instanceof Error ? err.message : "An error occurred";
       setError(message);
       if (process.env.NODE_ENV === "development") {
+        // eslint-disable-next-line no-console
         console.error(err);
       }
     } finally {
@@ -74,40 +59,8 @@ export function AuthScreen({
               </button>
             ) : null}
             <div className="text-[14px] font-semibold tracking-tight text-foreground">
-              {title}
-            </div>
-          </div>
-          <div className="flex rounded-lg border border-border bg-muted/10 p-1">
-            <button
-              type="button"
-              className={`rounded-md px-2.5 py-1 text-[12px] ${
-                mode === "login"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => {
-                setMode("login");
-                setConfirmPassword("");
-                setError(null);
-              }}
-            >
               Login
-            </button>
-            <button
-              type="button"
-              className={`rounded-md px-2.5 py-1 text-[12px] ${
-                mode === "signup"
-                  ? "bg-background text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground"
-              }`}
-              onClick={() => {
-                setMode("signup");
-                setConfirmPassword("");
-                setError(null);
-              }}
-            >
-              Signup
-            </button>
+            </div>
           </div>
         </div>
 
@@ -118,27 +71,11 @@ export function AuthScreen({
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               type="email"
-              autoComplete={mode === "login" ? "email" : "email"}
+              autoComplete="email"
               className="h-10 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-muted/40"
               placeholder="you@example.com"
             />
           </label>
-
-          {mode === "signup" ? (
-            <label className="block">
-              <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                Username
-              </div>
-              <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                type="text"
-                autoComplete="username"
-                className="h-10 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-muted/40"
-                placeholder="yourname"
-              />
-            </label>
-          ) : null}
 
           <label className="block">
             <div className="mb-1 text-[11px] font-medium text-muted-foreground">
@@ -148,33 +85,11 @@ export function AuthScreen({
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               type="password"
-              autoComplete={mode === "login" ? "current-password" : "new-password"}
+              autoComplete="current-password"
               className="h-10 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-muted/40"
               placeholder="••••••••"
             />
           </label>
-
-          {mode === "signup" ? (
-            <label className="block">
-              <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-                Confirm password
-              </div>
-              <input
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                type="password"
-                autoComplete="new-password"
-                className="h-10 w-full rounded-md border border-border bg-background px-3 text-[13px] text-foreground outline-none ring-0 placeholder:text-muted-foreground focus:border-border focus:outline-none focus:ring-2 focus:ring-muted/40"
-                placeholder="••••••••"
-              />
-            </label>
-          ) : null}
-
-          {passwordMismatch ? (
-            <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
-              Passwords do not match
-            </div>
-          ) : null}
 
           {error ? (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[12px] text-destructive">
@@ -187,11 +102,14 @@ export function AuthScreen({
             disabled={!canSubmit || submitting}
             className="archon-auth-submit mt-2 h-10 w-full rounded-md border border-border text-[13px] font-medium"
           >
-            {submitting ? "Please wait…" : title}
+            {submitting ? "Please wait…" : "Login"}
           </button>
+
+          <p className="pt-2 text-center text-[11px] text-muted-foreground">
+            Need an account? Ask your admin to send you an invite link.
+          </p>
         </form>
       </div>
     </div>
   );
 }
-

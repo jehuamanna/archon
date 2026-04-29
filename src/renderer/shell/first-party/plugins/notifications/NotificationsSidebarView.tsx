@@ -21,9 +21,9 @@ function isOrgInvitePayload(
 function summary(n: NotificationEntity): string {
   if (n.type === "org_invite" && isOrgInvitePayload(n.payload)) {
     const p = n.payload;
-    const grants = p.spaceGrants?.length ?? 0;
-    const spacesBit = grants === 0 ? "" : ` (${grants} space${grants === 1 ? "" : "s"})`;
-    return `${p.inviterDisplayName} invited you to ${p.orgName} as ${p.role}${spacesBit}`;
+    const grants = p.teamGrants?.length ?? 0;
+    const teamsBit = grants === 0 ? "" : ` (${grants} team${grants === 1 ? "" : "s"})`;
+    return `${p.inviterDisplayName} invited you to ${p.orgName} as ${p.role}${teamsBit}`;
   }
   return "Notification";
 }

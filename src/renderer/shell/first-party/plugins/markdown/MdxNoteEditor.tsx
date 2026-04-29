@@ -5,7 +5,11 @@ import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
 import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
-import { useYjsBodyShadow } from "./useYjsBodyShadow";
+import {
+  useYjsBodyShadow,
+  colorForUserId,
+  type CollabUser,
+} from "./useYjsBodyShadow";
 import { MdxRenderer } from "../../../../components/renderers/MdxRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -451,7 +455,6 @@ export function MdxNoteEditor({
       if (isSameProjectRelativeVfsPath(vfs)) {
         if (!selfRow) return true; // can't resolve — assume valid
         const canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-          workspace_name: selfRow.workspaceName,
           project_name: selfRow.projectName,
         });
         return canonical ? vfsPathSet.has(canonical) : true;
@@ -467,7 +470,22 @@ export function MdxNoteEditor({
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  const collabUser: CollabUser | null = useMemo(() => {
+    if (auth.state.status !== "authed") return null;
+    const u = auth.state.user;
+    const name = u.username || u.email.split("@")[0] || "User";
+    return { id: u.id, name, color: colorForUserId(u.id) };
+  }, [
+    auth.state.status,
+    auth.state.status === "authed" ? auth.state.user.id : null,
+    auth.state.status === "authed" ? auth.state.user.username : null,
+    auth.state.status === "authed" ? auth.state.user.email : null,
+  ]);
+  const yjsBody = useYjsBodyShadow(
+    persist ? note.id : null,
+    activeSpaceId,
+    collabUser,
+  );
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
 
@@ -703,7 +721,6 @@ export function MdxNoteEditor({
         const selfRow = wikiRows.find((r) => r.noteId === note.id);
         if (selfRow) {
           canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-            workspace_name: selfRow.workspaceName,
             project_name: selfRow.projectName,
           });
         }
@@ -760,10 +777,10 @@ export function MdxNoteEditor({
     });
     // Bind CodeMirror to live Y.Text via yCollab when WS provides one.
     if (yjsBody.yText) {
-      ext.push(yCollab(yjsBody.yText, null));
+      ext.push(yCollab(yjsBody.yText, yjsBody.awareness));
     }
     return ext;
-  }, [readOnly, resolvedDark, yjsBody.yText]);
+  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.awareness]);
 
   useEffect(() => {
     const host = cmHostRef.current;

@@ -6,7 +6,7 @@
  * setup cost.
  *
  * Lifted out of `mdx-state/ws.ts` so Phase 3 can reuse the same primitive
- * for `rt:space:<id>` structural-event fanout, and Phase 2 for any
+ * for `rt:org:<id>` structural-event fanout, and Phase 2 for any
  * Hocuspocus broadcast channels we end up needing. The `mdx-state` flow
  * keeps its inline copy until we migrate it (out of scope for Phase 1).
  */

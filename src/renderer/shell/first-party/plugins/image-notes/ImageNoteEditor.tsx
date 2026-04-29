@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useDispatch } from "react-redux";
+import { useDispatch, useSelector } from "react-redux";
+import type * as Y from "yjs";
 import type { Note } from "@archon/ui-types";
-import type { AppDispatch } from "../../../../store";
+import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata } from "../../../../store/notesSlice";
 import { useSignedAssetUrl } from "./useSignedAssetUrl";
 import { uploadImageAsset } from "./upload-image-asset";
@@ -10,6 +11,10 @@ import { generateImageThumbnail, THUMBNAIL_CONSTANTS } from "./generate-thumbnai
 import { getArchon } from "../../../../../shared/archon-host-access";
 import type { WpnBacklinkSourceItem } from "../../../../../shared/wpn-v2-types";
 import { dispatchWpnTreeChanged } from "../notes-explorer/wpnExplorerEvents";
+import {
+  useYjsBodyShadow,
+  useYjsMapField,
+} from "../markdown/useYjsBodyShadow";
 
 type ImageMetadata = {
   metadataVersion: 1;
@@ -165,6 +170,22 @@ export function ImageNoteEditor({
   const [dropHover, setDropHover] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
+  // Open the same Hocuspocus room the markdown editors use so alt+caption
+  // edits CRDT-merge with whoever else is viewing this image. Identity is
+  // skipped (no caret presence on a static image surface), so we pass null.
+  const activeSpaceId = useSelector(
+    (s: RootState) => s.spaceMembership.activeSpaceId,
+  );
+  const yjsBody = useYjsBodyShadow(
+    persist ? note.id : null,
+    activeSpaceId,
+    null,
+  );
+  const metadataMap = useMemo<Y.Map<unknown> | null>(
+    () => yjsBody.doc?.getMap<unknown>("metadata") ?? null,
+    [yjsBody.doc],
+  );
+
   const signed = useSignedAssetUrl(existing?.r2Key ?? null);
 
   useThumbnailRegen({
@@ -274,6 +295,8 @@ export function ImageNoteEditor({
           altText={existing.altText ?? ""}
           caption={existing.caption ?? ""}
           disabled={!persist}
+          metadataMap={metadataMap}
+          collabConnected={yjsBody.connected}
         />
         <ImageBacklinksRow noteId={note.id} />
       </div>
@@ -330,31 +353,36 @@ function ImageMetadataStrip({
   altText,
   caption,
   disabled,
+  metadataMap,
+  collabConnected,
 }: {
   noteId: string;
   altText: string;
   caption: string;
   disabled: boolean;
+  metadataMap: Y.Map<unknown> | null;
+  collabConnected: boolean;
 }): React.ReactElement {
   const dispatch = useDispatch<AppDispatch>();
-  const [altDraft, setAltDraft] = useState(altText);
-  const [captionDraft, setCaptionDraft] = useState(caption);
+  // Y.Map-bound drafts: each keystroke writes to the shared map (Hocuspocus
+  // broadcasts to peers, debounces persistence into wpn_notes.metadata).
+  // Remote edits flow back through the observer in `useYjsMapField`, no
+  // REST round-trip needed. The `altText`/`caption` props are still used as
+  // fallback when the WS isn't up (collab disabled, offline, etc.).
+  const [altDraft, setAltDraft] = useYjsMapField(metadataMap, "altText", altText);
+  const [captionDraft, setCaptionDraft] = useYjsMapField(
+    metadataMap,
+    "caption",
+    caption,
+  );
   const [error, setError] = useState<string | null>(null);
 
-  // Re-sync when the persisted value changes from outside (e.g. sync from another tab).
-  const lastPersistedAlt = useRef(altText);
-  const lastPersistedCaption = useRef(caption);
-  if (lastPersistedAlt.current !== altText) {
-    lastPersistedAlt.current = altText;
-    setAltDraft(altText);
-  }
-  if (lastPersistedCaption.current !== caption) {
-    lastPersistedCaption.current = caption;
-    setCaptionDraft(caption);
-  }
-
+  // Fallback REST persist when collab isn't established (no WS, single-user
+  // path). When `collabConnected`, Hocuspocus owns the round-trip and onBlur
+  // is a no-op — peers already received the live edit via Y.Map.
   const persistField = useCallback(
     async (key: "altText" | "caption", next: string, previous: string) => {
+      if (collabConnected) return;
       if (next === previous) return;
       const trimmed = next.trim();
       try {
@@ -373,7 +401,7 @@ function ImageMetadataStrip({
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [dispatch, noteId],
+    [dispatch, noteId, collabConnected],
   );
 
   return (

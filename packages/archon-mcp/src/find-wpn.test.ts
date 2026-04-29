@@ -25,8 +25,6 @@ describe("findNotesByQuery", () => {
       type: "markdown",
       project_id: "p1",
       project_name: "Core",
-      workspace_id: "w1",
-      workspace_name: "Main",
     },
     {
       id: idB,
@@ -34,18 +32,16 @@ describe("findNotesByQuery", () => {
       type: "markdown",
       project_id: "p2",
       project_name: "App",
-      workspace_id: "w1",
-      workspace_name: "Main",
     },
   ];
 
-  it("returns unique by title", () => {
-    const r = findNotesByQuery(rows, "todo", "main", "core");
+  it("returns unique by title with project narrowing", () => {
+    const r = findNotesByQuery(rows, "todo", "core");
     assert.equal(r.status, "unique");
     if (r.status === "unique") {
       assert.equal(r.matches.length, 1);
       assert.equal(r.matches[0]!.noteId, idA);
-      assert.equal(r.matches[0]!.path, "Main / Core / Todo");
+      assert.equal(r.matches[0]!.path, "Core / Todo");
     }
   });
 

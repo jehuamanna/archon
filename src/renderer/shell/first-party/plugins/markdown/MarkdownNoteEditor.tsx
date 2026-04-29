@@ -6,7 +6,11 @@ import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
 import type { AppDispatch, RootState } from "../../../../store";
 import { patchNoteMetadata, saveNoteContent } from "../../../../store/notesSlice";
-import { useYjsBodyShadow } from "./useYjsBodyShadow";
+import {
+  useYjsBodyShadow,
+  colorForUserId,
+  type CollabUser,
+} from "./useYjsBodyShadow";
 import MarkdownRenderer from "../../../../components/renderers/MarkdownRenderer";
 import { useAuth } from "../../../../auth/AuthContext";
 import { useTheme } from "../../../../theme/ThemeContext";
@@ -447,7 +451,6 @@ export function MarkdownNoteEditor({
       if (isSameProjectRelativeVfsPath(vfs)) {
         if (!selfRow) return true; // can't resolve — assume valid
         const canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-          workspace_name: selfRow.workspaceName,
           project_name: selfRow.projectName,
         });
         return canonical ? vfsPathSet.has(canonical) : true;
@@ -463,7 +466,25 @@ export function MarkdownNoteEditor({
   const activeSpaceId = useSelector(
     (s: RootState) => s.spaceMembership.activeSpaceId,
   );
-  const yjsBody = useYjsBodyShadow(persist ? note.id : null, activeSpaceId);
+  // Identity for Yjs awareness: peers see my caret labelled with this name
+  // and tinted with this color. Memoised so a new object reference doesn't
+  // re-trigger the awareness refresh effect every render.
+  const collabUser: CollabUser | null = useMemo(() => {
+    if (auth.state.status !== "authed") return null;
+    const u = auth.state.user;
+    const name = u.username || u.email.split("@")[0] || "User";
+    return { id: u.id, name, color: colorForUserId(u.id) };
+  }, [
+    auth.state.status,
+    auth.state.status === "authed" ? auth.state.user.id : null,
+    auth.state.status === "authed" ? auth.state.user.username : null,
+    auth.state.status === "authed" ? auth.state.user.email : null,
+  ]);
+  const yjsBody = useYjsBodyShadow(
+    persist ? note.id : null,
+    activeSpaceId,
+    collabUser,
+  );
   const yjsBodyRef = useRef(yjsBody);
   yjsBodyRef.current = yjsBody;
 
@@ -681,18 +702,21 @@ export function MarkdownNoteEditor({
     // forceUpdate closure capturing an empty `value` prop). When yCollab
     // is bound, that transaction propagates through ySyncPlugin and wipes
     // Y.Text — which the server then persists, destroying the note. Drop
-    // any ExternalChange transaction that would clear non-empty doc to
-    // empty; the editor can still receive real edits via yCollab.
+    // any ExternalChange transaction that would shrink a non-empty doc:
+    // full empties (newLen === 0) are the original wipe; partial shrinks
+    // (newLen < startLen) happen when a stale React `value` prop, lagging
+    // behind Y.Text, is fed back through CodeMirror on a connected→
+    // disconnected flicker. Real user edits never come through ExternalChange.
     ext.push(
       EditorState.transactionFilter.of((tr) => {
         if (tr.annotation(ExternalChange) !== true) return tr;
         if (!tr.docChanged) return tr;
         const startLen = tr.startState.doc.length;
         const newLen = tr.newDoc.length;
-        if (startLen > 0 && newLen === 0) {
+        if (startLen > 0 && newLen < startLen) {
           // eslint-disable-next-line no-console
           console.warn(
-            "[md-editor] dropped ExternalChange empty-out tx",
+            "[md-editor] dropped ExternalChange shrink tx",
             { noteId: note.id, startLen, newLen },
           );
           return [];
@@ -709,10 +733,17 @@ export function MarkdownNoteEditor({
     // diffs flow into the view without React intermediation, and local
     // edits are committed to Y.Text with the right transaction origin.
     if (yjsBody.yText && yjsBody.connected) {
-      ext.push(yCollab(yjsBody.yText, null));
+      ext.push(yCollab(yjsBody.yText, yjsBody.awareness));
     }
     return ext;
-  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.connected, note.id]);
+  }, [
+    readOnly,
+    resolvedDark,
+    yjsBody.yText,
+    yjsBody.connected,
+    yjsBody.awareness,
+    note.id,
+  ]);
 
   useEffect(() => {
     const host = cmHostRef.current;

@@ -22,7 +22,7 @@ export type { ShellWelcomeTabState, WelcomeShellUrlSegment } from "./shellWelcom
 export type ShellNoteTabState = {
   noteId: string;
   /**
-   * Canonical or same-project-relative VFS string for `#/w/...` hashes (Workspace/Project/Title or ./Title).
+   * Canonical or same-project-relative VFS string for `#/w/...` hashes (Project/Title or ./Title).
    * Populated when opening from the explorer or a path hash so the address bar does not fall back to `#/n/<id>`.
    */
   canonicalVfsPath?: string;

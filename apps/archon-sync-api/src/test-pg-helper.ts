@@ -254,92 +254,193 @@ export async function factoryOrg(args: {
   return id;
 }
 
-/** Convenience: factory for a default-kind space + owner enrolment. */
-export async function factorySpace(args: {
+/** Convenience: factory for an org_memberships row. */
+export async function factoryOrgMembership(args: {
+  orgId: string;
+  userId: string;
+  role?: "admin" | "member";
+}): Promise<void> {
+  const { orgMemberships } = await import("./db/schema.js");
+  await getDb()
+    .insert(orgMemberships)
+    .values({
+      orgId: args.orgId,
+      userId: args.userId,
+      role: args.role ?? "member",
+      joinedAt: new Date(),
+    });
+}
+
+/** Convenience: factory for a fresh department row. */
+export async function factoryDepartment(args: {
+  orgId: string;
+  createdByUserId: string;
+  name?: string;
+}): Promise<string> {
+  const { departments } = await import("./db/schema.js");
+  const id = randomUUID();
+  await getDb()
+    .insert(departments)
+    .values({
+      id,
+      orgId: args.orgId,
+      name: args.name ?? `Test Dept ${id.slice(0, 8)}`,
+      colorToken: null,
+      createdByUserId: args.createdByUserId,
+      createdAt: new Date(),
+    });
+  return id;
+}
+
+/** Convenience: factory for a fresh team row. */
+export async function factoryTeam(args: {
+  orgId: string;
+  departmentId: string;
+  createdByUserId: string;
+  name?: string;
+}): Promise<string> {
+  const { teams } = await import("./db/schema.js");
+  const id = randomUUID();
+  await getDb()
+    .insert(teams)
+    .values({
+      id,
+      orgId: args.orgId,
+      departmentId: args.departmentId,
+      name: args.name ?? `Test Team ${id.slice(0, 8)}`,
+      colorToken: null,
+      createdByUserId: args.createdByUserId,
+      createdAt: new Date(),
+    });
+  return id;
+}
+
+/** Convenience: factory for a team_memberships row. */
+export async function factoryTeamMembership(args: {
+  teamId: string;
+  userId: string;
+  addedByUserId: string;
+  role?: "admin" | "member";
+}): Promise<void> {
+  const { teamMemberships } = await import("./db/schema.js");
+  await getDb()
+    .insert(teamMemberships)
+    .values({
+      teamId: args.teamId,
+      userId: args.userId,
+      role: args.role ?? "member",
+      addedByUserId: args.addedByUserId,
+      joinedAt: new Date(),
+    });
+}
+
+/**
+ * Factory for a fresh project row, optionally attached to a team via
+ * `team_projects` (role defaults to 'owner'). The post-migration project
+ * has no per-user shadow row — `creatorUserId` is the audit pointer, not
+ * a tenancy key. Access flows through team grants.
+ */
+export async function factoryProject(args: {
+  orgId: string;
+  creatorUserId: string;
+  teamId?: string;
+  teamRole?: "owner" | "contributor" | "viewer";
+  name?: string;
+}): Promise<string> {
+  const { projects, teamProjects } = await import("./db/schema.js");
+  const id = randomUUID();
+  await getDb()
+    .insert(projects)
+    .values({
+      id,
+      orgId: args.orgId,
+      creatorUserId: args.creatorUserId,
+      name: args.name ?? `Test Project ${id.slice(0, 8)}`,
+      sortIndex: 0,
+      colorToken: null,
+      createdAtMs: Date.now(),
+      updatedAtMs: Date.now(),
+      settings: {},
+    });
+  if (args.teamId) {
+    await getDb()
+      .insert(teamProjects)
+      .values({
+        teamId: args.teamId,
+        projectId: id,
+        role: args.teamRole ?? "owner",
+        grantedByUserId: args.creatorUserId,
+        grantedAt: new Date(),
+      });
+  }
+  return id;
+}
+
+/** Convenience: factory for a fresh note row at root of the given project. */
+export async function factoryNote(args: {
+  orgId: string;
+  projectId: string;
+  createdByUserId: string;
+  parentId?: string | null;
+  title?: string;
+  content?: string;
+  type?: string;
+  siblingIndex?: number;
+}): Promise<string> {
+  const { notes } = await import("./db/schema.js");
+  const id = randomUUID();
+  const t = Date.now();
+  await getDb()
+    .insert(notes)
+    .values({
+      id,
+      orgId: args.orgId,
+      projectId: args.projectId,
+      parentId: args.parentId ?? null,
+      createdByUserId: args.createdByUserId,
+      updatedByUserId: args.createdByUserId,
+      type: args.type ?? "markdown",
+      title: args.title ?? `Test Note ${id.slice(0, 8)}`,
+      content: args.content ?? "",
+      metadata: null,
+      siblingIndex: args.siblingIndex ?? 0,
+      createdAtMs: t,
+      updatedAtMs: t,
+    });
+  return id;
+}
+
+/**
+ * Removed in the org/team schema migration. Spaces and workspaces no
+ * longer exist as data-model entities; use `factoryDepartment` +
+ * `factoryTeam` for the ownership chain and pass `teamId` to
+ * `factoryProject` for the team_projects bridge.
+ *
+ * Kept as a throwing stub so test files that still import these factories
+ * fail with a clear pointer rather than a confusing "undefined is not a
+ * function" downstream. The import-level breakage signals which test
+ * files are due for the test-rewrite phase.
+ */
+export async function factorySpace(_args: {
   orgId: string;
   ownerUserId: string;
   kind?: "default" | "normal";
   name?: string;
 }): Promise<string> {
-  const { spaces, spaceMemberships } = await import("./db/schema.js");
-  const id = randomUUID();
-  const kind = args.kind ?? "normal";
-  await getDb()
-    .insert(spaces)
-    .values({
-      id,
-      orgId: args.orgId,
-      name: args.name ?? `Test Space ${id.slice(0, 8)}`,
-      kind,
-      createdByUserId: args.ownerUserId,
-      createdAt: new Date(),
-    });
-  await getDb()
-    .insert(spaceMemberships)
-    .values({
-      spaceId: id,
-      userId: args.ownerUserId,
-      role: "owner",
-      addedByUserId: args.ownerUserId,
-      joinedAt: new Date(),
-    });
-  return id;
+  throw new Error(
+    "factorySpace was removed in the org/team schema migration. " +
+      "Use factoryDepartment + factoryTeam instead.",
+  );
 }
 
-/** Convenience: factory for a fresh wpn_workspaces row. */
-export async function factoryWorkspace(args: {
+export async function factoryWorkspace(_args: {
   userId: string;
   orgId?: string;
   spaceId?: string;
   name?: string;
 }): Promise<string> {
-  const { wpnWorkspaces } = await import("./db/schema.js");
-  const id = randomUUID();
-  await getDb()
-    .insert(wpnWorkspaces)
-    .values({
-      id,
-      userId: args.userId,
-      orgId: args.orgId ?? null,
-      spaceId: args.spaceId ?? null,
-      visibility: "public",
-      creatorUserId: args.userId,
-      name: args.name ?? `Test Workspace ${id.slice(0, 8)}`,
-      sort_index: 0,
-      color_token: null,
-      created_at_ms: Date.now(),
-      updated_at_ms: Date.now(),
-      settings: {},
-    });
-  return id;
-}
-
-/** Convenience: factory for a fresh wpn_projects row. */
-export async function factoryProject(args: {
-  userId: string;
-  workspaceId: string;
-  orgId?: string;
-  spaceId?: string;
-  name?: string;
-}): Promise<string> {
-  const { wpnProjects } = await import("./db/schema.js");
-  const id = randomUUID();
-  await getDb()
-    .insert(wpnProjects)
-    .values({
-      id,
-      userId: args.userId,
-      orgId: args.orgId ?? null,
-      spaceId: args.spaceId ?? null,
-      workspace_id: args.workspaceId,
-      visibility: "public",
-      creatorUserId: args.userId,
-      name: args.name ?? `Test Project ${id.slice(0, 8)}`,
-      sort_index: 0,
-      color_token: null,
-      created_at_ms: Date.now(),
-      updated_at_ms: Date.now(),
-      settings: {},
-    });
-  return id;
+  throw new Error(
+    "factoryWorkspace was removed in the org/team schema migration. " +
+      "Use factoryTeam instead, and pass `teamId` to factoryProject.",
+  );
 }

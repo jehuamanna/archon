@@ -38,22 +38,11 @@ const SCOPE_RES = {
   "note-A": {
     noteId: "note-A",
     projectId: "p-A",
-    workspaceId: "w-A",
-    spaceId: "space-A",
-    orgId: "org-A",
-  },
-  "note-B": {
-    noteId: "note-B",
-    projectId: "p-B",
-    workspaceId: "w-B",
-    spaceId: "space-B",
     orgId: "org-A",
   },
   "note-C": {
     noteId: "note-C",
     projectId: "p-C",
-    workspaceId: "w-C",
-    spaceId: "space-C",
     orgId: "org-C",
   },
 } as const;
@@ -91,12 +80,12 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
       if (url.endsWith("/orgs/active") && method === "POST") {
         const parsed = JSON.parse(body ?? "{}") as { orgId?: string };
         const targetOrg = parsed.orgId ?? "org-X";
-        const targetSpace = targetOrg === "org-C" ? "space-C-default" : "space-A";
+        const targetTeam = targetOrg === "org-C" ? "team-C-default" : "team-A";
         return new Response(
           JSON.stringify({
             token: `token-after-${targetOrg}`,
             activeOrgId: targetOrg,
-            activeSpaceId: targetSpace,
+            activeTeamId: targetTeam,
           }),
           { status: 200, headers: { "Content-Type": "application/json" } },
         );
@@ -109,11 +98,10 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     globalThis.fetch = origFetch;
   });
 
-  it("no-op when note already in active scope", async () => {
+  it("no-op when note already in active org", async () => {
     const holder = new McpTokenHolder();
     holder.setTokens("tok", null);
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
     const client = new WpnHttpClient("http://127.0.0.1:9", holder);
 
     const r = await client.ensureScopeForNote("note-A");
@@ -121,37 +109,14 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     assert.equal(r.switched, false);
     assert.equal(r.found, true);
     assert.equal(holder.activeOrgId, "org-A");
-    assert.equal(holder.activeSpaceId, "space-A");
     const orgActive = calls.find((c) => c.url.endsWith("/orgs/active"));
     assert.equal(orgActive, undefined, "should not have called /orgs/active");
   });
 
-  it("same-org space switch updates only the space header (no JWT swap)", async () => {
+  it("cross-org switch swaps JWT and updates active team claim", async () => {
     const holder = new McpTokenHolder();
     holder.setTokens("tok", null);
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
-    const client = new WpnHttpClient("http://127.0.0.1:9", holder);
-
-    const r = await client.ensureScopeForNote("note-B");
-
-    assert.equal(r.switched, true);
-    assert.equal(r.found, true);
-    assert.equal(r.fromOrgId, "org-A");
-    assert.equal(r.toOrgId, "org-A");
-    assert.equal(r.fromSpaceId, "space-A");
-    assert.equal(r.toSpaceId, "space-B");
-    assert.equal(holder.activeSpaceId, "space-B");
-    assert.equal(holder.accessToken, "tok", "JWT should not have been swapped");
-    const orgActive = calls.find((c) => c.url.endsWith("/orgs/active"));
-    assert.equal(orgActive, undefined, "no JWT swap for same-org space change");
-  });
-
-  it("cross-org switch swaps JWT and forces target space", async () => {
-    const holder = new McpTokenHolder();
-    holder.setTokens("tok", null);
-    holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
     const client = new WpnHttpClient("http://127.0.0.1:9", holder);
 
     const r = await client.ensureScopeForNote("note-C");
@@ -160,10 +125,8 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     assert.equal(r.found, true);
     assert.equal(r.fromOrgId, "org-A");
     assert.equal(r.toOrgId, "org-C");
-    assert.equal(r.fromSpaceId, "space-A");
-    assert.equal(r.toSpaceId, "space-C");
     assert.equal(holder.activeOrgId, "org-C");
-    assert.equal(holder.activeSpaceId, "space-C");
+    assert.equal(holder.activeTeamId, "team-C-default");
     assert.equal(holder.accessToken, "token-after-org-C");
     const orgActive = calls.find((c) => c.url.endsWith("/orgs/active"));
     assert.ok(orgActive, "expected POST /orgs/active for cross-org switch");
@@ -175,7 +138,6 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     const holder = new McpTokenHolder();
     holder.setTokens("tok", null);
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
     const client = new WpnHttpClient("http://127.0.0.1:9", holder);
 
     const r = await client.ensureScopeForNote("note-missing");
@@ -183,14 +145,12 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     assert.equal(r.switched, false);
     assert.equal(r.found, false);
     assert.equal(holder.activeOrgId, "org-A");
-    assert.equal(holder.activeSpaceId, "space-A");
   });
 
   it("returns found=false (no throw) on network/server error", async () => {
     const holder = new McpTokenHolder();
     holder.setTokens("tok", null);
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
     const broken = new WpnHttpClient("http://127.0.0.1:9", holder);
     globalThis.fetch = async () =>
       new Response(JSON.stringify({ error: "boom" }), {
@@ -204,11 +164,13 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
     assert.equal(holder.activeOrgId, "org-A");
   });
 
-  it("invalidates notes-with-context cache when space changes", async () => {
+  it("invalidates notes-with-context cache on cross-org switch", async () => {
     let notesContextHits = 0;
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = requestUrl(input);
       const method = (init?.method ?? "GET").toUpperCase();
+      const body =
+        typeof init?.body === "string" ? init.body : init?.body ? String(init.body) : null;
       if (url.endsWith("/wpn/notes-with-context")) {
         notesContextHits++;
         return new Response(JSON.stringify({ notes: [] }), {
@@ -218,25 +180,36 @@ describe("WpnHttpClient.ensureScopeForNote", () => {
       }
       const scopeMatch = url.match(/\/wpn\/notes\/([^/]+)\/scope$/);
       if (scopeMatch && method === "GET") {
-        return new Response(JSON.stringify(SCOPE_RES["note-B"]), {
+        return new Response(JSON.stringify(SCOPE_RES["note-C"]), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
+      }
+      if (url.endsWith("/orgs/active") && method === "POST") {
+        const parsed = JSON.parse(body ?? "{}") as { orgId?: string };
+        const targetOrg = parsed.orgId ?? "org-X";
+        return new Response(
+          JSON.stringify({
+            token: `token-after-${targetOrg}`,
+            activeOrgId: targetOrg,
+            activeTeamId: "team-C-default",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
       }
       return new Response("not found", { status: 404 });
     };
     const holder = new McpTokenHolder();
     holder.setTokens("tok", null);
     holder.setActiveOrg("org-A");
-    holder.setActiveSpace("space-A");
     const client = new WpnHttpClient("http://127.0.0.1:9", holder, {
       notesWithContextTtlMs: 60_000,
     });
 
     await client.getNotesWithContext();
     assert.equal(notesContextHits, 1);
-    await client.ensureScopeForNote("note-B");
+    await client.ensureScopeForNote("note-C");
     await client.getNotesWithContext();
-    assert.equal(notesContextHits, 2, "scope switch should invalidate the catalog cache");
+    assert.equal(notesContextHits, 2, "cross-org switch should invalidate the catalog cache");
   });
 });

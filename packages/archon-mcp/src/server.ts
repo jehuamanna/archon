@@ -33,7 +33,6 @@ import {
 } from "./note-vfs-resolve.js";
 
 const resolveInput = z.object({
-  workspaceName: z.string().describe("Workspace name (trimmed, case-insensitive match)"),
   projectName: z.string().describe("Project name (trimmed, case-insensitive match)"),
   noteTitle: z.string().describe("Note title (trimmed, case-insensitive match)"),
 });
@@ -90,18 +89,10 @@ const noteRenameInput = z.object({
 
 const findProjectsInput = z.object({
   query: z.string().describe("Project name or project UUID"),
-  workspaceQuery: z
-    .string()
-    .optional()
-    .describe("Optional workspace name or UUID to limit search (required if project name clashes across workspaces)."),
 });
 
 const findNotesInput = z.object({
   query: z.string().describe("Note title or note UUID"),
-  workspaceQuery: z
-    .string()
-    .optional()
-    .describe("Optional workspace name or UUID to narrow results"),
   projectQuery: z
     .string()
     .optional()
@@ -112,26 +103,18 @@ const executeNoteInput = z.object({
   noteQuery: z
     .string()
     .describe("Note title or canonical note UUID (same matching rules as archon_find_notes)."),
-  workspaceQuery: z
-    .string()
-    .optional()
-    .describe("Optional workspace name or UUID to narrow results before fetch."),
   projectQuery: z
     .string()
     .optional()
     .describe("Optional project name or UUID to narrow results before fetch."),
 });
 
-const listWpnInput = z.object({
+const listOrgTreeInput = z.object({
   scope: z
-    .enum(["workspaces", "projects", "notes", "full_tree"])
+    .enum(["projects", "notes", "full_tree"])
     .describe(
-      "workspaces: list all workspaces. projects: list projects in a workspace (requires workspaceId). notes: flat note tree of a project (requires projectId). full_tree: all workspaces, projects, and notes in one payload.",
+      "projects: list all projects readable to the caller in the active org. notes: flat note tree of a project (requires projectId). full_tree: all projects and notes in one payload.",
     ),
-  workspaceId: z
-    .string()
-    .optional()
-    .describe("Required when scope=projects. Workspace UUID."),
   projectId: z
     .string()
     .optional()
@@ -142,20 +125,11 @@ const listWpnInput = z.object({
     .describe(
       "Optional: override active org for this single call. Does not change the session's active org; use archon_set_active_org for that.",
     ),
-  spaceId: z
-    .string()
-    .optional()
-    .describe("Optional: override active space for this single call."),
 });
 
-function validateListWpnArgs(
-  args: z.infer<typeof listWpnInput>,
+function validateListOrgTreeArgs(
+  args: z.infer<typeof listOrgTreeInput>,
 ): { ok: true } | { ok: false; error: string } {
-  if (args.scope === "projects") {
-    if (!args.workspaceId || !args.workspaceId.trim()) {
-      return { ok: false, error: "scope=projects requires workspaceId." };
-    }
-  }
   if (args.scope === "notes") {
     if (!args.projectId || !args.projectId.trim()) {
       return { ok: false, error: "scope=notes requires projectId." };
@@ -187,12 +161,11 @@ const createChildNoteInput = z.object({
   parentNoteId: z
     .string()
     .optional()
-    .describe("Parent note UUID. When set, workspace/project/path fields are ignored."),
-  workspaceName: z
+    .describe("Parent note UUID. When set, project/path fields are ignored."),
+  projectName: z
     .string()
     .optional()
-    .describe("With projectName + parentPathTitles, names the workspace (trim, case-insensitive)."),
-  projectName: z.string().optional().describe("Project name (trim, case-insensitive)."),
+    .describe("With parentPathTitles, names the project (trim, case-insensitive)."),
   parentPathTitles: z
     .array(z.string())
     .optional()
@@ -200,7 +173,7 @@ const createChildNoteInput = z.object({
   parentWpnPath: z
     .string()
     .optional()
-    .describe('Convenience: "Workspace / Project / Title1 / …" split on ` / ` (space-slash-space).'),
+    .describe('Convenience: "Project / Title1 / …" split on ` / ` (space-slash-space).'),
   title: z.string().describe("Title for the new child note."),
   content: z.string().describe("Body for the new child note."),
   type: z.string().optional().describe("Note type; defaults to markdown when omitted."),
@@ -214,18 +187,17 @@ function validateCreateChildNoteParent(
   const hasId = idTrim.length > 0;
   const pathTrim = data.parentWpnPath?.trim() ?? "";
   const hasWpnPath = pathTrim.length > 0;
-  const ws = data.workspaceName?.trim() ?? "";
   const proj = data.projectName?.trim() ?? "";
   const titles = data.parentPathTitles;
   const hasStruct =
-    ws.length > 0 && proj.length > 0 && Array.isArray(titles) && titles.length > 0;
+    proj.length > 0 && Array.isArray(titles) && titles.length > 0;
 
   const modes = (hasId ? 1 : 0) + (hasWpnPath ? 1 : 0) + (hasStruct ? 1 : 0);
   if (modes !== 1) {
     return {
       ok: false,
       error:
-        "Provide exactly one parent selector: parentNoteId, OR parentWpnPath, OR workspaceName + projectName + parentPathTitles (non-empty array).",
+        "Provide exactly one parent selector: parentNoteId, OR parentWpnPath, OR projectName + parentPathTitles (non-empty array).",
     };
   }
   if (hasStruct && titles) {
@@ -292,34 +264,100 @@ function validateWriteNoteArgs(
   return { ok: true };
 }
 
-const createWorkspaceInput = z.object({
-  name: z.string().min(1).describe("Name for the new workspace."),
-});
-
-const updateWorkspaceInput = z.object({
-  workspaceId: z.string().describe("Workspace UUID."),
-  name: z.string().optional().describe("New name for the workspace."),
-  sort_index: z.number().optional().describe("Sort order index."),
-  color_token: z.string().nullable().optional().describe("Color token string, or null to clear."),
-});
-
-const deleteWorkspaceInput = z.object({
-  workspaceId: z.string().describe("Workspace UUID to delete. Deletes all contained projects and notes."),
-});
-
-const createSpaceInput = z.object({
-  name: z.string().min(1).describe("Name for the new space."),
+const listTeamsInput = z.object({
   orgId: z
     .string()
     .optional()
-    .describe("Parent org UUID. Defaults to the active org for the current session."),
+    .describe(
+      "Org UUID. Defaults to the active org for the current session.",
+    ),
 });
 
-const moveWorkspaceToSpaceInput = z.object({
-  workspaceId: z.string().describe("Workspace UUID to move."),
-  targetSpaceId: z
+const listDepartmentsInput = z.object({
+  orgId: z
     .string()
-    .describe("Destination space UUID. Must be in the same org as the workspace."),
+    .optional()
+    .describe(
+      "Org UUID. Defaults to the active org for the current session.",
+    ),
+});
+
+const createTeamInput = z.object({
+  name: z.string().min(1).describe("Name for the new team."),
+  departmentId: z
+    .string()
+    .describe(
+      "Parent department UUID. Every team belongs to a department; use archon_list_departments to find one.",
+    ),
+  orgId: z
+    .string()
+    .optional()
+    .describe("Org UUID. Defaults to the active org for the current session."),
+  colorToken: z.string().nullable().optional().describe("Optional color token, or null to clear."),
+});
+
+const updateTeamInput = z.object({
+  teamId: z.string().describe("Team UUID."),
+  name: z.string().optional().describe("New name for the team."),
+  colorToken: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Color token string, or null to clear."),
+  departmentId: z
+    .string()
+    .optional()
+    .describe(
+      "Move the team to a different department. The new department must belong to the same org.",
+    ),
+});
+
+const deleteTeamInput = z.object({
+  teamId: z
+    .string()
+    .describe(
+      "Team UUID to delete. Memberships and project grants cascade. Projects themselves are NOT deleted (team_projects is many-to-many).",
+    ),
+});
+
+const createDepartmentInput = z.object({
+  name: z.string().min(1).describe("Name for the new department."),
+  orgId: z
+    .string()
+    .optional()
+    .describe("Org UUID. Defaults to the active org for the current session."),
+  colorToken: z.string().nullable().optional().describe("Optional color token, or null to clear."),
+});
+
+const updateDepartmentInput = z.object({
+  departmentId: z.string().describe("Department UUID."),
+  name: z.string().optional().describe("New name for the department."),
+  colorToken: z
+    .string()
+    .nullable()
+    .optional()
+    .describe("Color token string, or null to clear."),
+});
+
+const deleteDepartmentInput = z.object({
+  departmentId: z
+    .string()
+    .describe(
+      "Department UUID to delete. Refused while teams still belong to it — move or delete those teams first.",
+    ),
+});
+
+const grantTeamProjectInput = z.object({
+  teamId: z.string().describe("Team UUID."),
+  projectId: z.string().describe("Project UUID. Must belong to the team's org."),
+  role: z
+    .enum(["owner", "contributor", "viewer"])
+    .describe("Role to grant the team on the project. Idempotent — upserts on (teamId, projectId)."),
+});
+
+const revokeTeamProjectInput = z.object({
+  teamId: z.string().describe("Team UUID."),
+  projectId: z.string().describe("Project UUID."),
 });
 
 const installSkillInput = z.object({
@@ -335,29 +373,17 @@ const installSkillInput = z.object({
     .describe(
       "Install only the skill whose frontmatter `name` matches this value. Ignored when noteId is given.",
     ),
-  spaceName: z
-    .string()
-    .optional()
-    .describe(
-      "Space to scan for skills. Default: \"Archon\". Ignored when noteId is given.",
-    ),
-  workspaceName: z
-    .string()
-    .optional()
-    .describe(
-      "Workspace to scan for skills. Default: \"Archon\". Ignored when noteId is given.",
-    ),
   projectName: z
     .string()
     .optional()
     .describe(
-      "Project to scan for skills. Default: \"Skills\". Ignored when noteId is given.",
+      'Project to scan for skills. Default: "Skills". Ignored when noteId is given.',
     ),
   noteName: z
     .string()
     .optional()
     .describe(
-      "Parent note whose direct children are the skill notes. Default: \"SKILLS.md\". Ignored when noteId is given.",
+      'Parent note whose direct children are the skill notes. Default: "SKILLS.md". Ignored when noteId is given.',
     ),
   repoPath: z
     .string()
@@ -382,16 +408,24 @@ const installSkillInput = z.object({
 });
 
 const createProjectInput = z.object({
-  workspaceId: z.string().describe("Parent workspace UUID."),
   name: z.string().min(1).describe("Name for the new project."),
+  teamId: z
+    .string()
+    .optional()
+    .describe(
+      "Optional team UUID to grant initial access. When omitted, the project is created with no team grants — only the creator can read/write it via the per-creator role.",
+    ),
+  teamRole: z
+    .enum(["owner", "contributor", "viewer"])
+    .optional()
+    .describe("Role granted to the team. Default 'owner' when teamId is set."),
 });
 
 const updateProjectInput = z.object({
   projectId: z.string().describe("Project UUID."),
   name: z.string().optional().describe("New name for the project."),
-  sort_index: z.number().optional().describe("Sort order index."),
-  color_token: z.string().nullable().optional().describe("Color token string, or null to clear."),
-  workspace_id: z.string().optional().describe("Move project to a different workspace by id."),
+  sortIndex: z.number().optional().describe("Sort order index."),
+  colorToken: z.string().nullable().optional().describe("Color token string, or null to clear."),
 });
 
 const deleteProjectInput = z.object({
@@ -403,7 +437,6 @@ const deleteNotesInput = z.object({
 });
 
 const moveNoteInput = z.object({
-  projectId: z.string().describe("Project UUID the note belongs to."),
   draggedId: z.string().describe("Note UUID to move."),
   targetId: z.string().describe("Note UUID that is the drop target."),
   placement: z.enum(["before", "after", "into"]).describe(
@@ -422,16 +455,12 @@ const backlinksInput = z.object({
 
 const copyIdInput = z.object({
   kind: z
-    .enum(["org", "space", "workspace", "project", "note"])
+    .enum(["org", "department", "team", "project", "note"])
     .describe("What kind of id to resolve."),
   query: z
     .string()
     .min(1)
     .describe("Name (trim + case-insensitive) or UUID. UUIDs pass through as-is."),
-  workspaceQuery: z
-    .string()
-    .optional()
-    .describe("Narrow project/note searches to a workspace name or UUID."),
   projectQuery: z
     .string()
     .optional()
@@ -439,13 +468,13 @@ const copyIdInput = z.object({
   orgQuery: z
     .string()
     .optional()
-    .describe("Narrow space searches to an org name, slug, or UUID."),
-  spaceQuery: z
+    .describe(
+      "Narrow team / department searches to an org name, slug, or UUID. Defaults to the active org.",
+    ),
+  departmentQuery: z
     .string()
     .optional()
-    .describe(
-      "Unused today; reserved for future workspace-by-space narrowing. Callers should pass workspaceQuery instead.",
-    ),
+    .describe("Narrow team searches to a department name or UUID."),
 });
 
 const moveNoteToProjectInput = z.object({
@@ -460,22 +489,13 @@ const moveNoteToProjectInput = z.object({
     ),
 });
 
-const moveProjectInput = z.object({
-  projectId: z.string().describe("Project UUID to move."),
-  targetWorkspaceId: z
-    .string()
-    .describe(
-      "Destination workspace UUID. Must be in the same space/org as the source.",
-    ),
-});
-
 const duplicateProjectInput = z.object({
   projectId: z.string().describe("Project UUID to duplicate."),
-  targetWorkspaceId: z
+  teamId: z
     .string()
     .optional()
     .describe(
-      "Destination workspace UUID. Defaults to the source workspace. Must be in the same space/org.",
+      "Optional team UUID to grant 'owner' on the duplicate (idempotent). When omitted, the duplicate has no team grants.",
     ),
   newName: z
     .string()
@@ -483,29 +503,22 @@ const duplicateProjectInput = z.object({
     .describe("Optional name for the duplicate. Defaults to the source project name."),
 });
 
-const duplicateWorkspaceInput = z.object({
-  workspaceId: z.string().describe("Workspace UUID to duplicate."),
-  newName: z
-    .string()
-    .optional()
-    .describe("Optional name for the duplicate. Defaults to the source workspace name."),
-  targetSpaceId: z
-    .string()
+const exportOrgInput = z.object({
+  projectIds: z
+    .array(z.string())
     .optional()
     .describe(
-      "Destination space UUID. Defaults to the source workspace's space. Must be in the same org.",
+      "Optional list of project UUIDs to export. Omit to export every project the caller can read in the active org.",
     ),
 });
 
-const exportWorkspacesInput = z.object({
-  workspaceIds: z
-    .array(z.string())
-    .optional()
-    .describe("Optional list of workspace UUIDs to export. Omit to export all."),
-});
-
-const importWorkspacesInput = z.object({
+const importOrgInput = z.object({
   zipBase64: z.string().describe("Base64-encoded ZIP file content from a previous export."),
+  teamId: z
+    .string()
+    .describe(
+      "Target team UUID. Imported projects get an 'owner' team_projects grant for this team and inherit the team's org.",
+    ),
 });
 
 const archonLoginInput = z.object({
@@ -537,23 +550,21 @@ function wpnCatch(e: unknown, runtime: McpAuthRuntime): ToolReturn {
 
 /**
  * Surfaced on tool results when a noteId-driven call automatically switched
- * the active org and/or space to make the note discoverable. Lets the calling
- * agent (and the user) see that session state changed.
+ * the active org to make the note discoverable. Lets the calling agent
+ * (and the user) see that session state changed.
  */
 type ScopeSwitch = {
   fromOrgId: string | null;
   toOrgId: string | null;
-  fromSpaceId: string | null;
-  toSpaceId: string | null;
 };
 
 /**
- * Ensure the active org/space matches the home of `noteId` before the tool
+ * Ensure the active org matches the home of `noteId` before the tool
  * proceeds. Returns the switch record when state changed, or `null` when
- * already in scope (or when noteId is empty / not a UUID — in which case the
- * caller should fall through to its normal lookup logic). Never throws — a
- * scope-resolution error is swallowed and the caller's downstream call is
- * allowed to surface the underlying failure on its own.
+ * already in scope (or when noteId is empty / not a UUID — in which case
+ * the caller should fall through to its normal lookup logic). Never throws
+ * — a scope-resolution error is swallowed and the caller's downstream call
+ * is allowed to surface the underlying failure on its own.
  */
 async function ensureNoteScope(
   client: WpnHttpClient,
@@ -568,8 +579,6 @@ async function ensureNoteScope(
     return {
       fromOrgId: r.fromOrgId,
       toOrgId: r.toOrgId,
-      fromSpaceId: r.fromSpaceId,
-      toSpaceId: r.toSpaceId,
     };
   } catch {
     return null;
@@ -585,7 +594,7 @@ function withScopeSwitched<T extends Record<string, unknown>>(
   return { ...payload, scopeSwitched: switched };
 }
 
-/** Compose "Workspace / Project / Title" for an image note, or null when the context catalog misses it. */
+/** Compose "Project / Title" for an image note, or null when the catalog misses it. */
 async function resolveNotePathForImage(
   client: WpnHttpClient,
   note: WpnNoteDetail,
@@ -594,7 +603,7 @@ async function resolveNotePathForImage(
     const rows = await client.getNotesWithContext();
     const row = rows.find((r) => r.id === note.id);
     if (!row) return null;
-    return `${row.workspace_name} / ${row.project_name} / ${row.title}`;
+    return `${row.project_name} / ${row.title}`;
   } catch {
     return null;
   }
@@ -676,17 +685,20 @@ function parseJwtUnverified(accessToken: string): {
 }
 
 const MCP_INSTRUCTIONS =
-  "Archon WPN tools: archon_list_wpn lists workspaces / projects / notes or a full_tree; " +
-  "archon_create_workspace / archon_update_workspace / archon_delete_workspace manage workspaces; " +
+  "Archon WPN tools: archon_list_org_tree lists projects / notes / full_tree in the active org; " +
+  "archon_create_team / archon_update_team / archon_delete_team manage teams; " +
+  "archon_create_department / archon_update_department / archon_delete_department manage departments; " +
+  "archon_list_teams / archon_list_departments enumerate the active org's teams and departments; " +
+  "archon_grant_team_project / archon_revoke_team_project manage team↔project access grants; " +
   "archon_create_project / archon_update_project / archon_delete_project manage projects; " +
-  "archon_find_projects / archon_find_notes resolve by name or UUID with path (Workspace / Project / Title) and ambiguity hints; " +
-  "archon_resolve_note finds a noteId from workspace+project+title; archon_get_note reads a note (markdown + metadata, never image bytes); " +
+  "archon_find_projects / archon_find_notes resolve by name or UUID with path (Project / Title) and ambiguity hints; " +
+  "archon_resolve_note finds a noteId from project+title; archon_get_note reads a note (markdown + metadata, never image bytes); " +
   "archon_get_image_note delivers an image-type note's bytes (auto|inline|base64|url|thumbnail), defaulting to a native MCP image block and falling back to a signed URL over the 512 KiB cap — EXIF/text metadata is stripped for JPEG/PNG/WebP in byte-returning modes (url mode streams raw R2 bytes); " +
   "archon_get_note_title returns only { noteId, title } for composing renames; archon_note_rename PATCHes the full title (duplicate sibling title → error); " +
   "archon_execute_note resolves by title or id, returns ambiguity (path + noteId per candidate) for the user to pick, or returns the full note when unique — then the agent follows note.content; " +
-  "archon_create_child_note creates a direct child under a parent given by parentNoteId OR by workspace+project+nested title path OR parentWpnPath string; " +
+  "archon_create_child_note creates a direct child under a parent given by parentNoteId OR by project+nested title path OR parentWpnPath string; " +
   "archon_write_note patches or creates notes; archon_delete_notes bulk-deletes notes by id; archon_move_note reparents/reorders a note (before/after/into); archon_duplicate_subtree copies a note branch; " +
-  "archon_backlinks finds notes referencing a given note id; archon_export_workspaces / archon_import_workspaces handle ZIP-based backup and restore; " +
+  "archon_backlinks finds notes referencing a given note id; archon_export_org / archon_import_org handle ZIP-based backup and restore (import targets a team via teamId); " +
   "archon_write_back_child creates a child under a task note after completing work scoped to that note. " +
   "Write-back policy: when you finish work that was driven by a specific Archon note, call archon_write_back_child with taskNoteId equal to that note so the outcome is attached as a new direct child (audit trail). " +
   "If that note already has other children, still attach the write-back as a new direct child of the same task note unless the user asked for a different placement. " +
@@ -694,8 +706,8 @@ const MCP_INSTRUCTIONS =
   "Auth: use ARCHON_SYNC_API_BASE + ARCHON_ACCESS_TOKEN (cloud), ARCHON_LOCAL_WPN_URL + ARCHON_LOCAL_WPN_TOKEN (Electron loopback), or ARCHON_MCP_CLOUD_SESSION=1 for browser (archon_login_browser_*) or password (archon_login). " +
   "If any tool returns JSON with error \"unauthenticated\" and suggested_tools, call archon_login_browser_start first (preferred), complete the browser step, use archon_login_browser_poll with device_code until authorized, or use archon_login — do not use archon_logout for that case. " +
   "archon_auth_status reports session state without exposing secrets. " +
-  "Cross-org: archon_list_orgs lists the user's orgs; archon_set_active_org flips the session to another org (re-issues JWT, resets active space); archon_list_wpn accepts optional orgId/spaceId for a one-shot read against a different org without changing the session. " +
-  "Auto scope-switch: tools that take a noteId (get_note, get_image_note, get_note_with_links, get_note_title, note_rename, execute_note (UUID), find_notes (UUID), create_child_note (parentNoteId), write_back_child, write_note (patch_existing or create_child/sibling with anchorId), delete_notes (first id), move_note, move_note_to_project, duplicate_subtree, backlinks) automatically switch the active org/space to the note's home before running, so you don't have to call archon_set_active_org first. When a switch happens, the tool result includes a `scopeSwitched` field with the before/after orgId and spaceId.";
+  "Cross-org: archon_list_orgs lists the user's orgs; archon_set_active_org flips the session to another org (re-issues JWT with activeOrgId + activeTeamId); archon_list_org_tree accepts optional orgId for a one-shot read against a different org without changing the session. " +
+  "Auto scope-switch: tools that take a noteId (get_note, get_image_note, get_note_with_links, get_note_title, note_rename, execute_note (UUID), find_notes (UUID), create_child_note (parentNoteId), write_back_child, write_note (patch_existing or create_child/sibling with anchorId), delete_notes (first id), move_note, move_note_to_project, duplicate_subtree, backlinks) automatically switch the active org to the note's home before running, so you don't have to call archon_set_active_org first. When a switch happens, the tool result includes a `scopeSwitched` field with the before/after orgId.";
 
 /**
  * Create a fully-configured McpServer with all Archon WPN tools registered.
@@ -715,12 +727,30 @@ export function createArchonMcpServer(
     },
   );
 
+  /** Resolve the org id to use for an org-scoped tool call. */
+  const resolveOrgIdForCall = async (
+    overrideOrgId?: string,
+  ): Promise<string> => {
+    const trimmed = overrideOrgId?.trim();
+    if (trimmed) return trimmed;
+    if (runtime.holder.activeOrgId) return runtime.holder.activeOrgId;
+    const r = await client.listMyOrgs();
+    const orgId = r.activeOrgId ?? r.defaultOrgId ?? null;
+    if (!orgId) {
+      throw new Error(
+        "No active org available. Pass orgId explicitly or call archon_set_active_org first.",
+      );
+    }
+    runtime.holder.setActiveOrg(orgId);
+    return orgId;
+  };
+
   mcp.registerTool(
     "archon_find_projects",
     {
       description:
-        "Find project(s) by name or id. Returns status unique | ambiguous | none | workspace_ambiguous; " +
-        "each match includes projectId, names, and path \"Workspace / Project\". On clash, all candidates are listed.",
+        "Find project(s) by name or id within the active org. Returns status unique | ambiguous | none; " +
+        "each match includes projectId and path \"Project\". On clash, all candidates are listed.",
       inputSchema: findProjectsInput,
     },
     async (args) => {
@@ -729,7 +759,7 @@ export function createArchonMcpServer(
         return denied;
       }
       try {
-        const result = await findProjectsByQuery(client, args.query, args.workspaceQuery);
+        const result = await findProjectsByQuery(client, args.query);
         return jsonResult(result);
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -741,10 +771,10 @@ export function createArchonMcpServer(
     "archon_find_notes",
     {
       description:
-        "Find note(s) by title or id using GET /wpn/notes-with-context. Optional workspaceQuery / projectQuery narrow scope. " +
-        "Returns status unique | ambiguous | none | workspace_ambiguous | project_ambiguous; " +
-        "each match includes noteId, title, and path \"Workspace / Project / Title\". " +
-        "When query is a UUID, the active org/space is auto-switched to the note's home before searching (response includes scopeSwitched).",
+        "Find note(s) by title or id using GET /wpn/notes-with-context. Optional projectQuery narrows scope. " +
+        "Returns status unique | ambiguous | none | project_ambiguous; " +
+        "each match includes noteId, title, and path \"Project / Title\". " +
+        "When query is a UUID, the active org is auto-switched to the note's home before searching (response includes scopeSwitched).",
       inputSchema: findNotesInput,
     },
     async (args) => {
@@ -758,7 +788,6 @@ export function createArchonMcpServer(
         const result = findNotesByQuery(
           rows,
           args.query,
-          args.workspaceQuery,
           args.projectQuery,
         );
         return jsonResult(withScopeSwitched(result as Record<string, unknown>, switched));
@@ -769,73 +798,45 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_list_wpn",
+    "archon_list_org_tree",
     {
       description:
-        "List WPN data: workspaces (GET /wpn/workspaces), projects in a workspace, flat note tree for a project, or full_tree (all nested). " +
-        "Optional orgId / spaceId override the active context for this single call only (restored afterwards).",
-      inputSchema: listWpnInput,
+        "List active-org content: projects (GET /wpn/projects), flat note tree for a project (requires projectId), or full_tree (all projects + notes in one payload via GET /wpn/full-tree). " +
+        "Optional orgId overrides the active org for this single call only (restored afterwards).",
+      inputSchema: listOrgTreeInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) {
         return denied;
       }
-      const validation = validateListWpnArgs(args);
+      const validation = validateListOrgTreeArgs(args);
       if (!validation.ok) {
         return errorResult(validation.error);
       }
       const orgOverride = args.orgId?.trim() || null;
-      const spaceOverride = args.spaceId?.trim() || null;
       const prevOrg = runtime.holder.activeOrgId;
-      const prevSpace = runtime.holder.activeSpaceId;
-      const restoreHolder = orgOverride !== null || spaceOverride !== null;
+      const restoreHolder = orgOverride !== null;
       if (restoreHolder) {
-        if (orgOverride !== null) runtime.holder.setActiveOrg(orgOverride);
-        if (spaceOverride !== null) runtime.holder.setActiveSpace(spaceOverride);
+        runtime.holder.setActiveOrg(orgOverride);
         client.invalidateNotesWithContextCache();
       }
       try {
-        if (args.scope === "workspaces") {
-          const workspaces = await client.getWorkspaces();
-          return jsonResult({ scope: "workspaces", workspaces });
-        }
         if (args.scope === "projects") {
-          const projects = await client.getProjects(args.workspaceId!);
-          return jsonResult({
-            scope: "projects",
-            workspaceId: args.workspaceId,
-            projects,
-          });
+          const projects = await client.listProjects();
+          return jsonResult({ scope: "projects", projects });
         }
         if (args.scope === "notes") {
           const notes = await client.getNotesFlat(args.projectId!);
           return jsonResult({ scope: "notes", projectId: args.projectId, notes });
         }
-        const workspaces = await client.getWorkspaces();
-        type Row = { id: string; name?: string };
-        const wsRows = workspaces as Row[];
-        const tree: {
-          workspace: Row;
-          projects: { project: Row; notes: unknown[] }[];
-        }[] = [];
-        for (const w of wsRows) {
-          const projectsRaw = await client.getProjects(w.id);
-          const projects = projectsRaw as Row[];
-          const projectBlocks: { project: Row; notes: unknown[] }[] = [];
-          for (const p of projects) {
-            const notes = await client.getNotesFlat(p.id);
-            projectBlocks.push({ project: p, notes });
-          }
-          tree.push({ workspace: w, projects: projectBlocks });
-        }
-        return jsonResult({ scope: "full_tree", tree });
+        const tree = await client.getFullTree();
+        return jsonResult({ scope: "full_tree", ...tree });
       } catch (e) {
         return wpnCatch(e, runtime);
       } finally {
         if (restoreHolder) {
           runtime.holder.setActiveOrg(prevOrg);
-          runtime.holder.setActiveSpace(prevSpace);
           client.invalidateNotesWithContextCache();
         }
       }
@@ -843,20 +844,19 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_create_workspace",
+    "archon_list_teams",
     {
       description:
-        "Create a new workspace. Returns the workspace id and name.",
-      inputSchema: createWorkspaceInput,
+        "List teams in an org. Returns { teams: [{ teamId, orgId, departmentId, name, colorToken, memberCount, createdAt }] }.",
+      inputSchema: listTeamsInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
-      if (denied) {
-        return denied;
-      }
+      if (denied) return denied;
       try {
-        const workspace = await client.createWorkspace(args.name);
-        return jsonResult({ ok: true as const, workspace });
+        const orgId = await resolveOrgIdForCall(args.orgId);
+        const teams = await client.listTeamsForOrg(orgId);
+        return jsonResult({ orgId, teams });
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -864,21 +864,19 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_update_workspace",
+    "archon_list_departments",
     {
-      description: "Update a workspace (rename, reorder, change color). Returns the updated workspace.",
-      inputSchema: updateWorkspaceInput,
+      description:
+        "List departments in an org. Returns { departments: [{ departmentId, orgId, name, colorToken, teamCount, memberCount, createdAt }] }.",
+      inputSchema: listDepartmentsInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const patch: { name?: string; sort_index?: number; color_token?: string | null } = {};
-        if (args.name !== undefined) patch.name = args.name;
-        if (args.sort_index !== undefined) patch.sort_index = args.sort_index;
-        if (args.color_token !== undefined) patch.color_token = args.color_token;
-        const workspace = await client.updateWorkspace(args.workspaceId, patch);
-        return jsonResult({ ok: true as const, workspace });
+        const orgId = await resolveOrgIdForCall(args.orgId);
+        const departments = await client.listDepartmentsForOrg(orgId);
+        return jsonResult({ orgId, departments });
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -886,53 +884,164 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_create_space",
+    "archon_create_team",
     {
       description:
-        "Create a new Space inside an Org. If orgId is omitted, uses the active org for this session. Caller becomes the Space owner.",
-      inputSchema: createSpaceInput,
+        "Admin-only: create a new team inside a department of the active (or named) org. Caller must be org-admin or master-admin.",
+      inputSchema: createTeamInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        let orgId = args.orgId?.trim();
-        if (!orgId) {
-          orgId = runtime.holder.activeOrgId ?? undefined;
-        }
-        if (!orgId) {
-          const r = await client.listMyOrgs();
-          orgId = r.activeOrgId ?? r.defaultOrgId ?? undefined;
-        }
-        if (!orgId) {
-          throw new Error(
-            "No active org available. Pass orgId explicitly or call archon_set_active_org first.",
-          );
-        }
-        const space = await client.createSpace(orgId, args.name);
-        return jsonResult({ ok: true as const, space });
-      } catch (e) {
-        return wpnCatch(e, runtime);
-      }
-    },
-  );
-
-  mcp.registerTool(
-    "archon_move_workspace_to_space",
-    {
-      description:
-        "Move a workspace to a different Space within the same Org. Cascades spaceId to every project, note, and explorer row under the workspace. Caller needs manage rights on both the source workspace and the target space.",
-      inputSchema: moveWorkspaceToSpaceInput,
-    },
-    async (args) => {
-      const denied = requireCloudAccess(runtime, client);
-      if (denied) return denied;
-      try {
-        const workspace = await client.moveWorkspaceToSpace(
-          args.workspaceId,
-          args.targetSpaceId,
+        const orgId = await resolveOrgIdForCall(args.orgId);
+        const team = await client.createTeam(
+          orgId,
+          args.departmentId,
+          args.name,
+          args.colorToken,
         );
-        return jsonResult({ ok: true as const, workspace });
+        return jsonResult({ ok: true as const, team });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_update_team",
+    {
+      description:
+        "Admin-only: rename a team, change its color, or move it to a different department in the same org.",
+      inputSchema: updateTeamInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const patch: { name?: string; colorToken?: string | null; departmentId?: string } = {};
+        if (args.name !== undefined) patch.name = args.name;
+        if (args.colorToken !== undefined) patch.colorToken = args.colorToken;
+        if (args.departmentId !== undefined) patch.departmentId = args.departmentId;
+        await client.updateTeam(args.teamId, patch);
+        return jsonResult({ ok: true as const, teamId: args.teamId });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_delete_team",
+    {
+      description:
+        "Admin-only: delete a team. Memberships and project grants cascade; projects themselves are unaffected (team_projects is many-to-many).",
+      inputSchema: deleteTeamInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.deleteTeam(args.teamId);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_create_department",
+    {
+      description:
+        "Admin-only: create a new department in the active (or named) org. Caller must be org-admin or master-admin.",
+      inputSchema: createDepartmentInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const orgId = await resolveOrgIdForCall(args.orgId);
+        const dept = await client.createDepartment(orgId, args.name, args.colorToken);
+        return jsonResult({ ok: true as const, department: dept });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_update_department",
+    {
+      description: "Admin-only: rename a department or change its color.",
+      inputSchema: updateDepartmentInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        const patch: { name?: string; colorToken?: string | null } = {};
+        if (args.name !== undefined) patch.name = args.name;
+        if (args.colorToken !== undefined) patch.colorToken = args.colorToken;
+        await client.updateDepartment(args.departmentId, patch);
+        return jsonResult({ ok: true as const, departmentId: args.departmentId });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_delete_department",
+    {
+      description:
+        "Admin-only: delete a department. Refused while teams still belong to it — move or delete those teams first.",
+      inputSchema: deleteDepartmentInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.deleteDepartment(args.departmentId);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_grant_team_project",
+    {
+      description:
+        "Admin-only: grant a team a role on a project (idempotent — upserts on (teamId, projectId)). The project must be in the team's org.",
+      inputSchema: grantTeamProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.grantTeamProject(args.teamId, args.projectId, args.role);
+        return jsonResult({ ok: true as const });
+      } catch (e) {
+        return wpnCatch(e, runtime);
+      }
+    },
+  );
+
+  mcp.registerTool(
+    "archon_revoke_team_project",
+    {
+      description:
+        "Admin-only: revoke a team's project grant. Returns 404 if the grant doesn't exist.",
+      inputSchema: revokeTeamProjectInput,
+    },
+    async (args) => {
+      const denied = requireCloudAccess(runtime, client);
+      if (denied) return denied;
+      try {
+        await client.revokeTeamProject(args.teamId, args.projectId);
+        return jsonResult({ ok: true as const });
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -943,7 +1052,7 @@ export function createArchonMcpServer(
     "archon_install_skill",
     {
       description:
-        "Install skills from Archon into the caller's local repo. Caller must pass `repoPath` (absolute path to their project repo root); the MCP server runs as a long-lived global process and does not know the caller's cwd. IMPORTANT — interactive editor pick: if `providers` is OMITTED on the call, the tool short-circuits and returns `{ ok: false, needsUserInput: true, field: \"providers\", question, options[] }`. When the agent receives that response it MUST present the options to the user in chat (claude / cursor / windsurf / copilot / antigravity / opencode), let them pick one or more, and then re-invoke with `providers: [...]`. The default if the user has no preference is `[\"claude\"]`. Only when `providers` is set does the tool actually install. Default scan path (no scan args): Space \"Archon\" → Workspace \"Archon\" → Project \"Skills\" → Note \"SKILLS.md\" and install every direct child. If that canonical path is missing or empty, the tool returns a guided error telling the user how to populate it (no migration, no fallback). Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes the SKILL.md content into each selected provider's dot-directory (`.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, `.windsurf/rules/<name>.md`, `.github/instructions/<name>.instructions.md`, `.agents/skills/<name>/SKILL.md`, `.opencode/agents/<name>.md`). No canonical `<repo>/skills/` source and no repo-root `AGENTS.md` are written. Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
+        "Install skills from Archon into the caller's local repo. Caller must pass `repoPath` (absolute path to their project repo root); the MCP server runs as a long-lived global process and does not know the caller's cwd. IMPORTANT — interactive editor pick: if `providers` is OMITTED on the call, the tool short-circuits and returns `{ ok: false, needsUserInput: true, field: \"providers\", question, options[] }`. When the agent receives that response it MUST present the options to the user in chat (claude / cursor / windsurf / copilot / antigravity / opencode), let them pick one or more, and then re-invoke with `providers: [...]`. The default if the user has no preference is `[\"claude\"]`. Only when `providers` is set does the tool actually install. Default scan path (no scan args, active-org-scoped): Project \"Skills\" → Note \"SKILLS.md\" and install every direct child. If that canonical path is missing or empty, the tool returns a guided error telling the user how to populate it (no migration, no fallback). Pass `skillName` to filter to one child by title. Pass `noteId` to install a single specific note (overrides the resolve path). Each install writes the SKILL.md content into each selected provider's dot-directory (`.claude/skills/<name>/SKILL.md`, `.cursor/rules/<name>.mdc`, `.windsurf/rules/<name>.md`, `.github/instructions/<name>.instructions.md`, `.agents/skills/<name>/SKILL.md`, `.opencode/agents/<name>.md`). No canonical `<repo>/skills/` source and no repo-root `AGENTS.md` are written. Returns per-skill write reports; children that do not contain a valid SKILL.md block are reported under `failed` without aborting the run.",
       inputSchema: installSkillInput,
     },
     async (args) => {
@@ -1010,6 +1119,7 @@ export function createArchonMcpServer(
 
         // Branch 1: explicit noteId — install that one note, bypass scan.
         if (args.noteId && args.noteId.length > 0) {
+          await ensureNoteScope(client, args.noteId);
           const note = await client.getNote(args.noteId);
           if (typeof note.content !== "string" || note.content.length === 0) {
             throw new Error(
@@ -1029,227 +1139,134 @@ export function createArchonMcpServer(
           });
         }
 
-        // Branch 2/3: resolve Space → Workspace → Project → Note, install children of that Note.
-        // When the caller passes no path overrides (pure defaults), resolution failures are
-        // rewritten as a single guided error telling them how to populate the canonical source.
-        // When overrides are passed, step-specific diagnostics are preserved.
-        const spaceName = args.spaceName ?? "Archon";
-        const workspaceName = args.workspaceName ?? "Archon";
+        // Branch 2/3: resolve Project → Note in the active org, install
+        // children of the resolved parent note. When the caller passes no
+        // path overrides (pure defaults), resolution failures are rewritten
+        // as a single guided error telling them how to populate the
+        // canonical source. When overrides are passed, step-specific
+        // diagnostics are preserved.
         const projectName = args.projectName ?? "Skills";
         const noteName = args.noteName ?? "SKILLS.md";
 
         const isAllDefaults =
-          args.spaceName === undefined &&
-          args.workspaceName === undefined &&
-          args.projectName === undefined &&
-          args.noteName === undefined;
+          args.projectName === undefined && args.noteName === undefined;
 
-        const canonicalPath = `${spaceName} / ${workspaceName} / ${projectName} / ${noteName}`;
+        const canonicalPath = `${projectName} / ${noteName}`;
         const guidedError = (reason: string) =>
           new Error(
-            `archon_install_skill: no skills found at '${canonicalPath}'.\n\n${reason}\n\nTo populate the canonical source:\n  1. In Archon, navigate to (or create) space '${spaceName}' → workspace '${workspaceName}' → project '${projectName}'.\n  2. Create a root note titled '${noteName}' (markdown).\n  3. Under that note, create one child per skill (markdown). Each child's content is a full SKILL.md — YAML frontmatter (name, description) plus the body the agent will follow.\n  4. Re-run archon_install_skill.\n\nIf your skills live elsewhere, pass spaceName / workspaceName / projectName / noteName overrides, or pass noteId directly.`,
+            `archon_install_skill: no skills found at '${canonicalPath}'.\n\n${reason}\n\nTo populate the canonical source:\n  1. In Archon, navigate to (or create) project '${projectName}' in your active org.\n  2. Create a root note titled '${noteName}' (markdown).\n  3. Under that note, create one child per skill (markdown). Each child's content is a full SKILL.md — YAML frontmatter (name, description) plus the body the agent will follow.\n  4. Re-run archon_install_skill.\n\nIf your skills live elsewhere, pass projectName / noteName overrides, or pass noteId directly.`,
           );
 
-        const { spaces } = await client.listMySpaces();
-        const spaceMatches = spaces.filter(
-          (s) => s.name.trim().toLowerCase() === spaceName.trim().toLowerCase(),
+        const projects = await client.listProjects();
+        const projMatches = projects.filter(
+          (p) => norm(p.name) === norm(projectName),
         );
-        if (spaceMatches.length === 0) {
+        if (projMatches.length === 0) {
           if (isAllDefaults) {
-            throw guidedError(`Space '${spaceName}' does not exist.`);
+            throw guidedError(`Project '${projectName}' does not exist in the active org.`);
           }
           throw new Error(
-            `archon_install_skill: Space "${spaceName}" not found. Available: ${spaces.map((s) => s.name).join(", ") || "(none)"}`,
+            `archon_install_skill: Project "${projectName}" not found in the active org. Available: ${projects.map((p) => p.name).filter(Boolean).join(", ") || "(none)"}`,
           );
         }
-        if (spaceMatches.length > 1) {
+        if (projMatches.length > 1) {
           throw new Error(
-            `archon_install_skill: Space "${spaceName}" is ambiguous (${spaceMatches.length} matches across orgs). Pass a more specific spaceName or use noteId.`,
+            `archon_install_skill: Project "${projectName}" is ambiguous (${projMatches.length} matches) in the active org.`,
           );
         }
-        const targetSpaceId = spaceMatches[0]!.spaceId;
+        const projectId = projMatches[0]!.id;
 
-        const prevOrg = runtime.holder.activeOrgId;
-        const prevSpace = runtime.holder.activeSpaceId;
-        const spaceOrgId = spaceMatches[0]!.orgId;
-        const needsSpaceSwitch =
-          targetSpaceId !== prevSpace ||
-          (spaceOrgId !== null && spaceOrgId !== prevOrg);
-        if (needsSpaceSwitch) {
-          if (spaceOrgId !== null) runtime.holder.setActiveOrg(spaceOrgId);
-          runtime.holder.setActiveSpace(targetSpaceId);
-          client.invalidateNotesWithContextCache();
+        const flat = await client.getNotesFlat(projectId);
+        const parentMatches = flat.filter(
+          (n) =>
+            norm(n.title) === norm(noteName) && n.parent_id === null,
+        );
+        if (parentMatches.length === 0) {
+          if (isAllDefaults) {
+            throw guidedError(`Top-level note '${noteName}' does not exist in Project '${projectName}'.`);
+          }
+          throw new Error(
+            `archon_install_skill: top-level Note "${noteName}" not found in Project "${projectName}".`,
+          );
+        }
+        if (parentMatches.length > 1) {
+          throw new Error(
+            `archon_install_skill: top-level Note "${noteName}" is ambiguous (${parentMatches.length} matches) in Project "${projectName}".`,
+          );
+        }
+        const parentNoteId = parentMatches[0]!.id;
+
+        const children = flat
+          .filter((n) => n.parent_id === parentNoteId)
+          .sort((a, b) => a.sibling_index - b.sibling_index);
+        if (children.length === 0) {
+          if (isAllDefaults) {
+            throw guidedError(`Note '${noteName}' exists but has no children — no skills to install.`);
+          }
+          throw new Error(
+            `archon_install_skill: Note "${noteName}" has no children.`,
+          );
         }
 
-        try {
-          type WsRow = { id: string; name?: string };
-          type ProjRow = { id: string; name?: string };
-          const workspaces = (await client.getWorkspaces()) as WsRow[];
-          const wsMatches = workspaces.filter(
-            (w) =>
-              (w.name ?? "").trim().toLowerCase() ===
-              workspaceName.trim().toLowerCase(),
+        // Optionally filter to a single child by title (skillName match against the note title).
+        const selected =
+          args.skillName && args.skillName.length > 0
+            ? children.filter(
+                (c) => norm(c.title) === norm(args.skillName!),
+              )
+            : children;
+        if (args.skillName && selected.length === 0) {
+          throw new Error(
+            `archon_install_skill: no child titled "${args.skillName}" under Note "${noteName}".`,
           );
-          if (wsMatches.length === 0) {
-            if (isAllDefaults) {
-              throw guidedError(`Workspace '${workspaceName}' does not exist in Space '${spaceName}'.`);
-            }
-            throw new Error(
-              `archon_install_skill: Workspace "${workspaceName}" not found in Space "${spaceName}". Available: ${workspaces.map((w) => w.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
-            );
-          }
-          if (wsMatches.length > 1) {
-            throw new Error(
-              `archon_install_skill: Workspace "${workspaceName}" is ambiguous (${wsMatches.length} matches) in Space "${spaceName}".`,
-            );
-          }
-          const workspaceId = wsMatches[0]!.id;
+        }
 
-          const projects = (await client.getProjects(workspaceId)) as ProjRow[];
-          const projMatches = projects.filter(
-            (p) =>
-              (p.name ?? "").trim().toLowerCase() ===
-              projectName.trim().toLowerCase(),
-          );
-          if (projMatches.length === 0) {
-            if (isAllDefaults) {
-              throw guidedError(`Project '${projectName}' does not exist in Workspace '${workspaceName}'.`);
-            }
-            throw new Error(
-              `archon_install_skill: Project "${projectName}" not found in Workspace "${workspaceName}". Available: ${projects.map((p) => p.name ?? "").filter(Boolean).join(", ") || "(none)"}`,
-            );
-          }
-          if (projMatches.length > 1) {
-            throw new Error(
-              `archon_install_skill: Project "${projectName}" is ambiguous (${projMatches.length} matches) in Workspace "${workspaceName}".`,
-            );
-          }
-          const projectId = projMatches[0]!.id;
-
-          const flat = await client.getNotesFlat(projectId);
-          const parentMatches = flat.filter(
-            (n) =>
-              n.title.trim().toLowerCase() === noteName.trim().toLowerCase() &&
-              n.parent_id === null,
-          );
-          if (parentMatches.length === 0) {
-            if (isAllDefaults) {
-              throw guidedError(`Top-level note '${noteName}' does not exist in Project '${projectName}'.`);
-            }
-            throw new Error(
-              `archon_install_skill: top-level Note "${noteName}" not found in Project "${projectName}".`,
-            );
-          }
-          if (parentMatches.length > 1) {
-            throw new Error(
-              `archon_install_skill: top-level Note "${noteName}" is ambiguous (${parentMatches.length} matches) in Project "${projectName}".`,
-            );
-          }
-          const parentNoteId = parentMatches[0]!.id;
-
-          const children = flat
-            .filter((n) => n.parent_id === parentNoteId)
-            .sort((a, b) => a.sibling_index - b.sibling_index);
-          if (children.length === 0) {
-            if (isAllDefaults) {
-              throw guidedError(`Note '${noteName}' exists but has no children — no skills to install.`);
-            }
-            throw new Error(
-              `archon_install_skill: Note "${noteName}" has no children.`,
-            );
-          }
-
-          // Optionally filter to a single child by title (skillName match against the note title).
-          const selected =
-            args.skillName && args.skillName.length > 0
-              ? children.filter(
-                  (c) =>
-                    c.title.trim().toLowerCase() ===
-                    args.skillName!.trim().toLowerCase(),
-                )
-              : children;
-          if (args.skillName && selected.length === 0) {
-            throw new Error(
-              `archon_install_skill: no child titled "${args.skillName}" under Note "${noteName}".`,
-            );
-          }
-
-          // Install each child. Skills without a valid SKILL.md block are reported
-          // under `failed` but do not abort the run.
-          type FailedEntry = { noteId: string; title: string; error: string };
-          const installed: Array<ReturnType<typeof installSkill>> = [];
-          const failed: FailedEntry[] = [];
-          for (const child of selected) {
-            try {
-              const note = await client.getNote(child.id);
-              if (typeof note.content !== "string" || note.content.length === 0) {
-                failed.push({
-                  noteId: child.id,
-                  title: child.title,
-                  error: "empty content",
-                });
-                continue;
-              }
-              const report = installSkill({
-                noteContent: note.content,
-                repoPath,
-                providers: args.providers,
-              });
-              installed.push(report);
-            } catch (err) {
+        // Install each child. Skills without a valid SKILL.md block are reported
+        // under `failed` but do not abort the run.
+        type FailedEntry = { noteId: string; title: string; error: string };
+        const installed: Array<ReturnType<typeof installSkill>> = [];
+        const failed: FailedEntry[] = [];
+        for (const child of selected) {
+          try {
+            const note = await client.getNote(child.id);
+            if (typeof note.content !== "string" || note.content.length === 0) {
               failed.push({
                 noteId: child.id,
                 title: child.title,
-                error: err instanceof Error ? err.message : String(err),
+                error: "empty content",
               });
+              continue;
             }
-          }
-
-          return jsonResult({
-            ok: true as const,
-            mode: (args.skillName ? "filtered" : "scan") as
-              | "filtered"
-              | "scan",
-            resolved: {
-              spaceName,
-              spaceId: targetSpaceId,
-              workspaceName,
-              workspaceId,
-              projectName,
-              projectId,
-              noteName,
-              parentNoteId,
-              childCount: children.length,
-            },
-            installed,
-            failed,
-          });
-        } finally {
-          if (needsSpaceSwitch) {
-            runtime.holder.setActiveOrg(prevOrg);
-            runtime.holder.setActiveSpace(prevSpace);
-            client.invalidateNotesWithContextCache();
+            const report = installSkill({
+              noteContent: note.content,
+              repoPath,
+              providers: args.providers,
+            });
+            installed.push(report);
+          } catch (err) {
+            failed.push({
+              noteId: child.id,
+              title: child.title,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
-      } catch (e) {
-        return wpnCatch(e, runtime);
-      }
-    },
-  );
 
-  mcp.registerTool(
-    "archon_delete_workspace",
-    {
-      description:
-        "Delete a workspace and all its projects and notes. This is irreversible.",
-      inputSchema: deleteWorkspaceInput,
-    },
-    async (args) => {
-      const denied = requireCloudAccess(runtime, client);
-      if (denied) return denied;
-      try {
-        await client.deleteWorkspace(args.workspaceId);
-        return jsonResult({ ok: true as const });
+        return jsonResult({
+          ok: true as const,
+          mode: (args.skillName ? "filtered" : "scan") as
+            | "filtered"
+            | "scan",
+          resolved: {
+            projectName,
+            projectId,
+            noteName,
+            parentNoteId,
+            childCount: children.length,
+          },
+          installed,
+          failed,
+        });
       } catch (e) {
         return wpnCatch(e, runtime);
       }
@@ -1260,14 +1277,17 @@ export function createArchonMcpServer(
     "archon_create_project",
     {
       description:
-        "Create a new project inside a workspace. Returns the project id and name.",
+        "Create a new project in the active org. Optionally grant a team initial access via teamId + teamRole. Returns the project row.",
       inputSchema: createProjectInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const project = await client.createProject(args.workspaceId, args.name);
+        const opts: { teamId?: string; teamRole?: "owner" | "contributor" | "viewer" } = {};
+        if (args.teamId !== undefined) opts.teamId = args.teamId;
+        if (args.teamRole !== undefined) opts.teamRole = args.teamRole;
+        const project = await client.createProject(args.name, opts);
         return jsonResult({ ok: true as const, project });
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -1279,18 +1299,17 @@ export function createArchonMcpServer(
     "archon_update_project",
     {
       description:
-        "Update a project (rename, reorder, change color, move to different workspace). Returns the updated project.",
+        "Update a project (rename, reorder, change color). Project ↔ team membership is changed via archon_grant_team_project / archon_revoke_team_project. Returns the updated project.",
       inputSchema: updateProjectInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const patch: { name?: string; sort_index?: number; color_token?: string | null; workspace_id?: string } = {};
+        const patch: { name?: string; sortIndex?: number; colorToken?: string | null } = {};
         if (args.name !== undefined) patch.name = args.name;
-        if (args.sort_index !== undefined) patch.sort_index = args.sort_index;
-        if (args.color_token !== undefined) patch.color_token = args.color_token;
-        if (args.workspace_id !== undefined) patch.workspace_id = args.workspace_id;
+        if (args.sortIndex !== undefined) patch.sortIndex = args.sortIndex;
+        if (args.colorToken !== undefined) patch.colorToken = args.colorToken;
         const project = await client.updateProject(args.projectId, patch);
         return jsonResult({ ok: true as const, project });
       } catch (e) {
@@ -1323,7 +1342,7 @@ export function createArchonMcpServer(
     {
       description:
         "Bulk delete notes by id. Descendants of each note are also removed. This is irreversible. " +
-        "Active org/space auto-switches to the home of the first id before the call (response includes scopeSwitched when changed).",
+        "Active org auto-switches to the home of the first id before the call (response includes scopeSwitched when changed).",
       inputSchema: deleteNotesInput,
     },
     async (args) => {
@@ -1344,7 +1363,7 @@ export function createArchonMcpServer(
     {
       description:
         "Move a note within its project tree. Placement: 'before' (sibling above target), 'after' (sibling below target), 'into' (first child of target). " +
-        "Active org/space auto-switches to the dragged note's home before the call (response includes scopeSwitched when changed).",
+        "Active org auto-switches to the dragged note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: moveNoteInput,
     },
     async (args) => {
@@ -1352,7 +1371,7 @@ export function createArchonMcpServer(
       if (denied) return denied;
       try {
         const switched = await ensureNoteScope(client, args.draggedId);
-        await client.moveNote(args.projectId, args.draggedId, args.targetId, args.placement);
+        await client.moveNote(args.draggedId, args.targetId, args.placement);
         return jsonResult(withScopeSwitched({ ok: true as const }, switched));
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -1365,7 +1384,7 @@ export function createArchonMcpServer(
     {
       description:
         "Duplicate a note and all its descendants within the same project. Returns the new root note id. " +
-        "Active org/space auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
+        "Active org auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: duplicateSubtreeInput,
     },
     async (args) => {
@@ -1388,10 +1407,10 @@ export function createArchonMcpServer(
     "archon_copy_id",
     {
       description:
-        "Resolve a name (or passthrough UUID) to a copy-friendly id for org / space / workspace / project / note. " +
+        "Resolve a name (or passthrough UUID) to a copy-friendly id for org / department / team / project / note. " +
         "Returns { status: 'unique' | 'ambiguous' | 'none', matches: [{ id, name, path }] }. " +
-        "UUID queries short-circuit to a single match. Use workspaceQuery / projectQuery / orgQuery to narrow ambiguous name matches. " +
-        "Cross-org lookups are not supported; operate within the active org.",
+        "UUID queries short-circuit to a single match. Use projectQuery to narrow notes, departmentQuery to narrow teams, orgQuery to point at a different org. " +
+        "Cross-org lookups operate within the active org by default; pass orgQuery to search a different org.",
       inputSchema: copyIdInput,
     },
     async (args) => {
@@ -1399,6 +1418,8 @@ export function createArchonMcpServer(
       if (denied) return denied;
       try {
         const q = args.query.trim();
+
+        // org
         if (args.kind === "org") {
           const r = await client.listMyOrgs();
           if (isLikelyUuid(q)) {
@@ -1431,48 +1452,95 @@ export function createArchonMcpServer(
             matches,
           });
         }
-        if (args.kind === "space") {
-          const r = await client.listMySpaces();
-          let rows = r.spaces;
-          if (args.orgQuery && args.orgQuery.trim().length > 0) {
-            const oq = args.orgQuery.trim();
-            if (isLikelyUuid(oq)) {
-              rows = rows.filter((s) => s.orgId === oq);
+
+        // Resolve effective org for org-scoped lookups (department / team / project)
+        const orgIdForLookup = await (async () => {
+          const oq = args.orgQuery?.trim() ?? "";
+          if (!oq) {
+            return runtime.holder.activeOrgId ?? (await client.listMyOrgs()).activeOrgId ?? null;
+          }
+          if (isLikelyUuid(oq)) return oq;
+          const orgs = (await client.listMyOrgs()).orgs;
+          const noq = norm(oq);
+          const orgHits = orgs.filter(
+            (o) => norm(o.name) === noq || norm(o.slug) === noq,
+          );
+          return orgHits[0]?.orgId ?? null;
+        })();
+
+        if (args.kind === "department") {
+          if (!orgIdForLookup) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          const departments = await client.listDepartmentsForOrg(orgIdForLookup);
+          if (isLikelyUuid(q)) {
+            const hit = departments.find((d) => d.departmentId === q);
+            return jsonResult(
+              hit
+                ? {
+                    status: "unique" as const,
+                    matches: [{ id: hit.departmentId, name: hit.name, path: hit.name }],
+                  }
+                : { status: "none" as const, matches: [] },
+            );
+          }
+          const nq = norm(q);
+          const hits = departments.filter((d) => norm(d.name) === nq);
+          if (hits.length === 0) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          const matches = hits.map((d) => ({
+            id: d.departmentId,
+            name: d.name,
+            path: d.name,
+          }));
+          return jsonResult({
+            status: (hits.length === 1 ? "unique" : "ambiguous") as
+              | "unique"
+              | "ambiguous",
+            matches,
+          });
+        }
+
+        if (args.kind === "team") {
+          if (!orgIdForLookup) {
+            return jsonResult({ status: "none" as const, matches: [] });
+          }
+          let rows = await client.listTeamsForOrg(orgIdForLookup);
+          // Optional: narrow by department
+          const dq = args.departmentQuery?.trim() ?? "";
+          if (dq.length > 0) {
+            if (isLikelyUuid(dq)) {
+              rows = rows.filter((t) => t.departmentId === dq);
             } else {
-              const orgs = (await client.listMyOrgs()).orgs;
-              const noq = norm(oq);
-              const orgIds = new Set(
-                orgs
-                  .filter((o) => norm(o.name) === noq || norm(o.slug) === noq)
-                  .map((o) => o.orgId),
+              const departments = await client.listDepartmentsForOrg(orgIdForLookup);
+              const ndq = norm(dq);
+              const deptIds = new Set(
+                departments.filter((d) => norm(d.name) === ndq).map((d) => d.departmentId),
               );
-              rows = rows.filter(
-                (s) => s.orgId !== null && orgIds.has(s.orgId),
-              );
+              rows = rows.filter((t) => deptIds.has(t.departmentId));
             }
           }
           if (isLikelyUuid(q)) {
-            const hit = rows.find((s) => s.spaceId === q);
+            const hit = rows.find((t) => t.teamId === q);
             return jsonResult(
               hit
                 ? {
                     status: "unique" as const,
-                    matches: [
-                      { id: hit.spaceId, name: hit.name, path: hit.name },
-                    ],
+                    matches: [{ id: hit.teamId, name: hit.name, path: hit.name }],
                   }
                 : { status: "none" as const, matches: [] },
             );
           }
           const nq = norm(q);
-          const hits = rows.filter((s) => norm(s.name) === nq);
+          const hits = rows.filter((t) => norm(t.name) === nq);
           if (hits.length === 0) {
             return jsonResult({ status: "none" as const, matches: [] });
           }
-          const matches = hits.map((s) => ({
-            id: s.spaceId,
-            name: s.name,
-            path: s.name,
+          const matches = hits.map((t) => ({
+            id: t.teamId,
+            name: t.name,
+            path: t.name,
           }));
           return jsonResult({
             status: (hits.length === 1 ? "unique" : "ambiguous") as
@@ -1481,45 +1549,9 @@ export function createArchonMcpServer(
             matches,
           });
         }
-        if (args.kind === "workspace") {
-          type WsRow = { id: string; name?: string };
-          const rows = (await client.getWorkspaces()) as WsRow[];
-          if (isLikelyUuid(q)) {
-            const hit = rows.find((w) => w.id === q);
-            return jsonResult(
-              hit
-                ? {
-                    status: "unique" as const,
-                    matches: [
-                      {
-                        id: hit.id,
-                        name: hit.name ?? "",
-                        path: hit.name ?? "",
-                      },
-                    ],
-                  }
-                : { status: "none" as const, matches: [] },
-            );
-          }
-          const nq = norm(q);
-          const hits = rows.filter((w) => norm(w.name ?? "") === nq);
-          if (hits.length === 0) {
-            return jsonResult({ status: "none" as const, matches: [] });
-          }
-          const matches = hits.map((w) => ({
-            id: w.id,
-            name: w.name ?? "",
-            path: w.name ?? "",
-          }));
-          return jsonResult({
-            status: (hits.length === 1 ? "unique" : "ambiguous") as
-              | "unique"
-              | "ambiguous",
-            matches,
-          });
-        }
+
         if (args.kind === "project") {
-          const result = await findProjectsByQuery(client, q, args.workspaceQuery);
+          const result = await findProjectsByQuery(client, q);
           if (result.status === "unique" || result.status === "ambiguous") {
             return jsonResult({
               status: result.status,
@@ -1536,14 +1568,10 @@ export function createArchonMcpServer(
             message: "message" in result ? result.message : undefined,
           });
         }
+
         // note
         const rows = await client.getNotesWithContext();
-        const result = findNotesByQuery(
-          rows,
-          q,
-          args.workspaceQuery,
-          args.projectQuery,
-        );
+        const result = findNotesByQuery(rows, q, args.projectQuery);
         if (result.status === "unique" || result.status === "ambiguous") {
           return jsonResult({
             status: result.status,
@@ -1570,8 +1598,9 @@ export function createArchonMcpServer(
     {
       description:
         "Move a note (with its entire subtree) to a different project, optionally nested under a parent note in the target project. " +
-        "Caller needs write access on both the source and destination workspaces. Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces instead. " +
-        "Active org/space auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
+        "Caller needs write access on both the source and destination projects (via team grants or per-creator role). " +
+        "Cross-org moves are not supported — use archon_export_org / archon_import_org instead. " +
+        "Active org auto-switches to the source note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: moveNoteToProjectInput,
     },
     async (args) => {
@@ -1592,72 +1621,21 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_move_project",
-    {
-      description:
-        "Move a project to a different workspace. Only works within the same space/org — if you need to migrate across spaces, use archon_move_workspace_to_space on the workspace first, then move the project. " +
-        "Cross-org moves are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
-      inputSchema: moveProjectInput,
-    },
-    async (args) => {
-      const denied = requireCloudAccess(runtime, client);
-      if (denied) return denied;
-      try {
-        const project = await client.updateProject(args.projectId, {
-          workspace_id: args.targetWorkspaceId,
-        });
-        return jsonResult({ ok: true as const, project });
-      } catch (e) {
-        return wpnCatch(e, runtime);
-      }
-    },
-  );
-
-  mcp.registerTool(
     "archon_duplicate_project",
     {
       description:
-        "Deep-copy a project (every note in the tree gets a fresh id) into the source workspace or into targetWorkspaceId. " +
-        "The target workspace must be in the same space/org as the source. Caller needs write on both workspaces. " +
-        "Cross-org duplicates are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
+        "Deep-copy a project (every note in the tree gets a fresh id) within the active org. Optionally grant the duplicate to a team via teamId. " +
+        "Cross-org duplicates are not supported — use archon_export_org / archon_import_org for that case.",
       inputSchema: duplicateProjectInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const result = await client.duplicateProject(args.projectId, {
-          ...(args.targetWorkspaceId !== undefined
-            ? { targetWorkspaceId: args.targetWorkspaceId }
-            : {}),
-          ...(args.newName !== undefined ? { newName: args.newName } : {}),
-        });
-        return jsonResult({ ok: true as const, ...result });
-      } catch (e) {
-        return wpnCatch(e, runtime);
-      }
-    },
-  );
-
-  mcp.registerTool(
-    "archon_duplicate_workspace",
-    {
-      description:
-        "Deep-copy a workspace (every project + every note, with fresh ids) into the source space or into targetSpaceId. " +
-        "The target space must be in the same org as the source. Caller needs manage rights on the source workspace and on the target space. " +
-        "Cross-org duplicates are not supported — use archon_export_workspaces / archon_import_workspaces for that case.",
-      inputSchema: duplicateWorkspaceInput,
-    },
-    async (args) => {
-      const denied = requireCloudAccess(runtime, client);
-      if (denied) return denied;
-      try {
-        const result = await client.duplicateWorkspace(args.workspaceId, {
-          ...(args.newName !== undefined ? { newName: args.newName } : {}),
-          ...(args.targetSpaceId !== undefined
-            ? { targetSpaceId: args.targetSpaceId }
-            : {}),
-        });
+        const opts: { teamId?: string; newName?: string } = {};
+        if (args.teamId !== undefined) opts.teamId = args.teamId;
+        if (args.newName !== undefined) opts.newName = args.newName;
+        const result = await client.duplicateProject(args.projectId, opts);
         return jsonResult({ ok: true as const, ...result });
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -1670,7 +1648,7 @@ export function createArchonMcpServer(
     {
       description:
         "Find all notes that reference a given note id in their content (backlinks / incoming references). Returns source note ids, titles, and project ids. " +
-        "Active org/space auto-switches to the target note's home before the call (response includes scopeSwitched when changed).",
+        "Active org auto-switches to the target note's home before the call (response includes scopeSwitched when changed).",
       inputSchema: backlinksInput,
     },
     async (args) => {
@@ -1687,17 +1665,17 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_export_workspaces",
+    "archon_export_org",
     {
       description:
-        "Export workspaces as a ZIP archive (base64-encoded). Optionally filter by workspace ids. Returns base64 string of the ZIP.",
-      inputSchema: exportWorkspacesInput,
+        "Export readable projects in the active org as a ZIP archive (base64-encoded). Optionally filter by project ids. Returns base64 string of the ZIP.",
+      inputSchema: exportOrgInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
-        const buf = await client.exportWorkspaces(args.workspaceIds);
+        const buf = await client.exportProjects(args.projectIds);
         const b64 = Buffer.from(buf).toString("base64");
         return jsonResult({ ok: true as const, zipBase64Length: b64.length, zipBase64: b64 });
       } catch (e) {
@@ -1707,18 +1685,21 @@ export function createArchonMcpServer(
   );
 
   mcp.registerTool(
-    "archon_import_workspaces",
+    "archon_import_org",
     {
       description:
-        "Import workspaces from a base64-encoded ZIP archive (from a previous archon_export_workspaces). Merges imported data.",
-      inputSchema: importWorkspacesInput,
+        "Import projects from a base64-encoded ZIP archive (from a previous archon_export_org). The target team grants 'owner' on every imported project and pins the projects' org to the team's org.",
+      inputSchema: importOrgInput,
     },
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
       if (denied) return denied;
       try {
         const buf = Buffer.from(args.zipBase64, "base64");
-        const result = await client.importWorkspaces(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+        const result = await client.importProjects(
+          buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+          args.teamId,
+        );
         return jsonResult({ ok: true as const, result });
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -1728,8 +1709,8 @@ export function createArchonMcpServer(
 
   mcp.tool(
     "archon_resolve_note",
-    "Resolve a note to its canonical UUID using workspace name, project name, and note title. " +
-      "Matching is trim + case-insensitive. Returns an error if zero or multiple notes match.",
+    "Resolve a note to its canonical UUID using project name and note title. " +
+      "Matching is trim + case-insensitive within the active org. Returns an error if zero or multiple notes match.",
     resolveInput.shape,
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
@@ -1739,7 +1720,6 @@ export function createArchonMcpServer(
       try {
         const rows = await client.getNotesWithContext();
         const r = resolveNoteFromCatalog(rows, {
-          workspaceName: args.workspaceName,
           projectName: args.projectName,
           noteTitle: args.noteTitle,
         });
@@ -1749,7 +1729,7 @@ export function createArchonMcpServer(
               {
                 error:
                   r.reason === "none"
-                    ? "No note matched workspace/project/title."
+                    ? "No note matched project/title."
                     : "Multiple notes matched; disambiguate titles or use noteId from candidates.",
                 reason: r.reason,
                 candidates: r.candidates,
@@ -1761,8 +1741,6 @@ export function createArchonMcpServer(
         }
         return jsonResult({
           noteId: r.noteId,
-          workspaceId: r.workspaceId,
-          workspaceName: r.workspaceName,
           projectId: r.projectId,
           projectName: r.projectName,
           title: r.title,
@@ -1776,7 +1754,7 @@ export function createArchonMcpServer(
 
   mcp.tool(
     "archon_get_note",
-    "Fetch a single note by id (includes content and metadata). Active org/space auto-switches to the note's home before the read (response includes scopeSwitched when changed).",
+    "Fetch a single note by id (includes content and metadata). Active org auto-switches to the note's home before the read (response includes scopeSwitched when changed).",
     getNoteInput.shape,
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
@@ -1795,7 +1773,7 @@ export function createArchonMcpServer(
 
   mcp.tool(
     "archon_get_image_note",
-    `Fetch an image-type note's bytes in an MCP-friendly form. Modes: 'auto' (native image block, falls back to signed URL over ${GET_IMAGE_NOTE_DEFAULT_MAX_BYTES} bytes), 'inline' (force native image block), 'base64' (JSON with dataBase64), 'url' (no bytes, just a short-lived signed URL), 'thumbnail' (PLAN-04 WebP thumb). Always returns metadata { noteId, title, path, mimeType, sizeBytes, width, height }. Byte-returning modes strip EXIF / text metadata for JPEG / PNG / WebP (url mode streams raw R2 bytes). Errors on non-image notes; callers should use archon_get_note for markdown. Active org/space auto-switches to the note's home before the read.`,
+    `Fetch an image-type note's bytes in an MCP-friendly form. Modes: 'auto' (native image block, falls back to signed URL over ${GET_IMAGE_NOTE_DEFAULT_MAX_BYTES} bytes), 'inline' (force native image block), 'base64' (JSON with dataBase64), 'url' (no bytes, just a short-lived signed URL), 'thumbnail' (PLAN-04 WebP thumb). Always returns metadata { noteId, title, path, mimeType, sizeBytes, width, height }. Byte-returning modes strip EXIF / text metadata for JPEG / PNG / WebP (url mode streams raw R2 bytes). Errors on non-image notes; callers should use archon_get_note for markdown. Active org auto-switches to the note's home before the read.`,
     getImageNoteInput.shape,
     async (args) => {
       const denied = requireCloudAccess(runtime, client);
@@ -1821,7 +1799,7 @@ export function createArchonMcpServer(
     {
       description:
         "Fetch a note plus the full transitive set of notes it links to (forward refs in markdown content), deduped by noteId, with optional one-hop backlinks. " +
-        "Walks both `[label](#/n/<id>)` and `[label](#/w/<vfsPath>)` references breadth-first. VFS paths support canonical (`Workspace/Project/Title`), same-project-relative (`./Title`), and tree-relative (`../sibling`) forms. " +
+        "Walks both `[label](#/n/<id>)` and `[label](#/w/<vfsPath>)` references breadth-first. VFS paths support canonical (`Project/Title`), same-project-relative (`./Title`), and tree-relative (`../sibling`) forms. " +
         "Skips already-visited ids (cycle-safe). Stops fetching when the hard cap is reached and reports stats.truncated=true. Id-fetch errors land in `unresolved`; unresolvable VFS paths land in `unresolvedVfsLinks`.",
       inputSchema: getNoteWithLinksInput,
     },
@@ -1950,7 +1928,7 @@ export function createArchonMcpServer(
     {
       description:
         "Return the current title for a note id without fetching full content. Use with archon_note_rename to prepend e.g. DONE or fix typos. " +
-        "Active org/space auto-switches to the note's home before the read.",
+        "Active org auto-switches to the note's home before the read.",
       inputSchema: getNoteTitleInput,
     },
     async (args) => {
@@ -1976,7 +1954,7 @@ export function createArchonMcpServer(
     {
       description:
         "Rename a note by id (PATCH title only). Fails with a clear error if another sibling under the same parent already uses that title. " +
-        "Active org/space auto-switches to the note's home before the call.",
+        "Active org auto-switches to the note's home before the call.",
       inputSchema: noteRenameInput,
     },
     async (args) => {
@@ -1998,10 +1976,10 @@ export function createArchonMcpServer(
     "archon_execute_note",
     {
       description:
-        "Resolve a task note by title or UUID (optional workspaceQuery / projectQuery), then fetch it when the match is unique. " +
+        "Resolve a task note by title or UUID (optional projectQuery), then fetch it when the match is unique. " +
         "If multiple notes share the title, returns status ambiguous with each candidate's full path and noteId — have the user pick one, then call again with noteQuery set to that UUID (or narrow filters). " +
         "On success, the agent should read note.content and follow those instructions in the session. " +
-        "When noteQuery is a UUID, the active org/space is auto-switched to the note's home before searching (response includes scopeSwitched).",
+        "When noteQuery is a UUID, the active org is auto-switched to the note's home before searching (response includes scopeSwitched).",
       inputSchema: executeNoteInput,
     },
     async (args) => {
@@ -2015,7 +1993,6 @@ export function createArchonMcpServer(
         const resolved = findNotesByQuery(
           rows,
           args.noteQuery,
-          args.workspaceQuery,
           args.projectQuery,
         );
         if (resolved.status !== "unique") {
@@ -2024,7 +2001,7 @@ export function createArchonMcpServer(
               stage: "needs_resolution" as const,
               ...resolved,
               nextStep:
-                "If ambiguous, show the user each path and noteId from matches; after they choose, call archon_execute_note again with noteQuery equal to the chosen noteId (or narrow workspaceQuery/projectQuery).",
+                "If ambiguous, show the user each path and noteId from matches; after they choose, call archon_execute_note again with noteQuery equal to the chosen noteId (or narrow projectQuery).",
             } as Record<string, unknown>,
             switched,
           ));
@@ -2048,7 +2025,7 @@ export function createArchonMcpServer(
     "archon_create_child_note",
     {
       description:
-        "Create a new note as direct child of a parent resolved by parentNoteId, OR workspaceName+projectName+parentPathTitles (root-to-parent title chain), OR parentWpnPath (\"Workspace / Project / Title / …\"). " +
+        "Create a new note as direct child of a parent resolved by parentNoteId, OR projectName+parentPathTitles (root-to-parent title chain), OR parentWpnPath (\"Project / Title / …\"). " +
         "Returns project ambiguity like archon_find_projects or path ambiguity with candidate noteIds. Uses GET /wpn/projects/:id/notes for tree walk (same norm as archon_resolve_note).",
       inputSchema: createChildNoteInput,
     },
@@ -2086,7 +2063,6 @@ export function createArchonMcpServer(
           ));
         }
 
-        let workspaceName: string;
         let projectName: string;
         let parentPathTitles: string[];
 
@@ -2096,16 +2072,14 @@ export function createArchonMcpServer(
           if (!parsed.ok) {
             return errorResult(parsed.error);
           }
-          workspaceName = parsed.workspaceName;
           projectName = parsed.projectName;
           parentPathTitles = parsed.parentPathTitles;
         } else {
-          workspaceName = args.workspaceName!.trim();
           projectName = args.projectName!.trim();
           parentPathTitles = args.parentPathTitles!;
         }
 
-        const proj = await findProjectsByQuery(client, projectName, workspaceName);
+        const proj = await findProjectsByQuery(client, projectName);
         if (proj.status !== "unique") {
           return jsonResult({ ok: false as const, stage: "project_resolution" as const, ...proj });
         }
@@ -2142,7 +2116,7 @@ export function createArchonMcpServer(
       description:
         "After completing work scoped to a Archon task note, persist results as a new direct child of that note (GET task note for project, then POST create child). " +
         "Prefer this over archon_write_note create_child when you only know taskNoteId. " +
-        "Active org/space auto-switches to the task note's home before the call.",
+        "Active org auto-switches to the task note's home before the call.",
       inputSchema: writeBackChildInput,
     },
     async (args) => {
@@ -2182,7 +2156,7 @@ export function createArchonMcpServer(
     {
       description:
         "Create or patch a note. Modes: patch_existing (PATCH), create_root | create_child | create_sibling (POST with relation). " +
-        "For patch_existing, active org/space auto-switches to the note's home before the patch.",
+        "For patch_existing, active org auto-switches to the note's home before the patch.",
       inputSchema: writeNoteInput,
     },
     async (args) => {
@@ -2224,11 +2198,10 @@ export function createArchonMcpServer(
           // only; the local Electron file-vault has no Yjs at all.
           if (
             patch.content !== undefined &&
-            runtime.mode !== "local" &&
-            client.getHolder().activeSpaceId
+            runtime.mode !== "local"
           ) {
             const wsToken = await client
-              .mintSpaceWsToken(client.getHolder().activeSpaceId!)
+              .mintRealtimeWsToken()
               .catch(() => null);
             if (wsToken) {
               try {
@@ -2435,8 +2408,8 @@ export function createArchonMcpServer(
     "archon_list_orgs",
     {
       description:
-        "List organizations the authenticated user belongs to. Returns { orgs, activeOrgId, defaultOrgId, activeSpaceId }. " +
-        "Use archon_set_active_org to switch, or pass orgId on archon_list_wpn for a one-shot read.",
+        "List organizations the authenticated user belongs to. Returns { orgs, activeOrgId, defaultOrgId, activeTeamId }. " +
+        "Use archon_set_active_org to switch, or pass orgId on archon_list_org_tree for a one-shot read.",
       inputSchema: z.object({}),
     },
     async () => {
@@ -2448,7 +2421,7 @@ export function createArchonMcpServer(
           orgs: r.orgs,
           activeOrgId: runtime.holder.activeOrgId ?? r.activeOrgId ?? r.defaultOrgId ?? null,
           defaultOrgId: r.defaultOrgId,
-          activeSpaceId: runtime.holder.activeSpaceId,
+          activeTeamId: runtime.holder.activeTeamId,
         });
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -2461,7 +2434,7 @@ export function createArchonMcpServer(
     {
       description:
         "Switch the active organization for this MCP session. Re-issues the JWT (preserves refresh token), " +
-        "resets active space to the org's default (or last-used), invalidates the notes-with-context cache, " +
+        "resets the active team to the org's default (or last-used), invalidates the notes-with-context cache, " +
         "and persists the new tokens when persistence is configured.",
       inputSchema: setActiveOrgInput,
     },
@@ -2474,7 +2447,7 @@ export function createArchonMcpServer(
         return jsonResult({
           ok: true as const,
           activeOrgId: result.activeOrgId,
-          activeSpaceId: result.activeSpaceId,
+          activeTeamId: result.activeTeamId,
         });
       } catch (e) {
         return wpnCatch(e, runtime);
@@ -2502,9 +2475,8 @@ export function createArchonMcpServer(
       const access = runtime.holder.accessToken;
       const jwtInfo = access ? parseJwtUnverified(access) : {};
       let orgs: unknown = undefined;
-      let spaces: unknown = undefined;
       let active_org_id: string | null = runtime.holder.activeOrgId;
-      let active_space_id: string | null = runtime.holder.activeSpaceId;
+      const active_team_id: string | null = runtime.holder.activeTeamId;
       if (runtime.holder.hasAccess()) {
         try {
           const r = await client.listMyOrgs();
@@ -2518,20 +2490,6 @@ export function createArchonMcpServer(
         } catch {
           /* org listing is best-effort; older servers may not have /orgs/me */
         }
-        try {
-          const sr = await client.listMySpaces();
-          spaces = sr.spaces;
-          if (!active_space_id) {
-            const candidate =
-              sr.spaces.find((s) => s.orgId === active_org_id)?.spaceId ?? null;
-            if (candidate) {
-              active_space_id = candidate;
-              runtime.holder.setActiveSpace(candidate);
-            }
-          }
-        } catch {
-          /* space listing is best-effort; pre-Phase-2 servers don't have /spaces/me */
-        }
       }
       return jsonResult({
         mode: runtime.mode,
@@ -2541,9 +2499,8 @@ export function createArchonMcpServer(
         persist_file_path: persistPath ?? null,
         persist_file_present,
         active_org_id,
-        active_space_id,
+        active_team_id,
         ...(orgs ? { orgs } : {}),
-        ...(spaces ? { spaces } : {}),
         ...jwtInfo,
       });
     },

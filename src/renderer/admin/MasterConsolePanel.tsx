@@ -2,17 +2,22 @@ import React from "react";
 import { useSelector } from "react-redux";
 import {
   createMasterAdmin,
+  createMasterInvite,
   createOrgAdmin,
-  deleteUser,
   demoteOrgAdmin,
   disableUser,
   enableUser,
   listAllOrgs,
   listAllUsers,
   listMasterAdmins,
+  listMasterInvites,
   listOrgAdmins,
+  regenerateMasterInvite,
   removeMasterAdmin,
+  resetMasterUserPassword,
+  revokeMasterInvite,
   type MasterAdminRow,
+  type MasterInviteRow,
   type MasterOrgRow,
   type MasterUserRow,
   type OrgAdminRow,
@@ -353,6 +358,9 @@ function UsersSection(): React.ReactElement {
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [busyUserId, setBusyUserId] = React.useState<string | null>(null);
+  const [resetCredential, setResetCredential] = React.useState<
+    { email: string; password: string } | null
+  >(null);
 
   const runSearch = React.useCallback(
     async (opts?: { append?: boolean; cursor?: string | null }) => {
@@ -409,25 +417,29 @@ function UsersSection(): React.ReactElement {
     }
   }
 
-  async function handleDelete(u: MasterUserRow): Promise<void> {
-    const prompt = `Permanently delete ${u.email}?\n\nThis removes the account, all workspaces they own, and transfers sole-owned spaces to an org admin.\n\nType the email to confirm:`;
-    const typed = window.prompt(prompt);
-    if (typed !== u.email) {
-      if (typed !== null) {
-        setError("Confirmation did not match email — delete canceled.");
-      }
+  /**
+   * Hard delete is intentionally unsupported by the API (returns 410 Gone)
+   * because every privileged FK uses ON DELETE RESTRICT to preserve
+   * "[Deleted user]" attribution on creator/granter columns. Use Disable
+   * (soft-delete) instead — it clears refresh sessions so the target loses
+   * access immediately and the audit trail keeps their row.
+   */
+
+  async function handleReset(u: MasterUserRow): Promise<void> {
+    if (!window.confirm(`Mint a temp password for ${u.email}? They will be forced to change it on next login.`)) {
       return;
     }
     setBusyUserId(u.userId);
     setError(null);
     try {
-      const r = await deleteUser(u.userId);
-      await runSearch();
-      setError(
-        `Deleted ${u.email} — reassigned ${r.reassignedSpaces} space(s), removed ${r.deletedWorkspaces} workspace(s).`,
-      );
+      const r = await resetMasterUserPassword({ userId: u.userId });
+      if (r.password) {
+        setResetCredential({ email: u.email, password: r.password });
+      } else {
+        setError("Password reset, but the server did not return a temp password. Did you pass an explicit one?");
+      }
     } catch (err) {
-      setError((err as Error).message ?? "Failed to delete user");
+      setError((err as Error).message ?? "Failed to reset password");
     } finally {
       setBusyUserId(null);
     }
@@ -495,6 +507,14 @@ function UsersSection(): React.ReactElement {
                   </span>
                 ) : (
                   <>
+                    <button
+                      type="button"
+                      className={btn}
+                      disabled={busy}
+                      onClick={() => void handleReset(u)}
+                    >
+                      Reset password
+                    </button>
                     {u.disabled ? (
                       <button
                         type="button"
@@ -507,21 +527,13 @@ function UsersSection(): React.ReactElement {
                     ) : (
                       <button
                         type="button"
-                        className={btn}
+                        className={btnDanger}
                         disabled={busy}
                         onClick={() => void handleDisable(u)}
                       >
                         Disable
                       </button>
                     )}
-                    <button
-                      type="button"
-                      className={btnDanger}
-                      disabled={busy}
-                      onClick={() => void handleDelete(u)}
-                    >
-                      Delete
-                    </button>
                   </>
                 )}
               </div>
@@ -539,6 +551,181 @@ function UsersSection(): React.ReactElement {
           Load more
         </button>
       ) : null}
+      {resetCredential ? (
+        <CredentialCallout
+          label="Temp password (one-time)"
+          email={resetCredential.email}
+          password={resetCredential.password}
+        />
+      ) : null}
+      {error ? (
+        <p className="mt-2 text-[11px] text-red-600 dark:text-red-300">{error}</p>
+      ) : null}
+    </section>
+  );
+}
+
+/**
+ * Pending master-admin invites. Once an invitee accepts and logs in, the
+ * invite moves out of `pending` so it no longer appears here. Show the
+ * one-time link callout right after creation; if lost, "Regenerate" mints
+ * a fresh token (the old link instantly stops working).
+ */
+function MasterInvitesSection(): React.ReactElement {
+  const [invites, setInvites] = React.useState<MasterInviteRow[]>([]);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [addEmail, setAddEmail] = React.useState("");
+  const [submitting, setSubmitting] = React.useState(false);
+  const [shareLink, setShareLink] = React.useState<{
+    email: string;
+    link: string;
+    expiresAt: string;
+  } | null>(null);
+
+  const refresh = React.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setInvites(await listMasterInvites("pending"));
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to load invites");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  function buildLink(token: string): string {
+    return typeof window !== "undefined"
+      ? `${window.location.origin}/invite/master/${encodeURIComponent(token)}`
+      : `/invite/master/${encodeURIComponent(token)}`;
+  }
+
+  async function handleCreate(e: React.FormEvent): Promise<void> {
+    e.preventDefault();
+    const email = addEmail.trim();
+    if (!email) return;
+    setSubmitting(true);
+    setError(null);
+    setShareLink(null);
+    try {
+      const r = await createMasterInvite({ email });
+      setShareLink({
+        email: r.email,
+        link: buildLink(r.token),
+        expiresAt: r.expiresAt,
+      });
+      setAddEmail("");
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to create invite");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function handleRegenerate(inviteId: string): Promise<void> {
+    setError(null);
+    try {
+      const r = await regenerateMasterInvite(inviteId);
+      setShareLink({
+        email: r.email,
+        link: buildLink(r.token),
+        expiresAt: r.expiresAt,
+      });
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to regenerate invite");
+    }
+  }
+
+  async function handleRevoke(inviteId: string): Promise<void> {
+    setError(null);
+    try {
+      await revokeMasterInvite(inviteId);
+      await refresh();
+    } catch (err) {
+      setError((err as Error).message ?? "Failed to revoke invite");
+    }
+  }
+
+  return (
+    <section className={card}>
+      <h2 className={heading}>Master invites (pending)</h2>
+      <form className="mb-3 flex items-center gap-2" onSubmit={handleCreate}>
+        <input
+          type="email"
+          autoComplete="email"
+          className={input}
+          placeholder="invitee@example.com"
+          value={addEmail}
+          onChange={(e) => setAddEmail(e.target.value)}
+        />
+        <button type="submit" className={btn} disabled={submitting}>
+          {submitting ? "…" : "Send invite"}
+        </button>
+      </form>
+      {loading ? <p className={muted}>Loading…</p> : null}
+      {invites.length === 0 && !loading ? (
+        <p className={muted}>No pending master invites.</p>
+      ) : null}
+      <ul>
+        {invites.map((i) => (
+          <li key={i.inviteId} className={row}>
+            <div className="min-w-0">
+              <span className="truncate text-[12px]">{i.email}</span>
+              <div className={muted}>
+                expires {new Date(i.expiresAt).toLocaleString()}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className={btn}
+                onClick={() => void handleRegenerate(i.inviteId)}
+              >
+                Regenerate link
+              </button>
+              <button
+                type="button"
+                className={btnDanger}
+                onClick={() => void handleRevoke(i.inviteId)}
+              >
+                Revoke
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+      {shareLink ? (
+        <div className="mt-2 rounded-md border border-emerald-500/40 bg-emerald-500/10 p-2 text-[11px]">
+          <div className="font-semibold">Invite link for {shareLink.email}</div>
+          <code className="mt-1 block break-all rounded bg-background/50 px-1 py-0.5 font-mono text-[10px]">
+            {shareLink.link}
+          </code>
+          <div className="mt-1 flex items-center gap-2">
+            <button
+              type="button"
+              className={btn}
+              onClick={() => {
+                if (typeof navigator !== "undefined" && navigator.clipboard) {
+                  void navigator.clipboard.writeText(shareLink.link);
+                }
+              }}
+            >
+              Copy
+            </button>
+            <span className={muted}>
+              expires {new Date(shareLink.expiresAt).toLocaleString()} —
+              shown once; regenerate if lost.
+            </span>
+          </div>
+        </div>
+      ) : null}
       {error ? (
         <p className="mt-2 text-[11px] text-red-600 dark:text-red-300">{error}</p>
       ) : null}
@@ -550,6 +737,7 @@ export function MasterConsolePanel(): React.ReactElement {
   return (
     <div className="flex flex-col gap-4">
       <MasterAdminsSection />
+      <MasterInvitesSection />
       <OrgAdminsSection />
       <UsersSection />
     </div>

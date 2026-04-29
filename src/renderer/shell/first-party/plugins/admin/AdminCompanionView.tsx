@@ -10,6 +10,13 @@ const label = "text-[11px] text-muted-foreground";
 const value = "text-foreground/90";
 const muted = "text-xs text-muted-foreground";
 
+/**
+ * Companion view: secondary detail surface alongside the admin main
+ * view. Post-org/team migration the companion focus narrowed to
+ * org-member rows only — space-member and workspace/project share
+ * focuses were dropped with the spaces/workspaces concept (project
+ * access is now managed inline via team_projects in `TeamsPanel`).
+ */
 export function AdminCompanionView(
   _props: ShellViewComponentProps,
 ): React.ReactElement {
@@ -37,18 +44,18 @@ export function AdminCompanionView(
     );
   }
 
-  if (focus.kind === "org-member" || focus.kind === "space-member") {
+  if (focus.kind === "org-member") {
     return (
       <div className={wrap}>
         <header>
-          <h3 className={title}>
-            {focus.kind === "org-member" ? "Organization member" : "Space member"}
-          </h3>
+          <h3 className={title}>Organization member</h3>
         </header>
         <div className={card}>
           <div className={row}>
             <span className={label}>User id</span>
-            <span className={`${value} font-mono text-[11px]`}>{focus.userId}</span>
+            <span className={`${value} font-mono text-[11px]`}>
+              {focus.userId}
+            </span>
           </div>
           {focus.displayName ? (
             <div className={row}>
@@ -56,44 +63,6 @@ export function AdminCompanionView(
               <span className={value}>{focus.displayName}</span>
             </div>
           ) : null}
-          {focus.role ? (
-            <div className={row}>
-              <span className={label}>Role</span>
-              <span className={value}>{focus.role}</span>
-            </div>
-          ) : null}
-          {focus.kind === "space-member" ? (
-            <div className={row}>
-              <span className={label}>Space</span>
-              <span className={`${value} font-mono text-[11px]`}>
-                {focus.spaceId}
-              </span>
-            </div>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
-
-  if (focus.kind === "share") {
-    return (
-      <div className={wrap}>
-        <header>
-          <h3 className={title}>
-            {focus.resourceKind === "workspace" ? "Workspace share" : "Project share"}
-          </h3>
-        </header>
-        <div className={card}>
-          <div className={row}>
-            <span className={label}>Resource id</span>
-            <span className={`${value} font-mono text-[11px]`}>
-              {focus.resourceId}
-            </span>
-          </div>
-          <div className={row}>
-            <span className={label}>User id</span>
-            <span className={`${value} font-mono text-[11px]`}>{focus.userId}</span>
-          </div>
           {focus.role ? (
             <div className={row}>
               <span className={label}>Role</span>

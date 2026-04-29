@@ -1,6 +1,6 @@
 /**
- * Phase 4 integration coverage. Each test sets up an isolated PG schema,
- * registers a user + org + space + workspace + project, and exercises a
+ * Realtime integration coverage. Each test sets up an isolated PG schema,
+ * registers a user + org + (department + team) + project, and exercises a
  * specific AC over the in-process Fastify app.
  *
  * Hocuspocus end-to-end (AC4.1) needs a real WS server bound to a port —
@@ -19,8 +19,9 @@ import {
   type TestPgSchemaContext,
   factoryUser,
   factoryOrg,
-  factorySpace,
-  factoryWorkspace,
+  factoryDepartment,
+  factoryTeam,
+  factoryTeamMembership,
   factoryProject,
 } from "../test-pg-helper.js";
 import { createYjsPgAdapter } from "./yjs-pg-adapter.js";
@@ -31,10 +32,8 @@ import {
   _resetPresenceForTests,
 } from "./presence.js";
 import { notifyRealtime, clientOpStore } from "./notify.js";
-import { channelForSpace } from "./events.js";
+import { channelForOrg } from "./events.js";
 import { acquireChannel, _resetChannelsForTests } from "./listen-pool.js";
-
-const jwtSecret = "dev-only-archon-sync-secret-min-32-chars!!";
 
 test("AC4.1 — yjs adapter snapshot + replay round-trip", async (t) => {
   let ctx: TestPgSchemaContext | undefined;
@@ -97,8 +96,8 @@ test("AC4.4 — single audit row per recordAudit call (no duplicates)", async (t
       await recordAudit({
         orgId,
         actorUserId: userId,
-        action: "workspace.visibility.set",
-        targetType: "workspace",
+        action: "team.update",
+        targetType: "team",
         targetId: `00000000-0000-0000-0000-00000000000${i}`,
       });
     }
@@ -130,8 +129,8 @@ test("AC4.7 — recordAudit threads principal into metadata.principal", async (t
     await recordAudit({
       orgId,
       actorUserId: userId,
-      action: "workspace.visibility.set",
-      targetType: "workspace",
+      action: "team.update",
+      targetType: "team",
       targetId: "00000000-0000-0000-0000-000000000001",
       principal: { type: "mcp", metadata: { deviceId: "dev-1" } },
     });
@@ -151,23 +150,26 @@ test("AC4.7 — recordAudit threads principal into metadata.principal", async (t
 });
 
 test("AC4.6 — presence map: set, snapshot, drop", async (t) => {
+  void t;
   _resetPresenceForTests();
-  const spaceId = "22222222-2222-2222-2222-222222222222";
-  setPresence(spaceId, "u1", { displayName: "Alice", cursorOffset: 5 });
-  setPresence(spaceId, "u2", { displayName: "Bob" });
-  let snap = snapshotPresence(spaceId);
+  // Presence is now keyed per-note (post-spaces squash). Use a noteId-shaped
+  // string so the test exercises the same map behavior.
+  const noteId = "22222222-2222-2222-2222-222222222222";
+  setPresence(noteId, "u1", { displayName: "Alice", cursorOffset: 5 });
+  setPresence(noteId, "u2", { displayName: "Bob" });
+  let snap = snapshotPresence(noteId);
   assert.strictEqual(snap.length, 2);
   const alice = snap.find((s) => s.userId === "u1");
   assert.ok(alice);
   assert.strictEqual(alice!.state.displayName, "Alice");
 
-  dropPresence(spaceId, "u1");
-  snap = snapshotPresence(spaceId);
+  dropPresence(noteId, "u1");
+  snap = snapshotPresence(noteId);
   assert.strictEqual(snap.length, 1);
   assert.strictEqual(snap[0]!.userId, "u2");
 
-  dropPresence(spaceId, "u2");
-  assert.strictEqual(snapshotPresence(spaceId).length, 0);
+  dropPresence(noteId, "u2");
+  assert.strictEqual(snapshotPresence(noteId).length, 0);
 });
 
 test("AC4.3 — notifyRealtime + listen-pool fanout round-trip", async (t) => {
@@ -179,14 +181,17 @@ test("AC4.3 — notifyRealtime + listen-pool fanout round-trip", async (t) => {
     return;
   }
   try {
-    const spaceId = "33333333-3333-3333-3333-333333333333";
-    const channel = channelForSpace(spaceId);
+    // Real org id required because notifyRealtime touches the audit event
+    // pipeline. Using a synthetic UUID for the channel-key path is fine —
+    // the channel name is just a string.
+    const orgId = "33333333-3333-3333-3333-333333333333";
+    const channel = channelForOrg(orgId);
     const received: string[] = [];
     const release = await acquireChannel(channel, (raw) => {
       received.push(raw);
     });
     await clientOpStore.run({ clientOpId: "op-abc" }, async () => {
-      await notifyRealtime(spaceId, {
+      await notifyRealtime(orgId, {
         type: "note.created",
         noteId: "44444444-4444-4444-4444-444444444444",
         projectId: "55555555-5555-5555-5555-555555555555",
@@ -227,49 +232,66 @@ test("AC-edge-diff — pgWpnUpdateNote emits edge.added / edge.removed when cont
   try {
     const userId = await factoryUser({ email: `edge-${Date.now()}@p4.test` });
     const orgId = await factoryOrg({ ownerUserId: userId });
-    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
-    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
-    const projectId = await factoryProject({
-      userId,
-      workspaceId,
+    const departmentId = await factoryDepartment({
       orgId,
-      spaceId,
+      createdByUserId: userId,
+    });
+    const teamId = await factoryTeam({
+      orgId,
+      departmentId,
+      createdByUserId: userId,
+    });
+    await factoryTeamMembership({
+      teamId,
+      userId,
+      addedByUserId: userId,
+      role: "admin",
+    });
+    const projectId = await factoryProject({
+      orgId,
+      creatorUserId: userId,
+      teamId,
+      teamRole: "owner",
     });
 
     const { pgWpnCreateNote, pgWpnUpdateNote } = await import(
       "../wpn-pg-writes.js"
     );
     // Three notes; n0 will reference n1 then swap to n2.
-    const n0 = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "n0",
-    });
-    const n1 = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "n1",
-    });
-    const n2 = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "n2",
-    });
+    const n0 = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "n0" },
+      { editorUserId: userId },
+    );
+    const n1 = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "n1" },
+      { editorUserId: userId },
+    );
+    const n2 = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "n2" },
+      { editorUserId: userId },
+    );
 
     const events: string[] = [];
-    const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
+    const release = await acquireChannel(channelForOrg(orgId), (raw) => {
       events.push(raw);
     });
     try {
       // First update: add reference to n1.
-      await pgWpnUpdateNote(userId, n0.id, {
-        content: `link to [n1](#/n/${n1.id})`,
-      });
+      await pgWpnUpdateNote(
+        n0.id,
+        { content: `link to [n1](#/n/${n1.id})` },
+        { editorUserId: userId },
+      );
       await new Promise((r) => setTimeout(r, 200));
       // Second update: replace n1 reference with n2.
-      await pgWpnUpdateNote(userId, n0.id, {
-        content: `link to [n2](#/n/${n2.id})`,
-      });
+      await pgWpnUpdateNote(
+        n0.id,
+        { content: `link to [n2](#/n/${n2.id})` },
+        { editorUserId: userId },
+      );
       await new Promise((r) => setTimeout(r, 200));
     } finally {
       await release();
@@ -310,37 +332,50 @@ test("AC4.2 — concurrent moves: each successful op emits exactly one note.move
   try {
     const userId = await factoryUser({ email: `cm-${Date.now()}@p4.test` });
     const orgId = await factoryOrg({ ownerUserId: userId });
-    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
-    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
-    const projectId = await factoryProject({
-      userId,
-      workspaceId,
+    const departmentId = await factoryDepartment({
       orgId,
-      spaceId,
+      createdByUserId: userId,
+    });
+    const teamId = await factoryTeam({
+      orgId,
+      departmentId,
+      createdByUserId: userId,
+    });
+    await factoryTeamMembership({
+      teamId,
+      userId,
+      addedByUserId: userId,
+      role: "admin",
+    });
+    const projectId = await factoryProject({
+      orgId,
+      creatorUserId: userId,
+      teamId,
+      teamRole: "owner",
     });
 
     const { pgWpnCreateNote, pgWpnMoveNote } = await import(
       "../wpn-pg-writes.js"
     );
     // Tree shape: root  → A, B, C   (3 siblings).
-    const a = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "A",
-    });
-    const b = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "B",
-    });
-    const c = await pgWpnCreateNote(userId, projectId, {
-      relation: "root",
-      type: "page",
-      title: "C",
-    });
+    const a = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "A" },
+      { editorUserId: userId },
+    );
+    const b = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "B" },
+      { editorUserId: userId },
+    );
+    const c = await pgWpnCreateNote(
+      projectId,
+      { relation: "root", type: "page", title: "C" },
+      { editorUserId: userId },
+    );
 
     const events: Array<{ type: string; noteId?: string }> = [];
-    const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
+    const release = await acquireChannel(channelForOrg(orgId), (raw) => {
       try {
         events.push(JSON.parse(raw) as { type: string; noteId?: string });
       } catch {
@@ -350,8 +385,8 @@ test("AC4.2 — concurrent moves: each successful op emits exactly one note.move
     try {
       // Two concurrent moves: B becomes a child of A; C becomes a child of A.
       const results = await Promise.allSettled([
-        pgWpnMoveNote(userId, projectId, b.id, a.id, "into"),
-        pgWpnMoveNote(userId, projectId, c.id, a.id, "into"),
+        pgWpnMoveNote(projectId, b.id, a.id, "into", { editorUserId: userId }),
+        pgWpnMoveNote(projectId, c.id, a.id, "into", { editorUserId: userId }),
       ]);
       // Give NOTIFY a tick to land.
       await new Promise((r) => setTimeout(r, 250));
@@ -375,8 +410,3 @@ test("AC4.2 — concurrent moves: each successful op emits exactly one note.move
     await ctx.teardown();
   }
 });
-
-// keep factories alive in tree-shaking-aware bundlers
-void factorySpace;
-void factoryWorkspace;
-void factoryProject;

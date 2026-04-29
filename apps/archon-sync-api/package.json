@@ -16,7 +16,7 @@
     "dev": "tsx watch src/server.ts",
     "start": "NODE_ENV=production tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/integration-auth-wpn.test.ts src/integration-org-invites.test.ts src/integration-invites-cross-org.test.ts src/integration-spaces.test.ts src/integration-teams.test.ts src/integration-visibility-acl.test.ts src/integration-project-acl.test.ts src/integration-announcements.test.ts src/integration-audit.test.ts src/integration-cross-boundary.test.ts src/mcp-device-auth.test.ts src/marked-smoke.test.ts src/repo-bundled-docs-path.test.ts src/refresh-sessions.test.ts src/image-asset-path.test.ts src/integration-me-assets.test.ts src/note-search-hints.test.ts src/note-backlinks-vfs.test.ts src/export-import-helpers.test.ts src/auth-principal.test.ts src/realtime/realtime.test.ts",
+    "test": "tsx --test src/auth-legacy-objectid-translation.test.ts src/auth-principal.test.ts src/export-import-helpers.test.ts src/image-asset-path.test.ts src/integration-announcements.test.ts src/integration-audit.test.ts src/integration-auth-wpn.test.ts src/integration-me-assets.test.ts src/integration-org-invites.test.ts src/integration-project-acl.test.ts src/integration-teams.test.ts src/integration-visibility-acl.test.ts src/marked-smoke.test.ts src/mcp-device-auth.test.ts src/note-backlinks-vfs.test.ts src/note-search-hints.test.ts src/note-vfs-mirror.test.ts src/permission-resolver.test.ts src/refresh-sessions.test.ts src/repo-bundled-docs-path.test.ts src/realtime/realtime.test.ts src/realtime/rest-yjs-bridge.test.ts scripts/rewrite-vfs-3-to-2-segment.test.ts",
     "test:hocuspocus": "tsx --test --test-force-exit src/realtime/realtime-hocuspocus.test.ts"
   },
   "main": "./dist/index.js",
@@ -27,7 +27,9 @@
     "@fastify/cors": "^11.0.0",
     "@fastify/multipart": "^10.0.0",
     "@fastify/websocket": "^11.0.2",
+    "@hocuspocus/extension-redis": "2.15.3",
     "@hocuspocus/server": "^2.15.3",
+    "@nodex-studio/mdx-sdk": "*",
     "archiver": "^7.0.1",
     "bcryptjs": "^3.0.2",
     "dotenv": "^16.4.7",
@@ -38,13 +40,13 @@
     "pg": "^8.13.1",
     "unzipper": "^0.12.3",
     "yjs": "^13.6.30",
-    "zod": "^3.24.1",
-    "@nodex-studio/mdx-sdk": "*"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@hocuspocus/provider": "^2.15.3",
     "@types/archiver": "^7.0.0",
     "@types/bcryptjs": "^2.4.6",
+    "@types/ioredis": "^4.28.10",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/pg": "^8.11.10",
     "@types/unzipper": "^0.10.11",

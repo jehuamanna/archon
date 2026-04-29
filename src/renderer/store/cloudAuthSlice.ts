@@ -33,12 +33,31 @@ type CloudAuthThunkExtra = { extra: ArchonPlatformDeps };
 
 function decodeAccessTokenClaims(
   token: string,
-): { activeOrgId?: string; activeSpaceId?: string } | null {
+): {
+  activeOrgId?: string;
+  /**
+   * Vestigial alias for `activeTeamId`. The sync-api stopped emitting
+   * `activeSpaceId` after the org/team migration; the field stays on the
+   * decoded shape so legacy explorer/sidebar/editor consumers reading
+   * `claims.activeSpaceId` keep working until #5 ports them to read
+   * `activeTeamId`. The two fields are populated from the same source
+   * (the JWT `activeTeamId` claim) until the migration is complete.
+   */
+  activeSpaceId?: string;
+  activeTeamId?: string;
+} | null {
   const obj = decodeJwtPayload(token);
   if (!obj) return null;
+  const activeTeamId =
+    typeof obj.activeTeamId === "string" ? obj.activeTeamId : undefined;
   return {
     activeOrgId: typeof obj.activeOrgId === "string" ? obj.activeOrgId : undefined,
-    activeSpaceId: typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined,
+    activeTeamId,
+    // Mirror the team claim into the vestigial space field so #5-not-yet-
+    // ported `claims.activeSpaceId` reads return the active team id.
+    activeSpaceId:
+      activeTeamId ??
+      (typeof obj.activeSpaceId === "string" ? obj.activeSpaceId : undefined),
   };
 }
 
@@ -155,21 +174,6 @@ const cloudAuthSlice = createSlice({
       .addCase(cloudLoginThunk.rejected, (state, action) => {
         state.busy = false;
         state.error = action.error.message ?? "Login failed";
-      })
-      .addCase(cloudRegisterThunk.pending, (state) => {
-        state.busy = true;
-        state.error = null;
-      })
-      .addCase(cloudRegisterThunk.fulfilled, (state, action) => {
-        state.busy = false;
-        state.status = "signedIn";
-        state.userId = action.payload.userId;
-        state.email = action.payload.email;
-        state.mustSetPassword = false;
-      })
-      .addCase(cloudRegisterThunk.rejected, (state, action) => {
-        state.busy = false;
-        state.error = action.error.message ?? "Register failed";
       })
       .addCase(cloudLogoutThunk.fulfilled, () => initialState);
   },
@@ -344,33 +348,12 @@ export const cloudLoginThunk = createAsyncThunk<
   };
 });
 
-export const cloudRegisterThunk = createAsyncThunk<
-  { userId: string; email: string },
-  { email: string; password: string },
-  CloudAuthThunkExtra
->("cloudAuth/register", async ({ email, password }, { extra, dispatch }) => {
-  const { token, refreshToken, userId } = await extra.remoteApi.authRegister(
-    email,
-    password,
-  );
-  writeCloudSyncToken(token);
-  writeCloudSyncRefreshToken(refreshToken);
-  writeCloudSyncEmail(email.toLowerCase());
-  extra.remoteApi.setAuthToken(token);
-  extra.remoteApi.setRefreshToken(refreshToken);
-  setAccessToken(token);
-  const claims = decodeAccessTokenClaims(token);
-  if (claims?.activeOrgId) {
-    dispatch(setLocalActiveOrg({ orgId: claims.activeOrgId }));
-  }
-  if (claims?.activeSpaceId) {
-    dispatch(setLocalActiveSpace({ spaceId: claims.activeSpaceId }));
-  }
-  void dispatch(fetchNotificationsThunk());
-  startSilentRefreshScheduler();
-  restartSilentRefreshScheduler();
-  return { userId, email: email.toLowerCase() };
-});
+// cloudRegisterThunk was removed when public signup was killed. New accounts
+// are created exclusively via admin invite (master invite or org invite); the
+// invitee lands on `/invite/[token]`, sets a password, and logs in via
+// cloudLoginThunk on first use. Restore only if public registration is
+// reopened — the corresponding `/auth/register` route would also need to come
+// back.
 
 export const cloudLogoutThunk = createAsyncThunk<void, void, CloudAuthThunkExtra>(
   "cloudAuth/logout",
