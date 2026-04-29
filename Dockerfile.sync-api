@@ -14,6 +14,10 @@ ENV npm_config_fetch_retries=5 \
 COPY package.json package-lock.json tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
+# `apps/archon-sync-api/src/wpn-pg-writes.ts` dynamically imports
+# `../../../src/shared/markdown-internal-note-href.js`, so the shared tree
+# at the repo root must be present in the image.
+COPY src/shared ./src/shared
 COPY docs/bundled-plugin-authoring ./docs/bundled-plugin-authoring
 
 # Install ALL workspace deps (no `-w` filter) so the TypeScript build
