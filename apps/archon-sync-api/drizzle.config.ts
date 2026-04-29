@@ -1,5 +1,5 @@
 import { defineConfig } from "drizzle-kit";
-console.log("Postgres connection string:", process.env.DATABASE_URL ? "[redacted]" : "(empty)");
+
 const databaseUrl =
   (typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL.trim()) ||
   "postgres://archon:archon@localhost:5432/archon_sync";
