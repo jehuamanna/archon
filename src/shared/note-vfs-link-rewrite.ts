@@ -10,23 +10,19 @@ import {
 import type { WpnNoteWithContextListItem } from "./wpn-v2-types";
 
 /**
- * When a note moves to a different workspace/project, its canonical VFS path changes.
+ * When a note moves to a different project, its canonical VFS path changes.
  * Returns old and new canonical paths, or `null` when the path would not change.
  */
 export function vfsCanonicalPathsForProjectChange(
-  oldWorkspace: string,
   oldProject: string,
-  newWorkspace: string,
   newProject: string,
   title: string,
 ): { oldCanonical: string; newCanonical: string } | null {
   const oldCanonical = canonicalVfsPathFromLinkRow({
-    workspaceName: oldWorkspace,
     projectName: oldProject,
     title,
   });
   const newCanonical = canonicalVfsPathFromLinkRow({
-    workspaceName: newWorkspace,
     projectName: newProject,
     title,
   });
@@ -35,21 +31,19 @@ export function vfsCanonicalPathsForProjectChange(
 }
 
 /**
- * When a note title changes, its canonical VFS path `Workspace/Project/Title` changes.
+ * When a note title changes, its canonical VFS path `Project/Title` changes.
  * Rewrite markdown / MDX that pointed at the old path so `#/w/...` and `w/...` links keep working.
  */
 export function vfsCanonicalPathsForTitleChange(
-  ctx: Pick<WpnNoteWithContextListItem, "workspace_name" | "project_name">,
+  ctx: Pick<WpnNoteWithContextListItem, "project_name">,
   oldTitle: string,
   newTitle: string,
 ): { oldCanonical: string; newCanonical: string } | null {
   const oldCanonical = canonicalVfsPathFromLinkRow({
-    workspaceName: ctx.workspace_name,
     projectName: ctx.project_name,
     title: oldTitle,
   });
   const newCanonical = canonicalVfsPathFromLinkRow({
-    workspaceName: ctx.workspace_name,
     projectName: ctx.project_name,
     title: newTitle,
   });
