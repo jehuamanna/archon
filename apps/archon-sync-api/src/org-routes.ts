@@ -21,20 +21,18 @@ import {
 import { getDb } from "./pg.js";
 import {
   auditEvents,
+  departments,
   notifications,
   organizations,
   orgInvites,
   orgMemberships,
-  projectShares,
-  spaceMemberships,
-  spaces,
+  projects,
+  teamMemberships,
+  teamProjects,
   teams,
   users,
-  workspaceShares,
-  wpnProjects,
-  wpnWorkspaces,
 } from "./db/schema.js";
-import { effectiveRoleInSpace } from "./permission-resolver.js";
+import { effectiveRoleInProject } from "./permission-resolver.js";
 import {
   acceptInviteBody,
   createInviteBody,
@@ -45,7 +43,7 @@ import {
   setActiveOrgBody,
   setMemberRoleBody,
   updateOrgBody,
-  type InviteSpaceGrant,
+  type InviteTeamGrant,
   type OrgRole,
 } from "./org-schemas.js";
 import type { OrgInviteNotificationPayload } from "./notification-schemas.js";
@@ -58,7 +56,7 @@ import { recordAudit } from "./audit.js";
 import { buildSessionsAfterAppend } from "./refresh-sessions.js";
 import {
   ensureUserHasDefaultOrg,
-  getDefaultSpaceIdForOrg,
+  getDefaultTeamIdForOrg,
 } from "./org-defaults.js";
 import { isUuid } from "./db/legacy-id-map.js";
 
@@ -85,28 +83,26 @@ async function consumeInviteNotification(inviteId: string): Promise<void> {
 }
 
 /**
- * Phase 8: pick the space the caller lands in when their `activeOrgId` changes.
- * Prefers a remembered per-org space (still accessible), falls back to the
- * org's default space.
+ * Pick the team the caller lands on when their `activeOrgId` changes.
+ * Prefers `lastActiveTeamByOrg[orgId]` if the team still exists in that org
+ * and the user is a member of one of its teams; otherwise falls back to the
+ * org's default team. Org admins always get a valid team because
+ * `ensureDefaultTeamForOrg` runs at org creation.
  */
-async function resolveSpaceForOrgEntry(
+async function resolveTeamForOrgEntry(
   user: typeof users.$inferSelect,
   orgId: string,
 ): Promise<string | null> {
-  const remembered = (user.lastActiveSpaceByOrg as Record<string, string> | null)?.[orgId];
+  const remembered = (user.lastActiveTeamByOrg as Record<string, string> | null)?.[orgId];
   if (remembered && isUuid(remembered)) {
-    const direct = await effectiveRoleInSpace(user.id, remembered);
-    if (direct) return remembered;
-    const orgRows = await getDb()
-      .select({ role: orgMemberships.role })
-      .from(orgMemberships)
-      .where(
-        and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.userId, user.id)),
-      )
+    const teamRows = await getDb()
+      .select({ orgId: teams.orgId })
+      .from(teams)
+      .where(eq(teams.id, remembered))
       .limit(1);
-    if (orgRows[0]?.role === "admin") return remembered;
+    if (teamRows[0]?.orgId === orgId) return remembered;
   }
-  return getDefaultSpaceIdForOrg(orgId);
+  return getDefaultTeamIdForOrg(orgId);
 }
 
 export function registerOrgRoutes(
@@ -279,7 +275,11 @@ export function registerOrgRoutes(
     return reply.status(204).send();
   });
 
-  /** Delete an Org with cascading checks + cleanup. */
+  /**
+   * Delete an Org. Refuse while content still exists — projects, teams, and
+   * non-default departments must be moved or deleted first. The "General"
+   * department auto-created at org bootstrap is removed as part of cleanup.
+   */
   app.delete("/orgs/:orgId", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
@@ -298,29 +298,17 @@ export function registerOrgRoutes(
     if (!org) {
       return reply.status(404).send({ error: "Organization not found" });
     }
-    const nonDefault =
+    const projCount =
       (
         await db()
           .select({ n: count() })
-          .from(spaces)
-          .where(and(eq(spaces.orgId, orgId), ne(spaces.kind, "default")))
+          .from(projects)
+          .where(eq(projects.orgId, orgId))
       )[0]?.n ?? 0;
-    if (nonDefault > 0) {
-      return reply.status(409).send({
-        error: "Organization still has spaces; delete them first",
-      });
-    }
-    const wsCount =
-      (
-        await db()
-          .select({ n: count() })
-          .from(wpnWorkspaces)
-          .where(eq(wpnWorkspaces.orgId, orgId))
-      )[0]?.n ?? 0;
-    if (wsCount > 0) {
-      return reply.status(409).send({
-        error: "Organization still has workspaces; move or delete them first",
-      });
+    if (projCount > 0) {
+      return reply
+        .status(409)
+        .send({ error: "Organization still has projects; delete them first" });
     }
     const teamCount =
       (
@@ -333,6 +321,18 @@ export function registerOrgRoutes(
       return reply
         .status(409)
         .send({ error: "Organization still has teams; delete them first" });
+    }
+    const nonDefaultDeptCount =
+      (
+        await db()
+          .select({ n: count() })
+          .from(departments)
+          .where(and(eq(departments.orgId, orgId), ne(departments.name, "General")))
+      )[0]?.n ?? 0;
+    if (nonDefaultDeptCount > 0) {
+      return reply.status(409).send({
+        error: "Organization still has departments; delete them first",
+      });
     }
     const otherMembers =
       (
@@ -351,19 +351,12 @@ export function registerOrgRoutes(
         error: "Organization still has other members; remove them first",
       });
     }
-    const defaultSpaceRows = await db()
-      .select({ id: spaces.id })
-      .from(spaces)
-      .where(and(eq(spaces.orgId, orgId), eq(spaces.kind, "default")));
-    const defaultSpaceIds = defaultSpaceRows.map((s) => s.id);
-    if (defaultSpaceIds.length > 0) {
-      await db()
-        .delete(spaceMemberships)
-        .where(inArray(spaceMemberships.spaceId, defaultSpaceIds));
-      await db()
-        .delete(spaces)
-        .where(and(eq(spaces.orgId, orgId), eq(spaces.kind, "default")));
-    }
+    // Clean up the bootstrap "General" department (if any) along with its
+    // memberships. FK is RESTRICT teams→departments, but we just verified
+    // there are no teams left.
+    await db()
+      .delete(departments)
+      .where(and(eq(departments.orgId, orgId), eq(departments.name, "General")));
     await db().delete(orgMemberships).where(eq(orgMemberships.orgId, orgId));
     await db().delete(orgInvites).where(eq(orgInvites.orgId, orgId));
     // Record the deletion before scrubbing audit history.
@@ -389,7 +382,7 @@ export function registerOrgRoutes(
       .where(eq(users.defaultOrgId, orgId));
     await db()
       .update(users)
-      .set({ lastActiveOrgId: null, lastActiveSpaceId: null })
+      .set({ lastActiveOrgId: null, lastActiveTeamId: null })
       .where(eq(users.lastActiveOrgId, orgId));
     await db()
       .update(users)
@@ -398,7 +391,7 @@ export function registerOrgRoutes(
     return reply.status(204).send();
   });
 
-  /** Switch active org. Mints a new access token with both org + space claims. */
+  /** Switch active org. Mints a new access token with both org + team claims. */
   app.post("/orgs/active", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
@@ -423,31 +416,31 @@ export function registerOrgRoutes(
     if (!user) {
       return reply.status(404).send({ error: "User not found" });
     }
-    const nextSpaceId = await resolveSpaceForOrgEntry(user, parsed.data.orgId);
-    const lastActiveSpaceByOrg = {
-      ...((user.lastActiveSpaceByOrg as Record<string, string> | null) ?? {}),
+    const nextTeamId = await resolveTeamForOrgEntry(user, parsed.data.orgId);
+    const lastActiveTeamByOrg = {
+      ...((user.lastActiveTeamByOrg as Record<string, string> | null) ?? {}),
     };
-    if (nextSpaceId) {
-      lastActiveSpaceByOrg[parsed.data.orgId] = nextSpaceId;
+    if (nextTeamId) {
+      lastActiveTeamByOrg[parsed.data.orgId] = nextTeamId;
     }
     await db()
       .update(users)
       .set({
         lastActiveOrgId: parsed.data.orgId,
-        lastActiveSpaceId: nextSpaceId ?? null,
-        lastActiveSpaceByOrg,
+        lastActiveTeamId: nextTeamId ?? null,
+        lastActiveTeamByOrg,
       })
       .where(eq(users.id, user.id));
     const token = signAccessToken(jwtSecret, {
       sub: auth.sub,
       email: auth.email,
       activeOrgId: parsed.data.orgId,
-      ...(nextSpaceId ? { activeSpaceId: nextSpaceId } : {}),
+      ...(nextTeamId ? { activeTeamId: nextTeamId } : {}),
     });
     return reply.send({
       token,
       activeOrgId: parsed.data.orgId,
-      activeSpaceId: nextSpaceId,
+      activeTeamId: nextTeamId,
     });
   });
 
@@ -475,7 +468,7 @@ export function registerOrgRoutes(
         expiresAt: i.expiresAt,
         acceptedAt: i.acceptedAt ?? null,
         declinedAt: i.declinedAt ?? null,
-        spaceGrants: i.spaceGrants ?? [],
+        teamGrants: i.teamGrants ?? [],
       })),
     });
   });
@@ -492,26 +485,26 @@ export function registerOrgRoutes(
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
     const email = parsed.data.email.toLowerCase();
-    const spaceGrants: InviteSpaceGrant[] = parsed.data.spaceGrants ?? [];
-    for (const grant of spaceGrants) {
-      if (!isUuid(grant.spaceId)) {
+    const teamGrants: InviteTeamGrant[] = parsed.data.teamGrants ?? [];
+    for (const grant of teamGrants) {
+      if (!isUuid(grant.teamId)) {
         return reply
           .status(400)
-          .send({ error: `Invalid space id: ${grant.spaceId}` });
+          .send({ error: `Invalid team id: ${grant.teamId}` });
       }
     }
-    const spaceDocs = spaceGrants.length
+    const teamDocs = teamGrants.length
       ? await db()
           .select()
-          .from(spaces)
-          .where(inArray(spaces.id, spaceGrants.map((g) => g.spaceId)))
+          .from(teams)
+          .where(inArray(teams.id, teamGrants.map((g) => g.teamId)))
       : [];
-    for (const grant of spaceGrants) {
-      const doc = spaceDocs.find((s) => s.id === grant.spaceId);
+    for (const grant of teamGrants) {
+      const doc = teamDocs.find((t) => t.id === grant.teamId);
       if (!doc || doc.orgId !== orgId) {
         return reply
           .status(400)
-          .send({ error: `Space ${grant.spaceId} does not belong to this org` });
+          .send({ error: `Team ${grant.teamId} does not belong to this org` });
       }
     }
     const existingPending = await db()
@@ -544,7 +537,7 @@ export function registerOrgRoutes(
       invitedByUserId: auth.sub,
       createdAt: now,
       expiresAt,
-      spaceGrants,
+      teamGrants,
     });
     await recordAudit({
       orgId,
@@ -553,10 +546,10 @@ export function registerOrgRoutes(
       action: "org.invite.create",
       targetType: "org_invite",
       targetId: inviteId,
-      metadata: { email, role: parsed.data.role, spaceGrants: spaceGrants.length },
+      metadata: { email, role: parsed.data.role, teamGrants: teamGrants.length },
     });
 
-    // Phase 8: notify if invitee already has an account.
+    // Notify if invitee already has an account.
     const existingUserRows = await db()
       .select()
       .from(users)
@@ -578,7 +571,7 @@ export function registerOrgRoutes(
           .where(eq(users.id, auth.sub))
           .limit(1)
       )[0];
-      const spaceNameById = new Map(spaceDocs.map((s) => [s.id, s.name]));
+      const teamNameById = new Map(teamDocs.map((t) => [t.id, t.name]));
       const payload: OrgInviteNotificationPayload = {
         inviteId,
         orgId,
@@ -588,9 +581,9 @@ export function registerOrgRoutes(
           inviterRow?.displayName ?? inviterRow?.email ?? "(someone)",
         inviterEmail: inviterRow?.email ?? "",
         role: parsed.data.role,
-        spaceGrants: spaceGrants.map((g) => ({
-          spaceId: g.spaceId,
-          spaceName: spaceNameById.get(g.spaceId) ?? "(unknown space)",
+        teamGrants: teamGrants.map((g) => ({
+          teamId: g.teamId,
+          teamName: teamNameById.get(g.teamId) ?? "(unknown team)",
           role: g.role,
         })),
         expiresAt: expiresAt.toISOString(),
@@ -626,7 +619,7 @@ export function registerOrgRoutes(
       role: parsed.data.role,
       token: plain,
       expiresAt,
-      spaceGrants,
+      teamGrants,
     });
   });
 
@@ -763,29 +756,30 @@ export function registerOrgRoutes(
       .onConflictDoNothing({
         target: [orgMemberships.orgId, orgMemberships.userId],
       });
-    const grants = (invite.spaceGrants ?? []) as InviteSpaceGrant[];
+    const grants = (invite.teamGrants ?? []) as InviteTeamGrant[];
     if (grants.length > 0) {
       for (const grant of grants) {
         await db()
-          .insert(spaceMemberships)
+          .insert(teamMemberships)
           .values({
-            spaceId: grant.spaceId,
+            teamId: grant.teamId,
             userId: userRow.id,
             role: grant.role,
             addedByUserId: invite.invitedByUserId,
             joinedAt: new Date(),
           })
           .onConflictDoNothing({
-            target: [spaceMemberships.spaceId, spaceMemberships.userId],
+            target: [teamMemberships.teamId, teamMemberships.userId],
           });
         await recordAudit({
           orgId: invite.orgId,
           actorUserId: userRow.id,
           principal: { type: "user" },
-          action: "space.member.add",
-          targetType: "space_membership",
-          targetId: grant.spaceId,
+          action: "team.member.add",
+          targetType: "team_membership",
+          targetId: `${grant.teamId}:${userRow.id}`,
           metadata: {
+            teamId: grant.teamId,
             userId: userRow.id,
             role: grant.role,
             viaInvite: invite.id,
@@ -801,7 +795,7 @@ export function registerOrgRoutes(
       action: "org.invite.accept",
       targetType: "org_invite",
       targetId: invite.id,
-      metadata: { email, role: invite.role, spaceGrants: grants.length },
+      metadata: { email, role: invite.role, teamGrants: grants.length },
     });
     if (createdUser || !userRow.defaultOrgId) {
       await db()
@@ -809,34 +803,36 @@ export function registerOrgRoutes(
         .set({ defaultOrgId: invite.orgId })
         .where(and(eq(users.id, userRow.id), sql`${users.defaultOrgId} IS NULL`));
     }
-    // Land the invitee in a readable space.
-    const orgDefaultSpaceId = await getDefaultSpaceIdForOrg(invite.orgId);
-    let inviteSpaceId: string | null = null;
+    // Land the invitee on the most useful team they now belong to: prefer a
+    // grant on the org's default team, otherwise the first granted team,
+    // otherwise the org default.
+    const orgDefaultTeamId = await getDefaultTeamIdForOrg(invite.orgId);
+    let inviteTeamId: string | null = null;
     if (grants.length > 0) {
-      const grantOnDefault = orgDefaultSpaceId
-        ? grants.find((g) => g.spaceId === orgDefaultSpaceId)
+      const grantOnDefault = orgDefaultTeamId
+        ? grants.find((g) => g.teamId === orgDefaultTeamId)
         : undefined;
-      inviteSpaceId = (grantOnDefault ?? grants[0]).spaceId;
+      inviteTeamId = (grantOnDefault ?? grants[0]).teamId;
     } else {
-      inviteSpaceId = orgDefaultSpaceId;
+      inviteTeamId = orgDefaultTeamId;
     }
-    const lastActiveSpaceByOrg = {
-      ...((userRow.lastActiveSpaceByOrg as Record<string, string> | null) ?? {}),
+    const lastActiveTeamByOrg = {
+      ...((userRow.lastActiveTeamByOrg as Record<string, string> | null) ?? {}),
     };
-    if (inviteSpaceId) lastActiveSpaceByOrg[invite.orgId] = inviteSpaceId;
+    if (inviteTeamId) lastActiveTeamByOrg[invite.orgId] = inviteTeamId;
     await db()
       .update(users)
       .set({
         lastActiveOrgId: invite.orgId,
-        lastActiveSpaceId: inviteSpaceId ?? null,
-        lastActiveSpaceByOrg,
+        lastActiveTeamId: inviteTeamId ?? null,
+        lastActiveTeamByOrg,
       })
       .where(eq(users.id, userRow.id));
     const tokenPayload = {
       sub: userRow.id,
       email,
       activeOrgId: invite.orgId,
-      ...(inviteSpaceId ? { activeSpaceId: inviteSpaceId } : {}),
+      ...(inviteTeamId ? { activeTeamId: inviteTeamId } : {}),
     };
     const jti = randomUUID();
     const token = signAccessToken(jwtSecret, tokenPayload);
@@ -869,7 +865,7 @@ export function registerOrgRoutes(
       orgId: invite.orgId,
       role: invite.role,
       createdUser,
-      spaceGrants: grants,
+      teamGrants: grants,
     });
   });
 
@@ -1014,7 +1010,12 @@ export function registerOrgRoutes(
     return reply.status(204).send();
   });
 
-  /** Admin-only: remove a member. Cascades workspace + project shares. */
+  /**
+   * Admin-only: remove a member. Cascades team memberships in this org via
+   * a join over `teams` so we don't touch teams in other orgs the user may
+   * still belong to. Project access is automatically removed because
+   * `team_projects` access derives from team_memberships.
+   */
   app.delete("/orgs/:orgId/members/:userId", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
@@ -1059,35 +1060,22 @@ export function registerOrgRoutes(
       .where(
         and(eq(orgMemberships.orgId, orgId), eq(orgMemberships.userId, userId)),
       );
-    const wsIds = (
+    // Drop team memberships scoped to teams in this org. Drizzle doesn't
+    // let `delete().where()` reference another table, so collect the team
+    // ids first.
+    const orgTeamIds = (
       await db()
-        .select({ id: wpnWorkspaces.id })
-        .from(wpnWorkspaces)
-        .where(eq(wpnWorkspaces.orgId, orgId))
-    ).map((w) => w.id);
-    if (wsIds.length > 0) {
+        .select({ id: teams.id })
+        .from(teams)
+        .where(eq(teams.orgId, orgId))
+    ).map((t) => t.id);
+    if (orgTeamIds.length > 0) {
       await db()
-        .delete(workspaceShares)
+        .delete(teamMemberships)
         .where(
           and(
-            eq(workspaceShares.userId, userId),
-            inArray(workspaceShares.workspaceId, wsIds),
-          ),
-        );
-    }
-    const projIds = (
-      await db()
-        .select({ id: wpnProjects.id })
-        .from(wpnProjects)
-        .where(eq(wpnProjects.orgId, orgId))
-    ).map((p) => p.id);
-    if (projIds.length > 0) {
-      await db()
-        .delete(projectShares)
-        .where(
-          and(
-            eq(projectShares.userId, userId),
-            inArray(projectShares.projectId, projIds),
+            eq(teamMemberships.userId, userId),
+            inArray(teamMemberships.teamId, orgTeamIds),
           ),
         );
     }
@@ -1252,14 +1240,14 @@ export function registerOrgRoutes(
         .where(eq(users.id, invite.invitedByUserId))
         .limit(1)
     )[0];
-    const grants = (invite.spaceGrants ?? []) as InviteSpaceGrant[];
-    const spaceDocs = grants.length
+    const grants = (invite.teamGrants ?? []) as InviteTeamGrant[];
+    const teamDocs = grants.length
       ? await db()
-          .select({ id: spaces.id, name: spaces.name })
-          .from(spaces)
-          .where(inArray(spaces.id, grants.map((g) => g.spaceId)))
+          .select({ id: teams.id, name: teams.name })
+          .from(teams)
+          .where(inArray(teams.id, grants.map((g) => g.teamId)))
       : [];
-    const spaceNameById = new Map(spaceDocs.map((s) => [s.id, s.name]));
+    const teamNameById = new Map(teamDocs.map((t) => [t.id, t.name]));
     return reply.send({
       orgId: invite.orgId,
       orgName: orgRow?.name ?? "(unknown org)",
@@ -1273,9 +1261,9 @@ export function registerOrgRoutes(
         displayName: inviterRow?.displayName ?? inviterRow?.email ?? "(someone)",
         email: inviterRow?.email ?? "",
       },
-      spaceGrants: grants.map((g) => ({
-        spaceId: g.spaceId,
-        spaceName: spaceNameById.get(g.spaceId) ?? "(unknown space)",
+      teamGrants: grants.map((g) => ({
+        teamId: g.teamId,
+        teamName: teamNameById.get(g.teamId) ?? "(unknown team)",
         role: g.role,
       })),
     });
@@ -1285,4 +1273,6 @@ export function registerOrgRoutes(
   void asc;
   void gt;
   void desc;
+  void teamProjects;
+  void effectiveRoleInProject;
 }

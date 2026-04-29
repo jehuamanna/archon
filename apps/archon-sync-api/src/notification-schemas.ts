@@ -12,7 +12,7 @@ export type OrgInviteNotificationPayload = {
   inviterDisplayName: string;
   inviterEmail: string;
   role: "admin" | "member";
-  spaceGrants: { spaceId: string; spaceName: string; role: "owner" | "member" | "viewer" }[];
+  teamGrants: { teamId: string; teamName: string; role: "admin" | "member" }[];
   expiresAt: string;
 };
 
