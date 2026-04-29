@@ -5,7 +5,7 @@
  * the Postgres adapter from `yjs-pg-adapter.ts` provides the snapshot +
  * incremental log persistence.
  *
- * Auth: short-TTL `typ: "spaceWs"` JWT in the WS query string proves identity.
+ * Auth: short-TTL `typ: "wsClient"` JWT in the WS query string proves identity.
  * Authorisation resolves the note's project (`notes.projectId`) and gates on
  * `effectiveRoleInProject`, matching the rest of the post-squash auth model
  * (`spaces` was dropped — projects are the canonical access scope now).
@@ -200,7 +200,7 @@ export function registerYjsWsRoutes(
     extensions,
     async onAuthenticate({ token, documentName }) {
       const payload = await verifyAndTranslate(jwtSecret, token);
-      if (payload.typ !== "spaceWs") {
+      if (payload.typ !== "wsClient") {
         throw new Error("wrong token typ");
       }
       const projectId = await resolveProjectForNote(documentName);

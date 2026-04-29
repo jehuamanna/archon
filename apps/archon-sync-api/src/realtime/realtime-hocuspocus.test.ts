@@ -117,7 +117,7 @@ test(
     // protocol auth message (not the URL).
     const wsBase = `ws://127.0.0.1:${addr.port}/api/v1/ws/yjs`;
 
-    // The `typ: "spaceWs"` JWT name is vestigial after the spaces squash —
+    // The `typ: "wsClient"` JWT name is vestigial after the spaces squash —
     // identity-only token. Per-note authorisation runs at WS open in
     // yjs-ws.ts onAuthenticate; the active org carries the membership that
     // gates project access.
@@ -126,7 +126,7 @@ test(
       {
         sub: userId,
         email: `${emailPrefix}@example.test`,
-        typ: "spaceWs",
+        typ: "wsClient",
         principal: { type: "user" },
         activeOrgId: orgId,
       },
@@ -213,7 +213,7 @@ test(
       {
         sub: userId,
         email: `${emailPrefix}@example.test`,
-        typ: "spaceWs",
+        typ: "wsClient",
         principal: { type: "user" },
         activeOrgId: orgId,
       },

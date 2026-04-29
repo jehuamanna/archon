@@ -36,6 +36,7 @@ import { registerMdxStateWsRoutes } from "./mdx-state/ws.js";
 import { registerMdxSdkSpecRoutes } from "./mdx-sdk-spec/routes.js";
 import {
   registerRealtimeRoutes,
+  registerRealtimeWsRoutes,
   registerYjsWsRoutes,
   registerRealtimeDiagnosticsRoute,
 } from "./realtime/index.js";
@@ -120,6 +121,7 @@ export function registerRoutes(
   registerMdxStateWsRoutes(app, { jwtSecret });
   registerMdxSdkSpecRoutes(app);
   registerRealtimeRoutes(app, { jwtSecret });
+  registerRealtimeWsRoutes(app, { jwtSecret });
   registerYjsWsRoutes(app, { jwtSecret });
   registerRealtimeDiagnosticsRoute(app, { jwtSecret });
   app.register(

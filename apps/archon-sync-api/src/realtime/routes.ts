@@ -1,18 +1,19 @@
 /**
- * Realtime WS token-mint endpoint. The web client calls
+ * Realtime WS token-mint endpoint. The client calls
  * `POST /v1/realtime/ws-token` with an access token in `Authorization`,
- * specifying a `spaceId` (legacy parameter — preserved for client compat
- * after the spaces → projects squash) plus optional `noteId`/`workspaceId`.
- * The server returns a 5-minute `typ: "spaceWs"` JWT the client uses to
- * open the Yjs WebSocket at `GET /v1/ws/yjs?token=<jwt>`.
+ * optionally specifying an `orgId`/`noteId` for diagnostics. The server
+ * returns a 5-minute `typ: "wsClient"` JWT used to open one of:
+ *   - `GET /v1/ws/yjs?token=<jwt>`           — Yjs collab (per note)
+ *   - `GET /v1/ws/realtime/:orgId?token=<jwt>` — org-scoped presence + events
  *
- * Authorisation moved per-note: the spaces table no longer exists, so the
- * fine-grained gate runs in `yjs-ws.ts` `onAuthenticate`, which resolves
- * the documentName (noteId) → project and checks `effectiveRoleInProject`.
- * This route only proves identity (via `requireAuth`); a token without a
- * matching project grant gets rejected at WS open time.
+ * Authorisation is per-resource at WS open time:
+ *   - Yjs: `yjs-ws.ts onAuthenticate` resolves documentName → project and
+ *     checks `effectiveRoleInProject`.
+ *   - Realtime/org: `ws-skeleton.ts` accepts any valid wsClient token; the
+ *     per-event filter (`canDeliverToSubscriber`) checks project read
+ *     rights for every event before forwarding.
  *
- * Splitting the access token from the WS token still keeps the long-lived
+ * Splitting the access token from the WS token keeps the long-lived
  * principal off the wire as a query string parameter.
  */
 import type { FastifyInstance } from "fastify";
@@ -20,8 +21,7 @@ import { z } from "zod";
 import { requireAuth, signToken } from "../auth.js";
 
 const wsTokenBody = z.object({
-  spaceId: z.string().uuid().optional(),
-  workspaceId: z.string().uuid().optional(),
+  orgId: z.string().uuid().optional(),
   noteId: z.string().uuid().optional(),
 });
 
@@ -38,16 +38,16 @@ export function registerRealtimeRoutes(
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
     }
-    // The minted token carries identity only — per-note authorisation runs
-    // at WS open in `yjs-ws.ts onAuthenticate`. The body's `spaceId` is
-    // accepted (and ignored) for client compat after the spaces squash.
+    // Body fields are advisory only — per-resource authorisation runs at
+    // WS open time. The token carries identity (sub/email/principal) plus
+    // activeOrgId for the org-scoped channel claim.
     void parsed.data;
     const token = signToken(
       jwtSecret,
       {
         sub: auth.sub,
         email: auth.email,
-        typ: "spaceWs",
+        typ: "wsClient",
         principal: auth.principal ?? { type: "user" },
         activeOrgId: auth.activeOrgId,
       },
