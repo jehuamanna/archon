@@ -25,8 +25,23 @@ function pgPoolOptions(): PoolConfig {
   const connectionString =
     (typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL.trim()) ||
     "postgres://archon:archon@localhost:5432/archon_sync";
+  // Managed Postgres providers (Supabase, Neon, Railway, Heroku, RDS w/o
+  // bundled CA) speak TLS but their intermediate certs aren't in Node's
+  // built-in CA bundle — pg-connection-string ≥3 maps `sslmode=require`
+  // to `verify-full`, which then fails with `SELF_SIGNED_CERT_IN_CHAIN`.
+  // Honor that intent explicitly: encrypt the wire, but skip CA pinning
+  // unless the operator opted into strict mode with `verify-ca`/`verify-full`.
+  const lc = connectionString.toLowerCase();
+  const wantsTls = /[?&]sslmode=(require|prefer|no-verify)\b/.test(lc);
+  const strictTls = /[?&]sslmode=(verify-ca|verify-full)\b/.test(lc);
+  const ssl = strictTls
+    ? undefined
+    : wantsTls
+      ? { rejectUnauthorized: false }
+      : undefined;
   return {
     connectionString,
+    ...(ssl ? { ssl } : {}),
     max: serverless ? 10 : 100,
     min: serverless ? 0 : undefined,
     idleTimeoutMillis: 30_000,
