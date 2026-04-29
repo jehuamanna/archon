@@ -18,6 +18,7 @@ import {
   signAccessToken,
   signRefreshToken,
 } from "./auth.js";
+import { requireMasterAdmin } from "./admin-auth.js";
 import { getDb } from "./pg.js";
 import {
   auditEvents,
@@ -119,14 +120,17 @@ export function registerOrgRoutes(
     let memberships = await listMembershipsForUser(auth.sub);
     if (memberships.length === 0) {
       const userRows = await db()
-        .select({ email: users.email })
+        .select({ email: users.email, isMasterAdmin: users.isMasterAdmin })
         .from(users)
         .where(eq(users.id, auth.sub))
         .limit(1);
-      if (userRows[0]) {
+      // Skip auto-create for master admins — they're platform-wide and
+      // shouldn't get an auto-personal-org sneaked in via /orgs/me; they
+      // manage orgs from the master console (`/master/orgs`).
+      if (userRows[0] && userRows[0].isMasterAdmin !== true) {
         await ensureUserHasDefaultOrg(auth.sub, userRows[0].email);
+        memberships = await listMembershipsForUser(auth.sub);
       }
-      memberships = await listMembershipsForUser(auth.sub);
     }
     const orgIds = memberships.map((m) => m.orgId);
     const orgRows =
@@ -165,25 +169,28 @@ export function registerOrgRoutes(
   });
 
   /** Create a new Org. Caller becomes admin and owner. */
+  /**
+   * Master-only: create a new organization.
+   *
+   * Org creation is a privileged platform-wide operation under the
+   * admin-driven onboarding model — only master admins (env-promoted via
+   * `ARCHON_MASTER_ADMIN_EMAIL` or invited via `POST /master/invites`)
+   * provision new orgs. Org admins manage *their* org's membership but
+   * cannot spawn sibling orgs.
+   *
+   * Master is recorded as `ownerUserId` for audit / FK-anchor purposes,
+   * but is intentionally NOT auto-added to `org_memberships` — the master
+   * already has platform-wide controls via `/master/*` and isn't a
+   * regular member of every org. Use
+   * `POST /master/orgs/:orgId/admins` to designate the org's first
+   * org-admin (the human who'll actually run it day-to-day).
+   */
   app.post("/orgs", async (request, reply) => {
-    const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) return;
+    const ctx = await requireMasterAdmin(request, reply, jwtSecret);
+    if (!ctx) return;
     const parsed = createOrgBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
-    }
-    if (!isUuid(auth.sub)) {
-      return reply.status(401).send({ error: "Invalid session" });
-    }
-    const callerRows = await db()
-      .select({ lockedOrgId: users.lockedOrgId })
-      .from(users)
-      .where(eq(users.id, auth.sub))
-      .limit(1);
-    if (callerRows[0]?.lockedOrgId) {
-      return reply.status(403).send({
-        error: "Organization creation is disabled for invited members",
-      });
     }
     const slugFromName = parsed.data.name
       .toLowerCase()
@@ -208,14 +215,17 @@ export function registerOrgRoutes(
       id: orgId,
       name: parsed.data.name,
       slug,
-      ownerUserId: auth.sub,
+      ownerUserId: ctx.auth.sub,
       createdAt: new Date(),
     });
-    await db().insert(orgMemberships).values({
+    await recordAudit({
       orgId,
-      userId: auth.sub,
-      role: "admin" as OrgRole,
-      joinedAt: new Date(),
+      actorUserId: ctx.auth.sub,
+      principal: ctx.auth.principal ?? { type: "user" },
+      action: "org.create",
+      targetType: "organization",
+      targetId: orgId,
+      metadata: { name: parsed.data.name, slug },
     });
     return reply.send({ orgId, name: parsed.data.name, slug });
   });
