@@ -71,29 +71,40 @@ export async function maybePromoteMasterAdmin(
  * `ARCHON_MASTER_ADMIN_EMAIL` is set. Public signup is disabled, so without
  * this no one can ever sign in to a freshly-deployed instance.
  *
- * Behavior:
- *  - email-only env set, account missing → create user with
- *    password = `ARCHON_MASTER_ADMIN_PASSWORD` if provided, else the email
- *    address itself; `mustSetPassword=true` so first login forces rotation
- *    via `MustChangePasswordScreen`.
- *  - account exists, not master → promote to master_admin (no password
- *    touch — they already have one).
- *  - account exists and is master → no-op.
+ * Behavior on each boot:
+ *  - No email env → no-op, log warning.
+ *  - Account missing → create with password = `ARCHON_MASTER_ADMIN_PASSWORD`
+ *    if provided, else the email address itself. `mustSetPassword=true` so
+ *    first login forces rotation via `MustChangePasswordScreen`.
+ *  - Account exists, not master → promote to master_admin. Password
+ *    untouched — they already have one.
+ *  - Account exists and is master:
+ *      - default: no-op (idempotent).
+ *      - `ARCHON_MASTER_ADMIN_RESET=1` (one-shot operator recovery):
+ *        force password back to the env-supplied value (or email),
+ *        flip `mustSetPassword=true`, clear refresh sessions. Use when
+ *        the operator has lost the existing master admin's password and
+ *        cannot reach the DB. Unset the flag after the boot — leaving
+ *        it on means every restart resets the password on you.
  *
- * Idempotent and safe to run on every boot.
- *
- * Returns a structured result for logging; never throws on a missing env
- * var (deploys without a configured master admin are valid, e.g. when an
- * existing master will manage themselves).
+ * Idempotent in the default path. Returns a structured result for logging.
  */
 export async function ensureMasterAdmin(): Promise<
   | { kind: "skipped-no-email" }
   | { kind: "created"; userId: string; email: string; usedDefaultPassword: boolean }
   | { kind: "promoted-existing"; userId: string; email: string }
   | { kind: "already-master"; userId: string; email: string }
+  | { kind: "reset-existing"; userId: string; email: string; usedDefaultPassword: boolean }
 > {
   const email = (process.env.ARCHON_MASTER_ADMIN_EMAIL ?? "").trim().toLowerCase();
   if (!email) return { kind: "skipped-no-email" };
+
+  const explicitPw = (process.env.ARCHON_MASTER_ADMIN_PASSWORD ?? "").trim();
+  const usedDefaultPassword = explicitPw.length === 0;
+  const password = explicitPw.length > 0 ? explicitPw : email;
+
+  const resetFlag = (process.env.ARCHON_MASTER_ADMIN_RESET ?? "").trim().toLowerCase();
+  const wantReset = resetFlag === "1" || resetFlag === "true";
 
   const db = getDb();
   const existing = await db
@@ -107,6 +118,28 @@ export async function ensureMasterAdmin(): Promise<
     .limit(1);
 
   if (existing[0]) {
+    // Reset path takes precedence — operator explicitly asked for it.
+    // Also re-asserts master-admin in case the existing account is a member.
+    if (wantReset) {
+      const passwordHash = await bcrypt.hash(password, 12);
+      await db
+        .update(users)
+        .set({
+          passwordHash,
+          mustSetPassword: true,
+          isMasterAdmin: true,
+          refreshSessions: null,
+          activeRefreshJti: null,
+          disabled: null,
+        })
+        .where(eq(users.id, existing[0].id));
+      return {
+        kind: "reset-existing",
+        userId: existing[0].id,
+        email,
+        usedDefaultPassword,
+      };
+    }
     if (existing[0].isMasterAdmin === true) {
       return { kind: "already-master", userId: existing[0].id, email };
     }
@@ -121,9 +154,6 @@ export async function ensureMasterAdmin(): Promise<
   // intentionally weak so the operator notices and rotates it on first login.
   // `mustSetPassword=true` makes the renderer hard-block the workbench until
   // a new password is set via POST /auth/change-password.
-  const explicit = (process.env.ARCHON_MASTER_ADMIN_PASSWORD ?? "").trim();
-  const usedDefaultPassword = explicit.length === 0;
-  const password = explicit.length > 0 ? explicit : email;
   const passwordHash = await bcrypt.hash(password, 12);
   const userId = randomUUID();
   await db.insert(users).values({

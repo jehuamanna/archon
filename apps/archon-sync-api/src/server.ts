@@ -72,6 +72,14 @@ try {
         "Master admin already provisioned",
       );
       break;
+    case "reset-existing":
+      app.log.warn(
+        { userId: result.userId, email: result.email },
+        result.usedDefaultPassword
+          ? "ARCHON_MASTER_ADMIN_RESET=1 honored — master admin password reset to email; mustSetPassword=true; refresh sessions cleared. UNSET ARCHON_MASTER_ADMIN_RESET in .env now or every restart will reset the password again."
+          : "ARCHON_MASTER_ADMIN_RESET=1 honored — master admin password reset to ARCHON_MASTER_ADMIN_PASSWORD; mustSetPassword=true; refresh sessions cleared. UNSET ARCHON_MASTER_ADMIN_RESET in .env now or every restart will reset the password again.",
+      );
+      break;
   }
 } catch (err) {
   app.log.error({ err }, "ensureMasterAdmin failed at boot");
