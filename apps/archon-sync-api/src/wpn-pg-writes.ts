@@ -34,6 +34,11 @@ import {
   wpnComputeChildMapAfterMove,
 } from "./wpn-tree.js";
 import { notifyRealtime } from "./realtime/notify.js";
+import {
+  normalizeVfsSegment,
+  rewriteMarkdownForWpnNoteTitleChange,
+  vfsCanonicalPathsForTitleChange,
+} from "./note-vfs-mirror.js";
 
 // ---------- public surface ----------
 
@@ -478,16 +483,7 @@ export async function pgWpnCreateNote(
   return { id: result.id };
 }
 
-export async function pgWpnUpdateNote(
-  noteId: string,
-  patch: {
-    title?: string;
-    content?: string;
-    metadata?: Record<string, unknown> | null;
-    type?: string;
-  },
-  authorship: { editorUserId: string },
-): Promise<{
+export type WpnUpdateNotePublic = {
   id: string;
   project_id: string;
   parent_id: string | null;
@@ -498,7 +494,25 @@ export async function pgWpnUpdateNote(
   sibling_index: number;
   created_at_ms: number;
   updated_at_ms: number;
-} | null> {
+};
+
+export type WpnUpdateNoteRename = {
+  orgId: string;
+  projectId: string;
+  oldTitle: string;
+  newTitle: string;
+};
+
+export async function pgWpnUpdateNote(
+  noteId: string,
+  patch: {
+    title?: string;
+    content?: string;
+    metadata?: Record<string, unknown> | null;
+    type?: string;
+  },
+  authorship: { editorUserId: string },
+): Promise<{ note: WpnUpdateNotePublic; rename: WpnUpdateNoteRename | null } | null> {
   const editorId = authorship.editorUserId;
   let renamed: { orgId: string; oldTitle: string; newTitle: string; projectId: string } | null = null;
   let edgeDiff: { orgId: string; diff: { added: string[]; removed: string[] } } | null = null;
@@ -596,7 +610,102 @@ export async function pgWpnUpdateNote(
     const e = edgeDiff as { orgId: string; diff: { added: string[]; removed: string[] } };
     await emitEdgeDiff(e.orgId, noteId, editorId, e.diff);
   }
-  return result;
+  if (!result) return null;
+  return { note: result, rename: renamed };
+}
+
+/**
+ * Apply VFS link rewrites across the renamed note's org after a title change.
+ *
+ * Scope: every non-deleted note in projects belonging to `orgId`. Org-wide
+ * (not editor-scoped) — links to the renamed note from any project in the
+ * same org should resolve to the new title, regardless of whether the editor
+ * happens to have read access to those other projects.
+ *
+ * Excludes the renamed note itself (its title is already current). Each
+ * changed note bumps `updated_at_ms` and refreshes its `note_edges` so the
+ * graph stays consistent with the new content. Failures on individual rows
+ * log and continue — partial cascades are recoverable by re-running.
+ */
+export async function pgWpnApplyVfsRewriteForRename(args: {
+  orgId: string;
+  projectId: string;
+  projectName: string;
+  oldTitle: string;
+  newTitle: string;
+  editorUserId: string;
+  excludeNoteId: string;
+}): Promise<{ updatedNoteIds: string[] }> {
+  const paths = vfsCanonicalPathsForTitleChange(
+    { project_name: args.projectName },
+    args.oldTitle,
+    args.newTitle,
+  );
+  if (!paths) return { updatedNoteIds: [] };
+  const oldSeg = normalizeVfsSegment(args.oldTitle, "Untitled");
+  const newSeg = normalizeVfsSegment(args.newTitle, "Untitled");
+
+  // Pull every candidate row in one query. Org scope: filter by joining
+  // notes → projects on org_id rather than relying on an editor-bound list.
+  const rows = await getDb()
+    .select({
+      id: notes.id,
+      projectId: notes.projectId,
+      content: notes.content,
+    })
+    .from(notes)
+    .innerJoin(projects, eq(projects.id, notes.projectId))
+    .where(
+      and(
+        eq(projects.orgId, args.orgId),
+        sql`${notes.deleted} IS NOT TRUE`,
+        sql`${notes.id} <> ${args.excludeNoteId}`,
+      ),
+    );
+
+  const updatedNoteIds: string[] = [];
+  const t = nowMs();
+  for (const row of rows) {
+    const c0 = row.content ?? "";
+    const c1 = rewriteMarkdownForWpnNoteTitleChange(
+      c0,
+      row.projectId,
+      args.projectId,
+      paths.oldCanonical,
+      paths.newCanonical,
+      oldSeg,
+      newSeg,
+    );
+    if (c1 === c0) continue;
+    try {
+      await withTx(async (tx) => {
+        await tx
+          .update(notes)
+          .set({
+            content: c1,
+            updatedAtMs: t,
+            updatedByUserId: args.editorUserId,
+          })
+          .where(eq(notes.id, row.id));
+        const diff = await reconcileNoteEdges(tx, row.id, c1);
+        if (diff.added.length > 0 || diff.removed.length > 0) {
+          // Edge fanout best-effort — same swallow policy as pgWpnUpdateNote.
+          try {
+            await emitEdgeDiff(args.orgId, row.id, args.editorUserId, diff);
+          } catch {
+            /* swallow */
+          }
+        }
+      });
+      updatedNoteIds.push(row.id);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[wpn-pg-writes] rewrite cascade failed on note ${row.id}: ${(err as Error).message}`,
+      );
+    }
+  }
+  return { updatedNoteIds };
 }
 
 export async function pgWpnDeleteNotes(ids: string[]): Promise<void> {

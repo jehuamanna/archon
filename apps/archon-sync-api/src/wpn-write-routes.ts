@@ -26,6 +26,7 @@ import {
   getEffectiveProjectRoles,
 } from "./permission-resolver.js";
 import {
+  pgWpnApplyVfsRewriteForRename,
   pgWpnCreateNote,
   pgWpnCreateProject,
   pgWpnDeleteNotes,
@@ -87,6 +88,10 @@ const updateNoteBody = z.object({
   content: z.string().max(2_000_000).optional(),
   type: z.string().min(1).max(64).optional(),
   metadata: z.record(z.unknown()).nullable().optional(),
+  /** When the title actually changes, also rewrite inbound VFS links across the
+   * note's org. Defaults to true; set false to skip the cascade (e.g. when the
+   * client already paid the rewrite cost via the preview endpoint). */
+  updateVfsDependentLinks: z.boolean().optional(),
 });
 
 const deleteNotesBody = z.object({
@@ -266,7 +271,8 @@ export function registerWpnWriteRoutes(
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
     const { id } = request.params as { id: string };
-    if (!(await assertCanWriteProjectForNote(reply, auth, id))) return;
+    const project = await assertCanWriteProjectForNote(reply, auth, id);
+    if (!project) return;
     const parsed = updateNoteBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -274,16 +280,33 @@ export function registerWpnWriteRoutes(
     if (!isUuid(auth.sub)) {
       return reply.status(401).send({ error: "Invalid session" });
     }
+    const { updateVfsDependentLinks, ...patch } = parsed.data;
+    const applyRewrite = updateVfsDependentLinks !== false;
     try {
       const result = await pgWpnUpdateNote(
         id,
-        parsed.data,
+        patch,
         { editorUserId: auth.sub },
       );
       if (!result) {
         return reply.status(404).send({ error: "Note not found" });
       }
-      return reply.send({ note: result });
+      // Cascade VFS link rewrites org-wide when the title changed and the
+      // caller didn't opt out. Errors during the cascade are logged inside
+      // the helper and don't fail the rename — partial cascades are
+      // recoverable by re-PATCHing with the same body.
+      if (applyRewrite && result.rename) {
+        await pgWpnApplyVfsRewriteForRename({
+          orgId: result.rename.orgId,
+          projectId: result.rename.projectId,
+          projectName: project.name,
+          oldTitle: result.rename.oldTitle,
+          newTitle: result.rename.newTitle,
+          editorUserId: auth.sub,
+          excludeNoteId: id,
+        });
+      }
+      return reply.send({ note: result.note });
     } catch (err) {
       if (err instanceof WpnDuplicateSiblingTitleError) {
         return reply
