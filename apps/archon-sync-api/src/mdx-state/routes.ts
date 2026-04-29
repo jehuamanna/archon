@@ -1,10 +1,7 @@
 import type { FastifyInstance } from "fastify";
-import { eq } from "drizzle-orm";
 import { z } from "zod";
 import type { JwtPayload } from "../auth.js";
 import { requireAuth, signToken } from "../auth.js";
-import { getDb } from "../pg.js";
-import { wpnProjects } from "../db/schema.js";
 import { userCanWriteProject } from "../permission-resolver.js";
 import {
   MdxStateConflictError,
@@ -25,6 +22,15 @@ const WS_TOKEN_TTL = "5m";
 const MEMBERSHIP_CACHE_TTL_MS = 30_000;
 const membershipCache = new Map<string, { ok: boolean; expiresAt: number }>();
 
+/**
+ * Project access check for mdx-state read/write. Caches the result for 30 s
+ * because state RPCs are chatty (one per cell render); without the cache,
+ * every PUT would re-walk team_projects → team_memberships.
+ *
+ * The pre-migration "is project creator" fast path is gone — projects are
+ * single canonical rows now, access flows through team_projects, and
+ * userCanWriteProject already short-circuits for org/master admins.
+ */
 async function requireProjectMember(
   auth: JwtPayload,
   projectId: string,
@@ -34,26 +40,6 @@ async function requireProjectMember(
   const cached = membershipCache.get(cacheKey);
   if (cached && cached.expiresAt > now) {
     return cached.ok;
-  }
-  const projectRows = await getDb()
-    .select({ userId: wpnProjects.userId })
-    .from(wpnProjects)
-    .where(eq(wpnProjects.id, projectId))
-    .limit(1);
-  const project = projectRows[0];
-  if (!project) {
-    membershipCache.set(cacheKey, {
-      ok: false,
-      expiresAt: now + MEMBERSHIP_CACHE_TTL_MS,
-    });
-    return false;
-  }
-  if (project.userId === auth.sub) {
-    membershipCache.set(cacheKey, {
-      ok: true,
-      expiresAt: now + MEMBERSHIP_CACHE_TTL_MS,
-    });
-    return true;
   }
   const canWrite = await userCanWriteProject(auth, projectId);
   membershipCache.set(cacheKey, {

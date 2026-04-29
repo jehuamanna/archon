@@ -9,7 +9,6 @@ import {
   gt,
   ilike,
   inArray,
-  ne,
   sql,
 } from "drizzle-orm";
 import { z } from "zod";
@@ -18,16 +17,7 @@ import { getDb } from "./pg.js";
 import {
   organizations,
   orgMemberships,
-  projectShares,
-  spaceMemberships,
-  spaces,
-  teamMemberships,
   users,
-  workspaceShares,
-  wpnExplorerState,
-  wpnNotes,
-  wpnProjects,
-  wpnWorkspaces,
 } from "./db/schema.js";
 import { recordAudit } from "./audit.js";
 import { isUuid } from "./db/legacy-id-map.js";
@@ -493,157 +483,32 @@ export function registerMasterAdminRoutes(
   });
 
   /**
-   * Master-only: hard-delete a user. Cascades content the user solely owned
-   * and reassigns sole-owner spaces to an admin of the parent org. Returns
-   * 409 with the un-reassignable list when no replacement owner exists.
+   * Master-only: hard-delete a user.
+   *
+   * Disabled post-migration. The pre-migration logic transferred space/owner
+   * ownership and cascaded user-owned WPN content. The new model needs a
+   * different design:
+   *
+   * - Projects no longer have a per-user owner — they belong to teams via
+   *   team_projects. Hard-deleting the project's `creator_user_id` is
+   *   blocked by an FK RESTRICT (intentionally, so audit trails stay
+   *   intact). The replacement plan is to either relax those FKs to
+   *   SET NULL on a follow-up migration, or to mandate "transfer creatorship
+   *   first" UI, or to soft-delete (which `/master/users/:userId/disable`
+   *   already does).
+   * - Audit events are RESTRICT on `actor_user_id` by design and we don't
+   *   want to scrub history.
+   *
+   * Until that's designed, return 501 + a pointer to the disable endpoint.
    */
   app.delete("/master/users/:userId", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
-    const { userId } = request.params as { userId: string };
-    if (!isUuid(userId)) {
-      return reply.status(400).send({ error: "Invalid user id" });
-    }
-    if (userId === ctx.auth.sub) {
-      return reply
-        .status(400)
-        .send({ error: "Cannot delete your own account" });
-    }
-    const targetRows = await db()
-      .select()
-      .from(users)
-      .where(eq(users.id, userId))
-      .limit(1);
-    const target = targetRows[0];
-    if (!target) {
-      return reply.status(404).send({ error: "User not found" });
-    }
-    if (target.isMasterAdmin === true) {
-      return reply.status(409).send({
-        error: "Demote the master admin before deleting the account",
-      });
-    }
-
-    // Find spaces where target is sole owner.
-    const ownedSpaces = await db()
-      .select()
-      .from(spaceMemberships)
-      .where(
-        and(
-          eq(spaceMemberships.userId, userId),
-          eq(spaceMemberships.role, "owner"),
-        ),
-      );
-    const reassignments: { spaceId: string; newOwnerId: string }[] = [];
-    const unresolved: { spaceId: string; name: string }[] = [];
-    for (const m of ownedSpaces) {
-      const otherOwnersRow = await db()
-        .select({ n: count() })
-        .from(spaceMemberships)
-        .where(
-          and(
-            eq(spaceMemberships.spaceId, m.spaceId),
-            eq(spaceMemberships.role, "owner"),
-            ne(spaceMemberships.userId, userId),
-          ),
-        );
-      const otherOwners = otherOwnersRow[0]?.n ?? 0;
-      if (otherOwners > 0) continue;
-      const spaceRows = await db()
-        .select()
-        .from(spaces)
-        .where(eq(spaces.id, m.spaceId))
-        .limit(1);
-      const space = spaceRows[0];
-      if (!space) continue;
-      const replacementRows = await db()
-        .select({ userId: orgMemberships.userId })
-        .from(orgMemberships)
-        .where(
-          and(
-            eq(orgMemberships.orgId, space.orgId),
-            eq(orgMemberships.role, "admin"),
-            ne(orgMemberships.userId, userId),
-          ),
-        )
-        .limit(1);
-      const replacement = replacementRows[0];
-      if (!replacement) {
-        unresolved.push({ spaceId: m.spaceId, name: space.name });
-        continue;
-      }
-      reassignments.push({
-        spaceId: m.spaceId,
-        newOwnerId: replacement.userId,
-      });
-    }
-    if (unresolved.length > 0) {
-      return reply.status(409).send({
-        error:
-          "Target owns spaces with no eligible replacement org admin; resolve them manually first",
-        unresolvedSpaces: unresolved,
-      });
-    }
-
-    // Apply space-ownership transfers.
-    for (const r of reassignments) {
-      await db()
-        .insert(spaceMemberships)
-        .values({
-          spaceId: r.spaceId,
-          userId: r.newOwnerId,
-          role: "owner",
-          addedByUserId: ctx.auth.sub,
-          joinedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: [spaceMemberships.spaceId, spaceMemberships.userId],
-          set: { role: "owner" },
-        });
-    }
-
-    // Cascade the user's owned WPN content.
-    const ownedWorkspaces = await db()
-      .select({ id: wpnWorkspaces.id })
-      .from(wpnWorkspaces)
-      .where(eq(wpnWorkspaces.userId, userId));
-    const wsIds = ownedWorkspaces.map((w) => w.id);
-    if (wsIds.length > 0) {
-      const projects = await db()
-        .select({ id: wpnProjects.id })
-        .from(wpnProjects)
-        .where(inArray(wpnProjects.workspace_id, wsIds));
-      const projectIds = projects.map((p) => p.id);
-      if (projectIds.length > 0) {
-        await db()
-          .delete(wpnNotes)
-          .where(inArray(wpnNotes.project_id, projectIds));
-        await db()
-          .delete(wpnExplorerState)
-          .where(inArray(wpnExplorerState.project_id, projectIds));
-        await db()
-          .delete(projectShares)
-          .where(inArray(projectShares.projectId, projectIds));
-      }
-      await db()
-        .delete(wpnProjects)
-        .where(inArray(wpnProjects.workspace_id, wsIds));
-      await db()
-        .delete(workspaceShares)
-        .where(inArray(workspaceShares.workspaceId, wsIds));
-      await db().delete(wpnWorkspaces).where(inArray(wpnWorkspaces.id, wsIds));
-    }
-    await db().delete(workspaceShares).where(eq(workspaceShares.userId, userId));
-    await db().delete(orgMemberships).where(eq(orgMemberships.userId, userId));
-    await db().delete(spaceMemberships).where(eq(spaceMemberships.userId, userId));
-    await db().delete(teamMemberships).where(eq(teamMemberships.userId, userId));
-    await db().delete(users).where(eq(users.id, userId));
-
-    return reply.send({
-      userId,
-      deleted: true,
-      reassignedSpaces: reassignments.length,
-      deletedWorkspaces: wsIds.length,
+    return reply.status(501).send({
+      error:
+        "Hard user-delete is temporarily disabled while ownership transfer is " +
+        "redesigned for the project/team model. Use POST " +
+        "/master/users/:userId/disable for now.",
     });
   });
 }
