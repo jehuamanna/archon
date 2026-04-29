@@ -483,32 +483,28 @@ export function registerMasterAdminRoutes(
   });
 
   /**
-   * Master-only: hard-delete a user.
+   * Master-only: hard user-delete is unsupported by design.
    *
-   * Disabled post-migration. The pre-migration logic transferred space/owner
-   * ownership and cascaded user-owned WPN content. The new model needs a
-   * different design:
+   * Soft-delete is the supported model — call
+   * `POST /master/users/:userId/disable` instead. The new schema's audit
+   * trail keeps `created_by_user_id` / `granted_by_user_id` /
+   * `added_by_user_id` / `invited_by_user_id` as FK RESTRICT on purpose,
+   * and `audit_events.actor_user_id` is permanently RESTRICT — none of
+   * those should be scrubbed when a user leaves. Soft-delete preserves
+   * the references; rendering "[Deleted user]" for surfaces that show
+   * creator names is the client-side concern.
    *
-   * - Projects no longer have a per-user owner — they belong to teams via
-   *   team_projects. Hard-deleting the project's `creator_user_id` is
-   *   blocked by an FK RESTRICT (intentionally, so audit trails stay
-   *   intact). The replacement plan is to either relax those FKs to
-   *   SET NULL on a follow-up migration, or to mandate "transfer creatorship
-   *   first" UI, or to soft-delete (which `/master/users/:userId/disable`
-   *   already does).
-   * - Audit events are RESTRICT on `actor_user_id` by design and we don't
-   *   want to scrub history.
-   *
-   * Until that's designed, return 501 + a pointer to the disable endpoint.
+   * Returns 410 Gone (not 405) because this method *did* exist
+   * pre-migration; the new policy is the answer, not a temporary gap.
    */
   app.delete("/master/users/:userId", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
-    return reply.status(501).send({
+    return reply.status(410).send({
       error:
-        "Hard user-delete is temporarily disabled while ownership transfer is " +
-        "redesigned for the project/team model. Use POST " +
-        "/master/users/:userId/disable for now.",
+        "Hard user-delete is not supported. Use POST /master/users/:userId/disable " +
+        "to soft-delete; FK RESTRICT on creator/granter columns intentionally " +
+        "preserves audit identity.",
     });
   });
 }
