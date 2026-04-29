@@ -7,24 +7,21 @@
  *   admin overrides handled by the resolver). When provided, every id is
  *   read-checked individually; a single failure 403s the whole request.
  *   Streams a ZIP back: `metadata.json` (project-rooted manifest) plus
- *   `notes/<noteId>.md` per note. Image-asset bytes are deferred — see
- *   below — so v3 bundles produced by this build are text-only.
+ *   `notes/<noteId>.md` per note plus `assets/<noteId>/<filename>` per
+ *   image note whose bytes were ready to bundle.
  *
- * Import (`POST /wpn/import?conflict=<policy>`):
- *   Multipart upload with a single ZIP file part. Body's `teamId` query
- *   param (or form field) is required: imported projects attach to that
- *   team via `team_projects` with role 'owner'. The caller must be a
- *   member of `teamId`. Project-name conflicts inside the team's existing
- *   project set are resolved by the `conflict` policy (default `rename`).
+ * Import (`POST /wpn/import?conflict=<policy>&teamId=<uuid>`):
+ *   Multipart upload with a single ZIP file part. `teamId` query param is
+ *   required: imported projects attach to that team via `team_projects`
+ *   with role 'owner'. The caller must be a member of `teamId`. Project-
+ *   name conflicts inside the team's existing project set are resolved
+ *   by the `conflict` policy (default `rename`). Image-asset bytes from
+ *   the bundle are re-uploaded under fresh `{orgId}/{projectId}/{noteId}`
+ *   R2 keys; thumbnails regenerate client-side on first open.
  *
- * Image asset bytes:
- *   The historical v2 path re-uploaded image-note bytes through
- *   `buildImageAssetKey`, which still bakes `spaceId` / `workspaceId` into
- *   the R2 key — that helper hasn't been ported to the new model. While
- *   that gap is open, this route refuses bundles that contain `assets[]`
- *   on import (501) and skips R2 streaming on export. Pre-migration
- *   bundles (v1/v2, both workspace-rooted) are also rejected with a
- *   versioned error.
+ * Bundle versions:
+ *   v3 only. v1 (pre-PLAN-06) and v2 (PLAN-06 image-bytes) were
+ *   workspace-rooted; both are rejected with a versioned error.
  */
 import { randomUUID } from "node:crypto";
 import { PassThrough } from "node:stream";
@@ -43,6 +40,7 @@ import {
 } from "./db/schema.js";
 import {
   buildExportManifest,
+  clearImageMetadataKeys,
   ExportBytesCapExceededError,
   planImportProjects,
   type AssetStreamPlan,
@@ -56,6 +54,7 @@ import {
 } from "./server-env.js";
 import { getR2Client, type R2ClientLike } from "./r2-client.js";
 import { getEffectiveProjectRoles } from "./permission-resolver.js";
+import { buildImageAssetKey, isAllowedImageMime } from "./image-asset-path.js";
 
 type WpnImportResult = {
   projects: number;
@@ -75,6 +74,57 @@ function nowMs(): number {
 function parseConflictPolicy(raw: unknown): WpnImportConflictPolicy {
   if (raw === "skip" || raw === "overwrite" || raw === "rename") return raw;
   return "rename";
+}
+
+/**
+ * Re-upload one bundled image asset under a fresh post-migration R2 key
+ * and return the metadata object the importer should write into the new
+ * note row. Pulls the asset's bytes from the per-bundle `assetBytes` map
+ * (pre-loaded by the route while reading the ZIP) and rewrites the
+ * sourceMetadata so `r2Key` points at the new key.
+ */
+async function reuploadImageAsset(args: {
+  r2: R2ClientLike;
+  asset: {
+    zipPath: string;
+    mimeType: string;
+    sizeBytes: number;
+    originalFilename?: string;
+  };
+  assetBytes: Map<string, Buffer>;
+  sourceMetadata: Record<string, unknown> | null;
+  orgId: string;
+  projectId: string;
+  noteId: string;
+}): Promise<Record<string, unknown>> {
+  const bytes = args.assetBytes.get(args.asset.zipPath);
+  if (!bytes) {
+    throw new Error(`Asset bytes missing for ${args.asset.zipPath}`);
+  }
+  if (!isAllowedImageMime(args.asset.mimeType)) {
+    throw new Error(`Unsupported asset mime: ${args.asset.mimeType}`);
+  }
+  const newKey = buildImageAssetKey({
+    orgId: args.orgId,
+    projectId: args.projectId,
+    noteId: args.noteId,
+    variant: "original",
+  });
+  await args.r2.uploadObject({
+    key: newKey,
+    body: bytes,
+    contentType: args.asset.mimeType,
+    contentLength: bytes.length,
+  });
+  const cleared = clearImageMetadataKeys(args.sourceMetadata) ?? {};
+  cleared.metadataVersion = 1;
+  cleared.r2Key = newKey;
+  cleared.mimeType = args.asset.mimeType;
+  cleared.sizeBytes = bytes.length;
+  if (args.asset.originalFilename && typeof cleared.originalFilename !== "string") {
+    cleared.originalFilename = args.asset.originalFilename;
+  }
+  return cleared;
 }
 
 export type RegisterWpnImportExportRoutesOptions = {
@@ -186,16 +236,24 @@ export async function registerWpnImportExportRoutes(
       throw e;
     }
 
-    // Image-asset streaming is gated on `buildImageAssetKey` being ported
-    // to the post-migration shape (no spaceId/workspaceId). Until then the
-    // exporter still records `assets[]` entries in the manifest but skips
-    // R2 streaming — readers see the metadata reference and treat the note
-    // as broken-on-import, matching v1's behavior.
+    let r2: R2ClientLike | null = null;
     if (manifest.assets.length > 0) {
-      request.log.warn(
-        { assetCount: manifest.assets.length },
-        "wpn-export: skipping R2 asset streaming (image-asset path scheme not yet ported)",
-      );
+      if (!isImageNotesFeatureEnabled()) {
+        return sendErr(
+          reply,
+          501,
+          "Bundle contains image assets but image-notes feature is disabled on this server.",
+        );
+      }
+      try {
+        r2 = opts.r2Client ?? getR2Client();
+      } catch (e) {
+        return sendErr(
+          reply,
+          500,
+          e instanceof Error ? e.message : "R2 client unavailable",
+        );
+      }
     }
 
     const archive = archiver("zip", { zlib: { level: 6 } });
@@ -225,11 +283,18 @@ export async function registerWpnImportExportRoutes(
 
     void (async () => {
       try {
+        for (const asset of manifest.assets) {
+          if (!r2) {
+            throw new Error("R2 client not initialized for asset streaming");
+          }
+          const bytes = await r2.getObjectBytes({ key: asset.r2Key });
+          archive.append(bytes, { name: asset.zipPath });
+        }
         await archive.finalize();
       } catch (err) {
         request.log.error(
-          { err },
-          "Export archive finalize failed; aborting",
+          { err, assetCount: manifest.assets.length },
+          "Export asset streaming failed; aborting archive",
         );
         archive.abort();
         passthrough.destroy(err as Error);
@@ -290,7 +355,7 @@ export async function registerWpnImportExportRoutes(
 
     let metadataJson: WpnExportMetadata | null = null;
     const noteContents = new Map<string, string>();
-    const assetEntryCount = { n: 0 };
+    const assetBytes = new Map<string, Buffer>();
 
     const directory = await unzipper.Open.buffer(await file.toBuffer());
     for (const entry of directory.files) {
@@ -302,7 +367,8 @@ export async function registerWpnImportExportRoutes(
         const buf = await entry.buffer();
         noteContents.set(noteId, buf.toString("utf-8"));
       } else if (entry.path.startsWith("assets/")) {
-        assetEntryCount.n++;
+        const buf = await entry.buffer();
+        assetBytes.set(entry.path, buf);
       }
     }
 
@@ -319,14 +385,10 @@ export async function registerWpnImportExportRoutes(
       );
     }
 
-    // Image-asset bundling is paused while the asset-key path scheme is
-    // ported. Reject bundles that ship bytes rather than silently dropping
-    // them on the floor.
-    const hasAssetEntries =
-      assetEntryCount.n > 0 ||
-      metadataJson.projects.some((p) =>
-        p.notes.some((n) => (n.assets?.length ?? 0) > 0),
-      );
+    const hasAssetEntries = metadataJson.projects.some((p) =>
+      p.notes.some((n) => (n.assets?.length ?? 0) > 0),
+    );
+    let r2: R2ClientLike | null = null;
     if (hasAssetEntries) {
       if (!isImageNotesFeatureEnabled()) {
         return sendErr(
@@ -335,11 +397,15 @@ export async function registerWpnImportExportRoutes(
           "Bundle contains image assets but image-notes feature is disabled on this server.",
         );
       }
-      return sendErr(
-        reply,
-        501,
-        "Bundle contains image asset bytes; image-asset re-upload is pending the asset-key path scheme port. Re-export without image bytes or wait for the follow-up.",
-      );
+      try {
+        r2 = opts.r2Client ?? getR2Client();
+      } catch (e) {
+        return sendErr(
+          reply,
+          500,
+          e instanceof Error ? e.message : "R2 client unavailable",
+        );
+      }
     }
 
     const existingProjs = await db()
@@ -439,6 +505,37 @@ export async function registerWpnImportExportRoutes(
         // is recoverable client-side via re-order).
         const siblingIndex =
           newParentId === null ? nextRootSiblingIndex++ : noteEntry.sibling_index;
+
+        let metadata: Record<string, unknown> | null = noteEntry.metadata;
+        if (
+          noteEntry.type === "image" &&
+          (noteEntry.assets?.length ?? 0) > 0 &&
+          r2
+        ) {
+          try {
+            metadata = await reuploadImageAsset({
+              r2,
+              asset: noteEntry.assets![0]!,
+              assetBytes,
+              sourceMetadata: noteEntry.metadata,
+              orgId: targetOrgId,
+              projectId: targetProjId,
+              noteId: newNoteId,
+            });
+          } catch (err) {
+            request.log.error(
+              { err, noteId: newNoteId },
+              "Import asset re-upload failed; note imported without bytes",
+            );
+            metadata = clearImageMetadataKeys(noteEntry.metadata);
+          }
+        } else if (
+          noteEntry.type === "image" &&
+          (noteEntry.assets?.length ?? 0) > 0
+        ) {
+          metadata = clearImageMetadataKeys(noteEntry.metadata);
+        }
+
         await db().insert(notes).values({
           id: newNoteId,
           orgId: targetOrgId,
@@ -449,7 +546,7 @@ export async function registerWpnImportExportRoutes(
           type: noteEntry.type,
           title: noteEntry.title,
           content,
-          metadata: noteEntry.metadata as unknown,
+          metadata: metadata as unknown,
           siblingIndex,
           createdAtMs: t,
           updatedAtMs: t,
