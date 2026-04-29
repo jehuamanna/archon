@@ -34,9 +34,12 @@ RUN npm ci --ignore-scripts
 # them at runtime without a build step.
 RUN npm run build -w @nodex-studio/mdx-sdk
 
-# Drop devDependencies after the workspace build so the runtime image
-# stays slim. tsx itself stays (it's a runtime dep of @archon/sync-api).
-RUN npm prune --omit=dev
+# Note: we deliberately do NOT `npm prune --omit=dev`. The runtime command
+# is `tsx src/server.ts`, and tsx is in `apps/archon-sync-api/devDependencies`
+# (it's a TypeScript-aware loader, classified as dev-tooling by upstream).
+# Pruning would remove it and the container would crash with `tsx: not
+# found`. A future "compile to dist + run with node" follow-up could let
+# us prune cleanly, but for now keep the dev deps.
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
