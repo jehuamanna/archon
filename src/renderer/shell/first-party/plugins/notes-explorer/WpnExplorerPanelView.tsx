@@ -806,7 +806,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   }, []);
 
   /**
-   * Realtime push replaces 8 s polling once a `spaceWs` channel is open.
+   * Realtime push replaces 8 s polling once a `wsClient` channel is open.
    * Refs plumb the latest `loadWorkspaces` / `refreshProjectNotesFromServer`
    * into the event callback without re-binding it on every render.
    */

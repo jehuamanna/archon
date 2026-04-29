@@ -10,8 +10,8 @@ import { authedFetch } from "../../../../auth/auth-retry";
  * receives it immediately and can refetch only what changed.
  *
  * Lifecycle:
- *   1. Mint a 5 min `typ: "spaceWs"` JWT via `POST /v1/realtime/ws-token`.
- *   2. Open `ws://…/v1/ws/space/:spaceId?token=<jwt>`.
+ *   1. Mint a 5 min `typ: "wsClient"` JWT via `POST /v1/realtime/ws-token`.
+ *   2. Open `ws://…/v1/ws/realtime/:orgId?token=<jwt>`.
  *   3. Forward every `{ type: "event", payload }` frame to `onEvent`.
  *   4. On close 4401 (token expired), re-mint and reconnect immediately.
  *      On other closes, reconnect with capped exponential backoff.
@@ -107,15 +107,15 @@ function resolveRealtimeWsBase(syncBase: string): string {
   return syncBaseToWsBase(syncBase);
 }
 
-async function mintSpaceWsToken(
+async function mintRealtimeWsToken(
   syncBase: string,
-  spaceId: string,
+  orgId: string,
 ): Promise<string> {
   const res = await authedFetch({
     method: "POST",
     url: `${syncBase.replace(/\/$/, "")}/realtime/ws-token`,
     headersWithoutAuth: { "Content-Type": "application/json" },
-    body: JSON.stringify({ spaceId }),
+    body: JSON.stringify({ orgId }),
     credentials: "omit",
   });
   if (!res.ok) {
@@ -177,7 +177,7 @@ export function useRealtimeSpaceEvents(
       }
       let token: string;
       try {
-        token = await mintSpaceWsToken(syncBase, spaceId);
+        token = await mintRealtimeWsToken(syncBase, spaceId);
       } catch (err) {
         if (cancelled) return;
         attempt++;
@@ -190,7 +190,7 @@ export function useRealtimeSpaceEvents(
       if (cancelled) return;
 
       const wsBase = resolveRealtimeWsBase(syncBase);
-      const url = `${wsBase}/ws/space/${encodeURIComponent(spaceId)}?token=${encodeURIComponent(token)}`;
+      const url = `${wsBase}/ws/realtime/${encodeURIComponent(spaceId)}?token=${encodeURIComponent(token)}`;
       try {
         socket = new WebSocket(url);
       } catch (err) {

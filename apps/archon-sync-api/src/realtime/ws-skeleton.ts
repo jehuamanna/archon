@@ -1,12 +1,12 @@
 /**
- * WebSocket skeleton at `GET /v1/ws/space/:spaceId`.
+ * Org-scoped realtime WebSocket at `GET /v1/ws/realtime/:orgId`. Carries
+ * structural events (note created/moved/etc.) and presence updates.
  *
- * Authenticates the short-TTL `typ: "spaceWs"` token via `verifyAndTranslate`.
+ * Authenticates the short-TTL `typ: "wsClient"` token via `verifyAndTranslate`.
  * Per-event ACL is in `filter.ts` (`userCanReadProject`), so the route
- * accepts any valid `spaceWs` token and the per-event filter handles
- * read-rights. The `:spaceId` URL slot now carries an orgId — the path
- * shape is kept for client compat after the spaces squash; the value
- * keys the per-org realtime channel (`channelForOrg`).
+ * accepts any valid `wsClient` token and the per-event filter handles
+ * read-rights. The `:orgId` URL slot keys the per-org realtime channel
+ * (`channelForOrg`).
  *
  * Heartbeat is a 20s ping; the legacy 10s space-reverify loop is gone with
  * the spaces table.
@@ -27,15 +27,15 @@ import {
 
 const HEARTBEAT_MS = 20_000;
 
-interface SpaceWsTokenPayload {
+interface WsClientTokenPayload {
   sub: string;
   email: string;
   typ?: string;
-  activeSpaceId?: string;
+  activeOrgId?: string;
   exp?: number;
 }
 
-export function registerSpaceWsRoutes(
+export function registerRealtimeWsRoutes(
   app: FastifyInstance,
   opts: { jwtSecret: string },
 ): void {
@@ -44,14 +44,14 @@ export function registerSpaceWsRoutes(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   if (!(app as any).websocketServer) {
     app.log.info(
-      "realtime: skipping /v1/ws/space (@fastify/websocket not registered on this instance)",
+      "realtime: skipping /v1/ws/realtime (@fastify/websocket not registered on this instance)",
     );
     return;
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   (app as any).get(
-    "/ws/space/:spaceId",
+    "/ws/realtime/:orgId",
     { websocket: true },
     async (
       socket: {
@@ -62,30 +62,30 @@ export function registerSpaceWsRoutes(
       },
       request: {
         query: { token?: string };
-        params: { spaceId?: string };
+        params: { orgId?: string };
       },
     ) => {
       const token = request.query.token ?? "";
-      const orgId = request.params.spaceId ?? "";
+      const orgId = request.params.orgId ?? "";
       if (!orgId) {
         socket.close(4400, "missing orgId");
         return;
       }
-      let payload: SpaceWsTokenPayload;
+      let payload: WsClientTokenPayload;
       try {
         payload = (await verifyAndTranslate(
           jwtSecret,
           token,
-        )) as unknown as SpaceWsTokenPayload;
+        )) as unknown as WsClientTokenPayload;
       } catch {
         socket.close(4401, "invalid token");
         return;
       }
-      if (payload.typ !== "spaceWs") {
+      if (payload.typ !== "wsClient") {
         socket.close(4401, "wrong typ");
         return;
       }
-      if (payload.activeSpaceId && payload.activeSpaceId !== orgId) {
+      if (payload.activeOrgId && payload.activeOrgId !== orgId) {
         socket.close(4401, "scope mismatch");
         return;
       }

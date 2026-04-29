@@ -122,7 +122,7 @@ test(
     const addr = app.server.address() as AddressInfo;
     const wsBase = `ws://127.0.0.1:${addr.port}/api/v1/ws/yjs`;
 
-    // The `typ: "spaceWs"` JWT name is vestigial after the spaces squash —
+    // The `typ: "wsClient"` JWT name is vestigial after the spaces squash —
     // identity-only token. Per-note authorisation runs at WS open in
     // yjs-ws.ts onAuthenticate.
     const wsToken = signToken(
@@ -130,7 +130,7 @@ test(
       {
         sub: userId,
         email: userEmail,
-        typ: "spaceWs",
+        typ: "wsClient",
         principal: { type: "user" },
         activeOrgId: orgId,
       },

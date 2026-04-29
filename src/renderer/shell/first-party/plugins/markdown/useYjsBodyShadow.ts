@@ -113,16 +113,16 @@ function resolveRealtimeWsBase(syncBase: string): string {
   return syncBase.replace(/^http(s?):/, "ws$1:");
 }
 
-async function mintSpaceWsToken(
+async function mintRealtimeWsToken(
   syncBase: string,
-  spaceId: string,
+  orgId: string,
 ): Promise<string | null> {
   try {
     const res = await authedFetch({
       method: "POST",
       url: `${syncBase.replace(/\/$/, "")}/realtime/ws-token`,
       headersWithoutAuth: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spaceId }),
+      body: JSON.stringify({ orgId }),
       credentials: "omit",
     });
     if (!res.ok) return null;
@@ -214,7 +214,7 @@ export function useYjsBodyShadow(
         setConnected(false);
         return;
       }
-      const token = await mintSpaceWsToken(syncBase, spaceId);
+      const token = await mintRealtimeWsToken(syncBase, spaceId);
       if (cancelled || !token) {
         // eslint-disable-next-line no-console
         console.debug("[yjs-body] token mint failed", { spaceId, syncBase });

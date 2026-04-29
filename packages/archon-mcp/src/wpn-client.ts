@@ -685,11 +685,10 @@ export class WpnHttpClient {
   }
 
   /**
-   * Mint a short-TTL `spaceWs` JWT via `POST /realtime/ws-token`. Used by
+   * Mint a short-TTL `wsClient` JWT via `POST /realtime/ws-token`. Used by
    * `archon_write_note` to open a Hocuspocus client connection for content
    * updates. Per-note authorisation runs at WS open time on the server; the
-   * minted token only proves identity. The `typ: "spaceWs"` JWT name is
-   * vestigial — preserved for client compat after the spaces squash.
+   * minted token only proves identity.
    */
   async mintRealtimeWsToken(): Promise<string | null> {
     const { res, text, body } = await this.fetchWpn(
