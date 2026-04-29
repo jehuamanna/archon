@@ -1,45 +1,28 @@
-import type { ResourceVisibility } from "../../../../auth/auth-client";
-
+/**
+ * Admin selection state. Drives both `AdminSidebarView` (active node
+ * highlight) and `AdminMainView` (which panel to render).
+ *
+ * Post-org/team migration the selection set is small: org-level admin
+ * landings (people, teams, departments, activity) plus the master-admin
+ * console. The pre-migration "space", "space-members", "workspace-
+ * shares" and "project-shares" kinds were dropped — spaces/workspaces
+ * no longer exist, and project access is managed inline within the
+ * Teams panel via `team_projects` grants.
+ */
 export type AdminSelection =
   | { kind: "none" }
   | { kind: "master" }
   | { kind: "org-people" }
   | { kind: "org-teams" }
-  | { kind: "org-activity" }
-  | { kind: "space"; spaceId: string }
-  | { kind: "space-members"; spaceId: string }
-  | {
-      kind: "workspace-shares";
-      workspaceId: string;
-      spaceId: string | null;
-      initialVisibility: ResourceVisibility;
-      workspaceName?: string;
-      creatorUserId?: string | null;
-    }
-  | {
-      kind: "project-shares";
-      projectId: string;
-      spaceId: string | null;
-      initialVisibility: ResourceVisibility;
-      projectName?: string;
-      creatorUserId?: string | null;
-    };
+  | { kind: "org-departments" }
+  | { kind: "org-activity" };
 
 export type AdminCompanionFocus =
   | { kind: "none" }
-  | { kind: "org-member"; userId: string; displayName?: string; role?: string }
   | {
-      kind: "space-member";
-      spaceId: string;
+      kind: "org-member";
       userId: string;
       displayName?: string;
-      role?: string;
-    }
-  | {
-      kind: "share";
-      resourceKind: "workspace" | "project";
-      resourceId: string;
-      userId: string;
       role?: string;
     };
 
