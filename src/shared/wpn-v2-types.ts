@@ -109,9 +109,13 @@ export type WpnNoteDetail = {
 };
 
 /**
- * Flat row for cross-project note listing (link picker, bulk load). The
- * pre-migration version included workspace_id / workspace_name; those are
- * gone with the workspaces table.
+ * Flat row for cross-project note listing (link picker, bulk load).
+ *
+ * `workspace_id` / `workspace_name` are present only when the row comes
+ * from the Electron file vault (which still tracks workspaces on disk);
+ * the cloud sync-api never populates them since the workspaces table
+ * was removed by the org/team migration. Renderer code that crosses
+ * both paths should treat these fields as optional.
  */
 export type WpnNoteWithContextListItem = {
   id: string;
@@ -120,6 +124,8 @@ export type WpnNoteWithContextListItem = {
   project_id: string;
   project_name: string;
   parent_id: string | null;
+  workspace_id?: string;
+  workspace_name?: string;
 };
 
 /** Note that links to the target note id in markdown content. */
@@ -130,3 +136,65 @@ export type WpnBacklinkSourceItem = {
 };
 
 export const WPN_SCHEMA_VERSION = 2;
+
+// ── Electron file-vault types ──────────────────────────────────────────
+//
+// The cloud sync-api dropped workspaces with the org/team migration —
+// `ProjectRow` above is workspace-free. The Electron file vault
+// (offline single-user mode, persisted as `archon-workspace.json`)
+// still tracks workspaces as a top-level container; orgs/teams have no
+// meaning offline. These types describe the on-disk shape and the IPC
+// contract for the local vault path. They live alongside the cloud
+// types so renderer code that crosses both paths can import from one
+// module — but the two shapes are intentionally different.
+
+/**
+ * Electron file-vault visibility tag. Cloud access uses `team_projects`
+ * grants; the file vault keeps a coarse public/private/shared marker
+ * for backward compat with pre-migration `archon-workspace.json` files.
+ */
+export type WpnVisibility = "private" | "shared" | "public";
+
+export type WpnWorkspaceRow = {
+  id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  visibility?: WpnVisibility;
+  creatorUserId?: string;
+};
+
+export type WpnWorkspacePatch = {
+  name?: string;
+  sort_index?: number;
+  color_token?: string | null;
+  visibility?: WpnVisibility;
+};
+
+/**
+ * File-vault project row. Same fields as the cloud `ProjectRow` plus
+ * `workspace_id` (required, since the file vault has a workspaces
+ * table). Cloud code should NOT use this — it should use `ProjectRow`.
+ */
+export type WpnProjectRow = {
+  id: string;
+  workspace_id: string;
+  name: string;
+  sort_index: number;
+  color_token: string | null;
+  created_at_ms: number;
+  updated_at_ms: number;
+  visibility?: WpnVisibility;
+  creatorUserId?: string;
+};
+
+export type WpnProjectPatch = {
+  name?: string;
+  sort_index?: number;
+  color_token?: string | null;
+  /** Move project to a different workspace (file vault only). */
+  workspace_id?: string;
+  visibility?: WpnVisibility;
+};

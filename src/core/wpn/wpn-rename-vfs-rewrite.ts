@@ -127,10 +127,14 @@ export function wpnJsonPreviewVfsRewritesAfterMove(
   if (!ctx) {
     return { dependentNoteCount: 0, dependentNoteIds: [] };
   }
+  // The shared note-vfs path scheme is now 2-segment Project/Title; the
+  // workspace prefix is gone. The file vault still tracks workspaces on
+  // disk, but VFS hyperlinks across notes don't carry the workspace
+  // segment any more. Drop the old/newWorkspace args here.
+  void oldWorkspace;
+  void newWorkspace;
   const paths = vfsCanonicalPathsForProjectChange(
-    oldWorkspace,
     oldProject,
-    newWorkspace,
     newProject,
     ctx.title,
   );
@@ -147,7 +151,6 @@ export function wpnJsonPreviewVfsRewritesAfterMove(
     // Same-project relative `./Title` links in the OLD project need to become full canonical
     if (row.project_id === ctx.project_id) {
       const newFullCanonical = canonicalVfsPathFromLinkRow({
-        workspaceName: newWorkspace,
         projectName: newProject,
         title: ctx.title,
       });
@@ -182,10 +185,10 @@ export function wpnJsonApplyVfsRewritesAfterMove(
   newWorkspace: string,
   newProject: string,
 ): WpnVfsRewriteResult {
+  void oldWorkspace;
+  void newWorkspace;
   const paths = vfsCanonicalPathsForProjectChange(
-    oldWorkspace,
     oldProject,
-    newWorkspace,
     newProject,
     noteTitle,
   );
@@ -202,7 +205,6 @@ export function wpnJsonApplyVfsRewritesAfterMove(
     // Same-project relative `./Title` links in the OLD project need to become full canonical
     if (row.project_id === oldProjectId) {
       const newFullCanonical = canonicalVfsPathFromLinkRow({
-        workspaceName: newWorkspace,
         projectName: newProject,
         title: noteTitle,
       });

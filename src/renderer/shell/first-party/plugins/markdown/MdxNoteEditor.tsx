@@ -455,7 +455,6 @@ export function MdxNoteEditor({
       if (isSameProjectRelativeVfsPath(vfs)) {
         if (!selfRow) return true; // can't resolve — assume valid
         const canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-          workspace_name: selfRow.workspaceName,
           project_name: selfRow.projectName,
         });
         return canonical ? vfsPathSet.has(canonical) : true;
@@ -722,7 +721,6 @@ export function MdxNoteEditor({
         const selfRow = wikiRows.find((r) => r.noteId === note.id);
         if (selfRow) {
           canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-            workspace_name: selfRow.workspaceName,
             project_name: selfRow.projectName,
           });
         }

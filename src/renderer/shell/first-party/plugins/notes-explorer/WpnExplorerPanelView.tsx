@@ -104,7 +104,6 @@ function explorerCanonicalVfsPath(
     const p = projs.find((x) => x.id === projectId);
     if (p) {
       return canonicalVfsPathFromLinkRow({
-        workspaceName: w.name,
         projectName: p.name,
         title: noteTitle,
       });
@@ -123,7 +122,7 @@ function explorerDisplayWpnNotePath(
     const projs = projectsByWs[w.id] ?? [];
     const p = projs.find((x) => x.id === projectId);
     if (p) {
-      return displayWpnNotePathParts(w.name, p.name, noteTitle);
+      return displayWpnNotePathParts(p.name, noteTitle);
     }
   }
   return undefined;

@@ -38,11 +38,16 @@ function rowsFromBulk(notes: readonly WpnNoteWithContextListItem[]): WpnNoteLink
   }
 
   return notes.map((n) => {
-    const wsName = trimLabel(n.workspace_name, "Workspace");
     const projName = trimLabel(n.project_name, "Project");
     const title = trimLabel(n.title, "Untitled");
     const ancestors = ancestorTitles(n);
-    const segments = [wsName, projName, ...ancestors, title];
+    // Cloud rows lack workspace_name (workspaces dropped in the org/team
+    // migration); the file-vault still populates it. Skip the segment
+    // when missing so the path label is `Project / .../Title` either way.
+    const wsName = trimLabel(n.workspace_name ?? "", "");
+    const segments = wsName
+      ? [wsName, projName, ...ancestors, title]
+      : [projName, ...ancestors, title];
     const pathLabel = segments.join(" / ");
     return {
       noteId: n.id,

@@ -904,7 +904,6 @@ export function wpnJsonListBacklinksToNote(
       } else if (isSameProjectRelativeVfsPath(vfsPath)) {
         // Resolve ./Title relative to the source note's workspace/project.
         canonicalPath = resolveSameProjectRelativeVfsToCanonical(vfsPath, {
-          workspace_name: r.workspace_name,
           project_name: r.project_name,
         });
       } else {

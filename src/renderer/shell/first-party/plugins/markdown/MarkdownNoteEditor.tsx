@@ -451,7 +451,6 @@ export function MarkdownNoteEditor({
       if (isSameProjectRelativeVfsPath(vfs)) {
         if (!selfRow) return true; // can't resolve — assume valid
         const canonical = resolveSameProjectRelativeVfsToCanonical(vfs, {
-          workspace_name: selfRow.workspaceName,
           project_name: selfRow.projectName,
         });
         return canonical ? vfsPathSet.has(canonical) : true;
