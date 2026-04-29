@@ -90,7 +90,7 @@ Shell views are React components. In DevTools, try \`window.archon.shell\`. Regi
 
 ---
 
-> **URLs:** After your tree has loaded, the address bar prefers \`#/w/Workspace/Project/Title\`. Welcome shortcuts use \`#/welcome/…\`—shareable, and they run the same actions as the links above.
+> **URLs:** After your tree has loaded, the address bar prefers \`#/w/Project/Title\`. Welcome shortcuts use \`#/welcome/…\`—shareable, and they run the same actions as the links above.
 `;
 }
 

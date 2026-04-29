@@ -8,7 +8,7 @@ import {
 } from "../../shared/note-vfs-path";
 
 /**
- * Resolves explorer-style canonical path `Workspace/Project/Title`,
+ * Resolves explorer-style canonical path `Project/Title`,
  * same-project relative `./Title`, or tree-relative `../sibling` when
  * `baseNoteId` identifies the referrer note (for relative links in markdown).
  */
