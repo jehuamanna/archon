@@ -26,6 +26,7 @@ import { WpnSyncStatusBadge } from "./WpnSyncStatusBadge";
 import {
   fetchHeadlessWpnSession,
   isElectronUserAgent,
+  isSyntheticWorkspaceId,
   ARCHON_WEB_PLUGINS_CHANGED,
   syncWpnNotesBackend,
 } from "../../../../archon-web-shim";
@@ -3499,6 +3500,16 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
               >
                 Create project
               </button>
+              {/*
+                Cloud mode (post org/team migration) groups every project
+                under a single synthetic workspace ("Projects") supplied by
+                the IPC shim. Hide rename / reorder / export / share /
+                delete affordances on that synthetic row — there's no
+                real workspace to mutate. File-vault mode still has real
+                workspaces and renders the full menu.
+              */}
+              {!isSyntheticWorkspaceId(menu.id) ? (
+              <>
               <button
                 type="button"
                 className="block w-full rounded px-2 py-1 text-left hover:bg-muted/40"
@@ -3630,6 +3641,8 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                   return ids.length > 1 ? `Delete ${ids.length} workspaces` : "Delete workspace";
                 })()}
               </button>
+              </>
+              ) : null}
             </>
           ) : null}
           {menu.kind === "project" && menu.workspaceId ? (

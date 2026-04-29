@@ -44,8 +44,23 @@ import { wpnTrace } from "../shared/wpn-debug-trace";
 // File-vault paths bypass these helpers (they have real workspaces on
 // disk).
 
-const SYNTHETIC_WORKSPACE_ID = "00000000-0000-4000-8000-archonprojects";
+/**
+ * Identifier the cloud shim uses for the single virtual workspace it
+ * surfaces to the renderer. Exported so explorer / sidebar code can
+ * detect cloud mode and hide workspace-mutation affordances (no real
+ * workspace exists to rename / duplicate / delete / export).
+ */
+export const SYNTHETIC_WORKSPACE_ID =
+  "00000000-0000-4000-8000-archonprojects";
 const SYNTHETIC_WORKSPACE_NAME = "Projects";
+
+/**
+ * `true` when `workspaceId` is the cloud shim's synthetic id. Workspace-
+ * mutation UI in the renderer should hide these affordances on a match.
+ */
+export function isSyntheticWorkspaceId(workspaceId: string): boolean {
+  return workspaceId === SYNTHETIC_WORKSPACE_ID;
+}
 
 function syntheticWorkspaceRow(): WpnWorkspaceRow {
   const t = Date.now();
