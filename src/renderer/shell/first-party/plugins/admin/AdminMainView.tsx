@@ -2,6 +2,7 @@ import React from "react";
 import { useSelector } from "react-redux";
 import { AuditLogPanel } from "../../../../admin/AuditLogPanel";
 import { MasterConsolePanel } from "../../../../admin/MasterConsolePanel";
+import { MyAccountPanel } from "../../../../admin/MyAccountPanel";
 import { PeoplePanel } from "../../../../admin/PeoplePanel";
 import { TeamsPanel } from "../../../../admin/TeamsPanel";
 import type { RootState } from "../../../../store";
@@ -70,6 +71,14 @@ export function AdminMainView(
             ) : null}
           </ul>
         </div>
+      </div>
+    );
+  }
+
+  if (selection.kind === "account") {
+    return (
+      <div className={wrap}>
+        <MyAccountPanel />
       </div>
     );
   }

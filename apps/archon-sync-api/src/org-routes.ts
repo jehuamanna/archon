@@ -664,6 +664,67 @@ export function registerOrgRoutes(
     return reply.status(204).send();
   });
 
+  /**
+   * Admin-only: rotate a pending invite's token and reset its TTL. Use when
+   * the original link was lost or shared accidentally — old token instantly
+   * stops working, new plaintext is returned once for hand-off. Status,
+   * email, role, and team grants are unchanged.
+   */
+  app.post(
+    "/orgs/:orgId/invites/:inviteId/regenerate",
+    async (request, reply) => {
+      const auth = await requireAuth(request, reply, jwtSecret);
+      if (!auth) return;
+      const { orgId, inviteId } = request.params as {
+        orgId: string;
+        inviteId: string;
+      };
+      const ctx = await requireOrgRole(request, reply, auth, orgId, "admin");
+      if (!ctx) return;
+      if (!isUuid(inviteId)) {
+        return reply.status(400).send({ error: "Invalid invite id" });
+      }
+      const { plain, hash } = newInviteToken();
+      const now = new Date();
+      const expiresAt = new Date(now.getTime() + INVITE_TTL_MS);
+      const result = await db()
+        .update(orgInvites)
+        .set({ tokenHash: hash, expiresAt, createdAt: now })
+        .where(
+          and(
+            eq(orgInvites.id, inviteId),
+            eq(orgInvites.orgId, orgId),
+            eq(orgInvites.status, "pending"),
+          ),
+        )
+        .returning({
+          id: orgInvites.id,
+          email: orgInvites.email,
+          role: orgInvites.role,
+        });
+      if (result.length === 0) {
+        return reply
+          .status(404)
+          .send({ error: "Invite not found or already settled" });
+      }
+      await recordAudit({
+        orgId,
+        actorUserId: auth.sub,
+        principal: auth.principal ?? { type: "user" },
+        action: "org.invite.regenerate",
+        targetType: "org_invite",
+        targetId: inviteId,
+      });
+      return reply.send({
+        inviteId,
+        email: result[0].email,
+        role: result[0].role,
+        token: plain,
+        expiresAt,
+      });
+    },
+  );
+
   /** Public: accept an invite token. */
   app.post("/auth/accept-invite", async (request, reply) => {
     const parsed = acceptInviteBody.safeParse(request.body);

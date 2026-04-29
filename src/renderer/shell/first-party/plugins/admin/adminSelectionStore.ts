@@ -11,6 +11,7 @@
  */
 export type AdminSelection =
   | { kind: "none" }
+  | { kind: "account" }
   | { kind: "master" }
   | { kind: "org-people" }
   | { kind: "org-teams" }

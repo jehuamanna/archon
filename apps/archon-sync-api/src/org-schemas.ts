@@ -252,6 +252,7 @@ export type AuditAction =
   | "org.member.password_reset"
   | "org.invite.create"
   | "org.invite.revoke"
+  | "org.invite.regenerate"
   | "org.invite.accept"
   | "org.invite.decline"
   | "department.create"
@@ -274,7 +275,14 @@ export type AuditAction =
   | "project.delete"
   | "master.org_admin.create_with_password"
   | "master.org_admin.promote"
-  | "master.org_admin.demote";
+  | "master.org_admin.demote"
+  | "master.user.password_reset"
+  | "master.user.disable"
+  | "master.user.enable"
+  | "master.invite.create"
+  | "master.invite.revoke"
+  | "master.invite.regenerate"
+  | "master.invite.accept";
 
 export type AuditEventDoc = {
   _id: string;

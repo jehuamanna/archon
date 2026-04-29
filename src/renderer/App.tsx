@@ -20,6 +20,7 @@ import { useRegisterMarkdownNotePlugin } from "./shell/first-party/plugins/markd
 import { useRegisterImageNotesPlugin } from "./shell/first-party/plugins/image-notes/useRegisterImageNotesPlugin";
 import { GlobalContextMenuHost } from "./shell/GlobalContextMenuHost";
 import { AcceptInviteScreen } from "./auth/AcceptInviteScreen";
+import { AcceptMasterInviteScreen } from "./auth/AcceptMasterInviteScreen";
 import { AuthProvider } from "./auth/AuthContext";
 import { AuthGate } from "./auth/AuthGate";
 import { WebPostAuthRedirectBootstrap } from "./auth/WebPostAuthRedirectBootstrap";
@@ -32,12 +33,21 @@ import { hydrateCloudNotesFromRxDbThunk } from "./store/cloudNotesSlice";
 
 ensureSesLockdown();
 
-function readInviteTokenFromUrl(): string | null {
+type InviteRoute =
+  | { kind: "org"; token: string }
+  | { kind: "master"; token: string }
+  | null;
+
+function readInviteFromUrl(): InviteRoute {
   if (typeof window === "undefined") {
     return null;
   }
-  const m = window.location.pathname.match(/^\/invite\/([^/?#]+)/);
-  return m ? decodeURIComponent(m[1]!) : null;
+  const path = window.location.pathname;
+  const m = path.match(/^\/invite\/master\/([^/?#]+)/);
+  if (m) return { kind: "master", token: decodeURIComponent(m[1]!) };
+  const o = path.match(/^\/invite\/([^/?#]+)/);
+  if (o) return { kind: "org", token: decodeURIComponent(o[1]!) };
+  return null;
 }
 
 function WebScratchCloudHydrator(): null {
@@ -92,21 +102,32 @@ const App: React.FC = () => {
   useNotificationsPolling();
   useArchonActiveTabModeLine();
 
-  const inviteToken = readInviteTokenFromUrl();
+  const invite = readInviteFromUrl();
 
-  if (inviteToken) {
+  if (invite) {
     return (
       <AuthProvider>
         <div className="min-h-screen w-full" data-testid="archon-app-root">
-          <AcceptInviteScreen
-            token={inviteToken}
-            onAccepted={() => {
-              if (typeof window !== "undefined") {
-                window.history.replaceState(null, "", "/");
-                window.location.reload();
-              }
-            }}
-          />
+          {invite.kind === "master" ? (
+            <AcceptMasterInviteScreen
+              token={invite.token}
+              onAccepted={() => {
+                if (typeof window !== "undefined") {
+                  window.history.replaceState(null, "", "/");
+                }
+              }}
+            />
+          ) : (
+            <AcceptInviteScreen
+              token={invite.token}
+              onAccepted={() => {
+                if (typeof window !== "undefined") {
+                  window.history.replaceState(null, "", "/");
+                  window.location.reload();
+                }
+              }}
+            />
+          )}
         </div>
       </AuthProvider>
     );

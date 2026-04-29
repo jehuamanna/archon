@@ -74,18 +74,9 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   return (text ? (JSON.parse(text) as T) : (undefined as T));
 }
 
-export async function authSignup(payload: {
-  email: string;
-  username: string;
-  password: string;
-}): Promise<AuthUser> {
-  const r = await requestJson<AuthResponse>("/auth/signup", {
-    method: "POST",
-    body: JSON.stringify(payload),
-  });
-  setAccessToken(r.token);
-  return r.user;
-}
+// Public signup is intentionally absent — onboarding is admin-driven only.
+// Use the master-invite or org-invite flow (`/auth/accept-master-invite`,
+// `/auth/accept-invite`) for new accounts.
 
 export async function authLogin(payload: {
   email: string;
@@ -247,6 +238,29 @@ export async function previewInvite(token: string): Promise<OrgInvitePreview> {
   );
 }
 
+/**
+ * Accept a master-admin invite. Auto-creates the account if needed (using the
+ * supplied password as the bootstrap) and promotes to platform-wide master
+ * admin. The server returns no token — the invitee is told to log in. New
+ * accounts come back with `mustSetPassword=true` so the first login forces
+ * the change-password screen.
+ */
+export async function acceptMasterInvite(payload: {
+  token: string;
+  password: string;
+}): Promise<{
+  userId: string;
+  email: string;
+  isMasterAdmin: true;
+  createdUser: boolean;
+  mustSetPassword: boolean;
+}> {
+  return requestJson("/auth/accept-master-invite", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function acceptInvite(payload: {
   token: string;
   password?: string;
@@ -393,6 +407,28 @@ export async function revokeOrgInvite(payload: {
     `/orgs/${encodeURIComponent(payload.orgId)}/invites/${encodeURIComponent(payload.inviteId)}`,
     {
       method: "DELETE",
+      headers: { Authorization: `Bearer ${token}` },
+    },
+  );
+}
+
+/**
+ * Rotate a pending org invite's token. Use when the original link was lost
+ * or accidentally shared. Returns a fresh plaintext token (one-time);
+ * compose `${origin}/invite/${token}` to share.
+ */
+export async function regenerateOrgInvite(payload: {
+  orgId: string;
+  inviteId: string;
+}): Promise<{ inviteId: string; email: string; role: OrgRole; token: string; expiresAt: string }> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  return requestJson(
+    `/orgs/${encodeURIComponent(payload.orgId)}/invites/${encodeURIComponent(payload.inviteId)}/regenerate`,
+    {
+      method: "POST",
       headers: { Authorization: `Bearer ${token}` },
     },
   );
@@ -1504,6 +1540,93 @@ export async function deleteUser(userId: string): Promise<{
     method: "DELETE",
     headers: masterHeaders(),
   });
+}
+
+/**
+ * Master-only: reset any user's password. Pass `password` to set a specific
+ * one, or omit to mint a temp password (returned in `password` field of the
+ * response). Sets `mustSetPassword=true` and clears refresh sessions so the
+ * target re-authenticates and is forced through the change-password flow on
+ * next login.
+ */
+export async function resetMasterUserPassword(payload: {
+  userId: string;
+  password?: string;
+}): Promise<{
+  userId: string;
+  mustSetPassword: true;
+  password?: string;
+}> {
+  return requestJson(
+    `/master/users/${encodeURIComponent(payload.userId)}/reset-password`,
+    {
+      method: "POST",
+      headers: { ...masterHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(
+        payload.password ? { password: payload.password } : {},
+      ),
+    },
+  );
+}
+
+// ----- Master invites -----
+
+export type MasterInviteRow = {
+  inviteId: string;
+  email: string;
+  status: "pending" | "accepted" | "revoked" | "expired";
+  invitedByUserId: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+};
+
+export async function listMasterInvites(
+  status: MasterInviteRow["status"] = "pending",
+): Promise<MasterInviteRow[]> {
+  const r = await requestJson<{ invites: MasterInviteRow[] }>(
+    `/master/invites?status=${encodeURIComponent(status)}`,
+    { method: "GET", headers: masterHeaders() },
+  );
+  return r.invites;
+}
+
+/** Returns the plaintext token once — compose the URL `${origin}/invite/master/${token}` to share. */
+export async function createMasterInvite(payload: {
+  email: string;
+}): Promise<{
+  inviteId: string;
+  email: string;
+  token: string;
+  expiresAt: string;
+}> {
+  return requestJson("/master/invites", {
+    method: "POST",
+    headers: { ...masterHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ email: payload.email }),
+  });
+}
+
+export async function revokeMasterInvite(inviteId: string): Promise<void> {
+  await requestJson(`/master/invites/${encodeURIComponent(inviteId)}`, {
+    method: "DELETE",
+    headers: masterHeaders(),
+  });
+}
+
+export async function regenerateMasterInvite(inviteId: string): Promise<{
+  inviteId: string;
+  email: string;
+  token: string;
+  expiresAt: string;
+}> {
+  return requestJson(
+    `/master/invites/${encodeURIComponent(inviteId)}/regenerate`,
+    {
+      method: "POST",
+      headers: masterHeaders(),
+    },
+  );
 }
 
 // ----- Phase 8: Notifications -----

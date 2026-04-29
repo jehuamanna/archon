@@ -130,6 +130,14 @@ export function AdminSidebarView(
 
   return (
     <div className={list}>
+      <div className={groupHeader}>Account</div>
+      <Row
+        active={selection.kind === "account"}
+        onClick={() => adminSelectionStore.setSelection({ kind: "account" })}
+        icon={<UserIcon />}
+        label="My account"
+      />
+
       {isMasterAdmin ? (
         <>
           <div className={groupHeader}>Platform</div>

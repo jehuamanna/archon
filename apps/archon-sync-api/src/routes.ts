@@ -47,12 +47,9 @@ import {
 } from "./refresh-sessions.js";
 import { isUuid } from "./db/legacy-id-map.js";
 
-const registerBody = z.object({
+const loginBody = z.object({
   email: z.string().email(),
   password: z.string().min(8).max(256),
-});
-
-const loginBody = registerBody.extend({
   client: z.enum(["mcp"]).optional(),
 });
 
@@ -129,57 +126,13 @@ export function registerRoutes(
     async (scoped) => registerWpnImportExportRoutes(scoped, { jwtSecret }),
   );
 
-  app.post("/auth/register", async (request, reply) => {
-    const parsed = registerBody.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
-    }
-    const { email, password } = parsed.data;
-    const emailLower = email.toLowerCase();
-    const existing = await db()
-      .select({ id: users.id })
-      .from(users)
-      .where(eq(users.email, emailLower))
-      .limit(1);
-    if (existing.length > 0) {
-      return reply.status(409).send({ error: "Email already registered" });
-    }
-    const passwordHash = await bcrypt.hash(password, 12);
-    const userId = randomUUID();
-    await db().insert(users).values({
-      id: userId,
-      email: emailLower,
-      passwordHash,
-    });
-    await maybePromoteMasterAdmin(userId, emailLower);
-    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, emailLower);
-    const { teamId: defaultTeamId } = await ensureDefaultTeamForOrg(
-      defaultOrgId,
-      userId,
-    );
-    const payload = {
-      sub: userId,
-      email: emailLower,
-      activeOrgId: defaultOrgId,
-      activeTeamId: defaultTeamId,
-    };
-    const jti = randomUUID();
-    const token = signAccessToken(jwtSecret, payload);
-    const refreshToken = signRefreshToken(jwtSecret, payload, jti);
-    await db()
-      .update(users)
-      .set({
-        refreshSessions: [{ jti, createdAt: new Date().toISOString() }],
-      })
-      .where(eq(users.id, userId));
-    return reply.send({
-      token,
-      refreshToken,
-      userId,
-      defaultOrgId,
-      defaultTeamId,
-    });
-  });
+  // Public signup is intentionally absent. Onboarding is admin-driven only:
+  //   - Master admin (via ARCHON_MASTER_ADMIN_EMAIL or POST /master/admins)
+  //     creates other master admins and org admins (POST /master/orgs/:id/admins).
+  //   - Org admins invite members (POST /orgs/:orgId/invites or
+  //     /orgs/:orgId/members/create). Invitees accept via POST /auth/accept-invite.
+  // Restore /auth/register only if a deliberate decision is made to reopen
+  // the platform to public registration.
 
   app.post("/auth/login", async (request, reply) => {
     const parsed = loginBody.safeParse(request.body);

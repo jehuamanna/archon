@@ -204,6 +204,38 @@ export const orgInvites = pgTable(
   }),
 );
 
+/**
+ * Master-admin invites. Mirror of `org_invites` but unscoped to any org —
+ * accepting one promotes the user to platform-wide master admin (sets
+ * `users.is_master_admin = true`) and runs the same `mustSetPassword=true`
+ * first-login flow. The existing `POST /master/admins` endpoint with a temp
+ * password remains as the alternative path.
+ */
+export const masterInvites = pgTable(
+  "master_invites",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    email: text("email").notNull(),
+    tokenHash: text("token_hash").notNull(),
+    status: text("status").notNull(), // 'pending' | 'accepted' | 'revoked' | 'expired'
+    invitedByUserId: uuid("invited_by_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "restrict" }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+    acceptedByUserId: uuid("accepted_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+  },
+  (t) => ({
+    tokenHashUnique: uniqueIndex("master_invites_token_hash_unique").on(t.tokenHash),
+    pendingUnique: uniqueIndex("master_invites_pending_unique")
+      .on(t.email, t.status)
+      .where(sql`status = 'pending'`),
+  }),
+);
+
 export const departments = pgTable(
   "departments",
   {

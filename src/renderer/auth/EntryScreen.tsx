@@ -8,15 +8,12 @@ import {
 } from "./web-scratch";
 
 type EntryView = "marketing" | "auth";
-type AuthMode = "login" | "signup";
 
 function MarketingHome({
   onLogin,
-  onSignup,
   onTryBrowserScratch,
 }: {
   onLogin: () => void;
-  onSignup: () => void;
   onTryBrowserScratch: () => void;
 }): React.ReactElement {
   const card =
@@ -110,17 +107,10 @@ function MarketingHome({
         <div className="flex shrink-0 flex-nowrap items-center gap-2">
           <button
             type="button"
-            className="h-9 rounded-md border border-foreground/20 bg-background px-3 text-[12px] text-foreground hover:bg-foreground/6"
+            className="archon-btn-neutral h-9 rounded-md px-3 text-[12px] font-medium"
             onClick={onLogin}
           >
             Login
-          </button>
-          <button
-            type="button"
-            className="archon-btn-neutral h-9 rounded-md px-3 text-[12px] font-medium"
-            onClick={onSignup}
-          >
-            Signup
           </button>
         </div>
       </header>
@@ -152,9 +142,9 @@ function MarketingHome({
               <button
                 type="button"
                 className="h-10 rounded-md border border-foreground/20 bg-background px-4 text-[13px] text-foreground hover:bg-foreground/6"
-                onClick={onSignup}
+                onClick={onLogin}
               >
-                Create account
+                Login
               </button>
               <a
                 href="#download"
@@ -319,9 +309,9 @@ function MarketingHome({
             <button
               type="button"
               className="h-10 rounded-md border border-foreground/20 bg-background px-4 text-[13px] text-foreground hover:bg-foreground/6"
-              onClick={onSignup}
+              onClick={onLogin}
             >
-              Create account
+              Login
             </button>
           </div>
         </section>
@@ -358,7 +348,6 @@ function MarketingHome({
 
 export function EntryScreen(): React.ReactElement {
   const [view, setView] = useState<EntryView>("marketing");
-  const [authMode, setAuthMode] = useState<AuthMode>("login");
 
   const onTryBrowserScratch = (): void => {
     if (!isWebScratchSession()) {
@@ -370,33 +359,25 @@ export function EntryScreen(): React.ReactElement {
   const auth = useMemo(
     () => (
       <AuthScreen
-        initialMode={authMode}
         onBack={() => {
           setView("marketing");
         }}
       />
     ),
-    [authMode],
+    [],
   );
 
   if (view === "auth") {
     return auth;
   }
 
-  const marketing = (
+  return (
     <MarketingHome
       onLogin={() => {
-        setAuthMode("login");
-        setView("auth");
-      }}
-      onSignup={() => {
-        setAuthMode("signup");
         setView("auth");
       }}
       onTryBrowserScratch={onTryBrowserScratch}
     />
   );
-
-  return marketing;
 }
 

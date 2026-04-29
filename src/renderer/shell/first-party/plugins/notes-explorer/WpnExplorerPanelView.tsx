@@ -24,9 +24,9 @@ import {
 } from "../../../../store/wpnSyncStatus";
 import { WpnSyncStatusBadge } from "./WpnSyncStatusBadge";
 import {
-  fetchHeadlessWpnSession,
   isElectronUserAgent,
   isSyntheticWorkspaceId,
+  SYNTHETIC_WORKSPACE_ID,
   ARCHON_WEB_PLUGINS_CHANGED,
   syncWpnNotesBackend,
 } from "../../../../archon-web-shim";
@@ -537,17 +537,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const noteTitleDraftById = useSelector((s: RootState) => s.notes.noteTitleDraftById);
   const activeSpaceId = useSelector((s: RootState) => s.spaceMembership.activeSpaceId);
   const activeOrgId = useSelector((s: RootState) => s.orgMembership.activeOrgId);
-  const orgs = useSelector((s: RootState) => s.orgMembership.orgs);
-  const spaces = useSelector((s: RootState) => s.spaceMembership.spaces);
   const clipboard = useSelector((s: RootState) => s.wpnClipboard);
-  const activeOrgName = useMemo(
-    () => orgs.find((o) => o.orgId === activeOrgId)?.name ?? null,
-    [orgs, activeOrgId],
-  );
-  const activeSpaceName = useMemo(
-    () => spaces.find((s) => s.spaceId === activeSpaceId)?.name ?? null,
-    [spaces, activeSpaceId],
-  );
 
   const showFolderBasedWorkspaceCreate = isElectronUserAgent() || rootPath != null;
 
@@ -575,7 +565,6 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     targetId: string;
     placement: NoteMovePlacement;
   } | null>(null);
-  const [wpnOwnerLabel, setWpnOwnerLabel] = useState<string | null>(null);
   // PLAN-06 slice 4d: conflict policy chosen by the user in the Import bar.
   // `rename` never destroys existing data, hence the default.
   const [importConflictPolicy, setImportConflictPolicy] =
@@ -722,21 +711,6 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
       offMain();
     };
   }, []);
-
-  useEffect(() => {
-    if (!projectOpen) {
-      setWpnOwnerLabel(null);
-      return;
-    }
-    let cancelled = false;
-    void fetchHeadlessWpnSession().then((s) => {
-      if (cancelled) return;
-      setWpnOwnerLabel(s?.wpnOwnerId ?? null);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectOpen]);
 
   useEffect(() => {
     void loadWorkspaces();
@@ -2865,15 +2839,8 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                 >
                   Login
                 </button>{" "}
-                or{" "}
-                <button
-                  type="button"
-                  className="font-medium text-sky-600 underline decoration-sky-600/40 underline-offset-2 hover:text-sky-500 dark:text-sky-400"
-                  onClick={() => openWebAuth("signup")}
-                >
-                  Signup
-                </button>{" "}
-                to load your workspaces and notes here.
+                to load your workspaces and notes here. New accounts are
+                created by an admin via invite link.
               </p>
               <p className="max-w-[18rem] text-[11px] leading-relaxed text-muted-foreground">
                 Prefer files on your computer? Use the Archon desktop app when it’s available.
@@ -3125,42 +3092,6 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         }}
       >
       <div className="flex shrink-0 flex-wrap items-center gap-1 border-b border-border bg-muted/10 px-2 py-1">
-        {wpnOwnerLabel ? (
-          <span
-            className="mr-1 max-w-[8rem] truncate text-[10px] text-muted-foreground"
-            title={`WPN owner: ${wpnOwnerLabel}`}
-          >
-            {wpnOwnerLabel}
-          </span>
-        ) : null}
-        {activeOrgId ? (
-          <span
-            className="max-w-[8rem] truncate rounded border border-border/60 bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
-            title={`Org: ${activeOrgName ?? activeOrgId} — right-click for options`}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setTypePicker(null);
-              setMenu({ x: e.clientX, y: e.clientY, kind: "org", id: activeOrgId });
-            }}
-          >
-            org: {activeOrgName ?? activeOrgId.slice(0, 6)}
-          </span>
-        ) : null}
-        {activeSpaceId ? (
-          <span
-            className="max-w-[8rem] truncate rounded border border-border/60 bg-background px-1.5 py-0.5 text-[10px] text-muted-foreground"
-            title={`Space: ${activeSpaceName ?? activeSpaceId} — right-click for options`}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              setTypePicker(null);
-              setMenu({ x: e.clientX, y: e.clientY, kind: "space", id: activeSpaceId });
-            }}
-          >
-            space: {activeSpaceName ?? activeSpaceId.slice(0, 6)}
-          </span>
-        ) : null}
         <WpnSyncStatusBadge
           onRetry={() => {
             void refreshExplorer().catch((e) => {
@@ -3180,13 +3111,23 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         >
           {isRefreshingExplorer ? "…" : "Refresh"}
         </button>
-        <button
-          type="button"
-          className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"
-          onClick={() => void onCreateWorkspace()}
-        >
-          + Workspace
-        </button>
+        {workspaces.length > 0 && workspaces.every((w) => isSyntheticWorkspaceId(w.id)) ? (
+          <button
+            type="button"
+            className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"
+            onClick={() => void onCreateProject(SYNTHETIC_WORKSPACE_ID)}
+          >
+            + Project
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="rounded border border-border/60 px-2 py-0.5 text-[10px] hover:bg-muted/40"
+            onClick={() => void onCreateWorkspace()}
+          >
+            + Workspace
+          </button>
+        )}
         <input
           className="min-w-[6rem] flex-1 rounded border border-border/60 bg-background px-2 py-0.5 text-[10px]"
           placeholder="Search notes…"
@@ -3215,8 +3156,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
         ) : (
           workspaces.map((w) => {
             const isRenamingWs = renaming?.kind === "ws" && renaming.id === w.id;
+            const isSynthetic = isSyntheticWorkspaceId(w.id);
             return (
               <div key={w.id} className="border-b border-border/40">
+                {!isSynthetic && (
                 <div
                   data-wpn-select-row
                   className="flex w-full min-w-0 items-center gap-1 px-1 py-0.5 bg-muted/15"
@@ -3280,6 +3223,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                       onDoubleClick={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
+                        if (isSyntheticWorkspaceId(w.id)) return;
                         setRenaming({ kind: "ws", id: w.id, draft: w.name });
                       }}
                     >
@@ -3298,8 +3242,9 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
                     + Project
                   </button>
                 </div>
-                {expandedWs.has(w.id) ? (
-                  <div className="pl-2">
+                )}
+                {isSynthetic || expandedWs.has(w.id) ? (
+                  <div className={isSynthetic ? "" : "pl-2"}>
                     {(projectsByWs[w.id] ?? []).map((p) => {
                       const isRenamingProj = renaming?.kind === "project" && renaming.id === p.id;
                       const projectSelected = isRowSelected("project", p.id, w.id);

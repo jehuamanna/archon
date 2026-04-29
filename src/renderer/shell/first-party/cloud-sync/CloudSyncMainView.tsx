@@ -18,7 +18,6 @@ import {
 import {
   cloudLoginThunk,
   cloudLogoutThunk,
-  cloudRegisterThunk,
 } from "../../../store/cloudAuthSlice";
 import {
   patchCloudNoteLocal,
@@ -42,7 +41,6 @@ export function CloudSyncMainView(): React.ReactElement {
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"login" | "register">("login");
   const [previewMd, setPreviewMd] = useState(note?.content ?? "");
 
   useEffect(() => {
@@ -93,22 +91,10 @@ export function CloudSyncMainView(): React.ReactElement {
               {auth.error}
             </div>
           ) : null}
-          <div className="flex gap-2 text-[11px]">
-            <button
-              type="button"
-              className={`rounded px-2 py-1 ${mode === "login" ? "bg-muted font-medium" : ""}`}
-              onClick={() => setMode("login")}
-            >
-              Sign in
-            </button>
-            <button
-              type="button"
-              className={`rounded px-2 py-1 ${mode === "register" ? "bg-muted font-medium" : ""}`}
-              onClick={() => setMode("register")}
-            >
-              Register
-            </button>
-          </div>
+          <p className="text-[11px] text-muted-foreground">
+            New accounts are created by an admin via invite link. Ask your
+            admin if you don't have one.
+          </p>
           <label className="block text-[12px]">
             <span className="text-muted-foreground">Email</span>
             <input
@@ -120,10 +106,10 @@ export function CloudSyncMainView(): React.ReactElement {
             />
           </label>
           <label className="block text-[12px]">
-            <span className="text-muted-foreground">Password (min 8)</span>
+            <span className="text-muted-foreground">Password</span>
             <input
               type="password"
-              autoComplete={mode === "register" ? "new-password" : "current-password"}
+              autoComplete="current-password"
               className="mt-1 w-full rounded border border-input bg-background px-2 py-1.5 text-[12px]"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
@@ -131,17 +117,13 @@ export function CloudSyncMainView(): React.ReactElement {
           </label>
           <button
             type="button"
-            disabled={auth.busy || !email.trim() || password.length < 8}
+            disabled={auth.busy || !email.trim() || password.length === 0}
             className="rounded border border-input bg-background px-3 py-2 text-[12px] shadow-sm hover:bg-muted/50 disabled:opacity-50"
             onClick={() => {
-              if (mode === "login") {
-                void dispatch(cloudLoginThunk({ email: email.trim(), password }));
-              } else {
-                void dispatch(cloudRegisterThunk({ email: email.trim(), password }));
-              }
+              void dispatch(cloudLoginThunk({ email: email.trim(), password }));
             }}
           >
-            {auth.busy ? "…" : mode === "login" ? "Sign in" : "Create account"}
+            {auth.busy ? "…" : "Sign in"}
           </button>
         </div>
       </div>
