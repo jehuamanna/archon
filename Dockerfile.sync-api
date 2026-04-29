@@ -16,7 +16,19 @@ COPY apps ./apps
 COPY packages ./packages
 COPY docs/bundled-plugin-authoring ./docs/bundled-plugin-authoring
 
-RUN npm ci -w @archon/sync-api --ignore-scripts
+# Install ALL workspace deps (no `-w` filter) so the TypeScript build
+# tooling required by `@nodex-studio/mdx-sdk` is present. `--ignore-scripts`
+# keeps the install side-effect-free; the mdx-sdk build runs explicitly
+# below.
+RUN npm ci --ignore-scripts
+
+# `@nodex-studio/mdx-sdk` declares `main: ./dist/index.js`. The repo-root
+# `.dockerignore` excludes `dist/` and `--ignore-scripts` skipped its
+# `prepare` hook, so the compiled output isn't in the image yet — build
+# it here before sync-api boots and tries to import it. Without this,
+# the container crash-loops with ERR_MODULE_NOT_FOUND on
+# `@nodex-studio/mdx-sdk/dist/index.js`.
+RUN npm run build -w @nodex-studio/mdx-sdk
 
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
