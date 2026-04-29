@@ -134,6 +134,11 @@ async function mintSpaceWsToken(
 }
 
 export interface YjsBodyShadow {
+  /** Live `Y.Doc` for this note. Stable across hook re-runs. Image-style
+   * editors that don't need `Y.Text("content")` can grab a `Y.Map` off
+   * this directly (e.g. `doc.getMap("metadata")`) and ride the same
+   * Hocuspocus room. Null while the hook is inert. */
+  doc: Y.Doc | null;
   /** Live `Y.Text("content")` bound to this note. Stable across hook
    * re-runs for the same noteId — pass to `yCollab()` as the first
    * argument. Null while the hook is inert (no `noteId` / no `spaceId`). */
@@ -182,10 +187,12 @@ export function useYjsBodyShadow(
   const [connected, setConnected] = useState(false);
   const [awareness, setAwareness] = useState<Awareness | null>(null);
 
-  // The Y.Text is derived directly from noteId via the stable cache —
+  // The Y.Doc + Y.Text are derived directly from noteId via the stable cache —
   // no useState, no re-render flicker. yCollab in the editor's extensions
   // will bind to this same reference on every render until noteId changes.
-  const yText = noteId ? getOrCreateNoteDoc(noteId).ytext : null;
+  const cachedEntry = noteId ? getOrCreateNoteDoc(noteId) : null;
+  const doc = cachedEntry?.doc ?? null;
+  const yText = cachedEntry?.ytext ?? null;
 
   useEffect(() => {
     if (!noteId || !spaceId) {
@@ -303,5 +310,55 @@ export function useYjsBodyShadow(
     }
   }, [awareness, user?.id, user?.name, user?.color]);
 
-  return { yText, connected, awareness };
+  return { doc, yText, connected, awareness };
+}
+
+/**
+ * Bind a single string-valued field of a Y.Map to controlled-input state.
+ * Each keystroke writes to the Map (Hocuspocus broadcasts to peers and
+ * debounces persistence); remote writes flow back via `observe` and
+ * update local state without echoing.
+ *
+ * Use for non-text-CRDT fields like `altText` / `caption` on an image
+ * note — full character-level merge isn't worth the binding complexity
+ * for short labels. For longer prose, prefer a Y.Text.
+ */
+export function useYjsMapField(
+  map: Y.Map<unknown> | null,
+  key: string,
+  fallback: string,
+): [string, (next: string) => void] {
+  const [value, setLocal] = useState<string>(() => {
+    const cur = map?.get(key);
+    return typeof cur === "string" ? cur : fallback;
+  });
+
+  // Keep local state aligned with whatever the Y.Map currently holds so a
+  // reseed (note swap, reconnect) doesn't strand the input on stale text.
+  useEffect(() => {
+    if (!map) {
+      setLocal(fallback);
+      return;
+    }
+    const cur = map.get(key);
+    setLocal(typeof cur === "string" ? cur : fallback);
+    const handler = (event: Y.YMapEvent<unknown>): void => {
+      if (!event.keysChanged.has(key)) return;
+      const next = map.get(key);
+      setLocal(typeof next === "string" ? next : fallback);
+    };
+    map.observe(handler);
+    return () => {
+      map.unobserve(handler);
+    };
+  }, [map, key, fallback]);
+
+  const setShared = (next: string): void => {
+    setLocal(next);
+    if (!map) return;
+    if (next === fallback && !map.has(key)) return;
+    map.set(key, next);
+  };
+
+  return [value, setShared];
 }
