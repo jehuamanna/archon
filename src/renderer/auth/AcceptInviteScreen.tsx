@@ -8,7 +8,8 @@ import {
 } from "./auth-client";
 import type { AppDispatch } from "../store";
 import { loadMyOrgsThunk } from "../store/orgMembershipSlice";
-import { loadOrgSpacesThunk } from "../store/spaceMembershipSlice";
+import { loadOrgTeamsThunk } from "../store/teamSlice";
+import { loadOrgDepartmentsThunk } from "../store/departmentSlice";
 import { resetCloudNotes, runCloudSyncThunk } from "../store/cloudNotesSlice";
 import {
   fetchNotificationsThunk,
@@ -83,11 +84,11 @@ export function AcceptInviteScreen({
       setDone({ orgId: r.orgId });
       dispatch(locallyConsumeByDedupeLink({ link: `/invite/${token}` }));
       void dispatch(loadMyOrgsThunk());
-      // Rehydrate the invited org's spaces so spaceMembership.activeSpaceId is
-      // set to the invited org's default — without this, WpnExplorer's
-      // useEffect([activeSpaceId]) won't refire and the tree stays on the
-      // invitee's previous scope until a restart.
-      void dispatch(loadOrgSpacesThunk({ orgId: r.orgId }));
+      // Rehydrate the invited org's teams + departments so the explorer
+      // and Teams admin panel land populated. The JWT-pinned activeTeamId
+      // refresh happens via the App-level reload that follows acceptance.
+      void dispatch(loadOrgTeamsThunk({ orgId: r.orgId }));
+      void dispatch(loadOrgDepartmentsThunk({ orgId: r.orgId }));
       // Drop previous-scope cloud-notes cache and pull the new scope so the
       // flat cloud-notes plugin doesn't leak across orgs.
       dispatch(resetCloudNotes());
@@ -177,13 +178,13 @@ export function AcceptInviteScreen({
         <strong>{inviterLabel}</strong> invited you as a{" "}
         <strong>{preview.role}</strong> for <strong>{preview.email}</strong>.
       </p>
-      {preview.spaceGrants && preview.spaceGrants.length > 0 ? (
+      {preview.teamGrants && preview.teamGrants.length > 0 ? (
         <div className="mb-4 rounded-md border border-border/60 bg-muted/10 p-2 text-[12px]">
-          <p className="mb-1 font-medium">You'll also be added to these spaces:</p>
+          <p className="mb-1 font-medium">You'll also be added to these teams:</p>
           <ul className="space-y-0.5 pl-4">
-            {preview.spaceGrants.map((g) => (
-              <li key={g.spaceId} className="list-disc">
-                {g.spaceName}{" "}
+            {preview.teamGrants.map((g) => (
+              <li key={g.teamId} className="list-disc">
+                {g.teamName}{" "}
                 <span className="text-muted-foreground">({g.role})</span>
               </li>
             ))}

@@ -211,10 +211,17 @@ export async function setActiveOrgRemote(orgId: string): Promise<{
   return { token: r.token, activeOrgId: r.activeOrgId, activeTeamId: r.activeTeamId };
 }
 
-export type InviteSpaceGrantInfo = {
-  spaceId: string;
-  spaceName: string;
-  role: SpaceRole;
+/**
+ * Single team grant carried on an invite. Pre-migration the field was
+ * named `spaceGrants` and pointed at spaces; the org/team migration
+ * renamed it `teamGrants` (sync-api commit 76d60a5 surface). The role
+ * value is the team-membership role (admin/member), NOT the team→
+ * project grant role.
+ */
+export type InviteTeamGrantInfo = {
+  teamId: string;
+  teamName: string;
+  role: "admin" | "member";
 };
 
 export type OrgInvitePreview = {
@@ -230,7 +237,7 @@ export type OrgInvitePreview = {
     displayName: string;
     email: string;
   };
-  spaceGrants: InviteSpaceGrantInfo[];
+  teamGrants: InviteTeamGrantInfo[];
 };
 
 export async function previewInvite(token: string): Promise<OrgInvitePreview> {
@@ -251,7 +258,7 @@ export async function acceptInvite(payload: {
   orgId: string;
   role: OrgRole;
   createdUser: boolean;
-  spaceGrants: { spaceId: string; role: SpaceRole }[];
+  teamGrants: { teamId: string; role: "admin" | "member" }[];
 }> {
   const r = await requestJson<{
     token: string;
@@ -260,7 +267,7 @@ export async function acceptInvite(payload: {
     orgId: string;
     role: OrgRole;
     createdUser: boolean;
-    spaceGrants?: { spaceId: string; role: SpaceRole }[];
+    teamGrants?: { teamId: string; role: "admin" | "member" }[];
   }>("/auth/accept-invite", {
     method: "POST",
     body: JSON.stringify(payload),
@@ -274,7 +281,7 @@ export async function acceptInvite(payload: {
   // own notes" regardless of which org is selected.
   writeCloudSyncToken(r.token);
   writeCloudSyncRefreshToken(r.refreshToken);
-  return { ...r, spaceGrants: r.spaceGrants ?? [] };
+  return { ...r, teamGrants: r.teamGrants ?? [] };
 }
 
 /** Decline an invite by token. Idempotent; unknown tokens return 404. */
@@ -1522,7 +1529,7 @@ export type OrgInviteNotificationPayload = {
   inviterDisplayName: string;
   inviterEmail: string;
   role: OrgRole;
-  spaceGrants: InviteSpaceGrantInfo[];
+  teamGrants: InviteTeamGrantInfo[];
   expiresAt: string;
 };
 
