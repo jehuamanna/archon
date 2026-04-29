@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import bcrypt from "bcryptjs";
-import { and, eq, gt } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
   requireAuth,
@@ -10,20 +10,18 @@ import {
 } from "./auth.js";
 import { verifyAndTranslateRefresh } from "./auth-translate.js";
 import { getDb } from "./pg.js";
-import { notes as legacyNotes, spaces, users } from "./db/schema.js";
+import { teams, users } from "./db/schema.js";
 import {
-  ensureDefaultSpaceForOrg,
+  ensureDefaultTeamForOrg,
   ensureUserHasDefaultOrg,
-  getDefaultSpaceIdForOrg,
+  getDefaultTeamIdForOrg,
 } from "./org-defaults.js";
 import { registerBuiltinPluginRoutes } from "./builtin-plugin-routes.js";
 import { registerBundledDocsPublicRoutes } from "./bundled-docs-routes.js";
 import { registerMeAssetsRoutes } from "./me-assets-routes.js";
 import { registerMeRoutes } from "./me-routes.js";
 import { registerAdminRoutes } from "./admin-routes.js";
-import { registerAnnouncementRoutes } from "./announcement-routes.js";
 import { registerOrgRoutes } from "./org-routes.js";
-import { registerSpaceRoutes } from "./space-routes.js";
 import { registerTeamRoutes } from "./team-routes.js";
 import { registerWpnBatchRoutes } from "./wpn-batch-routes.js";
 import { registerWpnReadRoutes } from "./wpn-routes.js";
@@ -37,7 +35,6 @@ import { registerMdxStateWsRoutes } from "./mdx-state/ws.js";
 import { registerMdxSdkSpecRoutes } from "./mdx-sdk-spec/routes.js";
 import {
   registerRealtimeRoutes,
-  registerSpaceWsRoutes,
   registerYjsWsRoutes,
   registerRealtimeDiagnosticsRoute,
 } from "./realtime/index.js";
@@ -62,59 +59,42 @@ const refreshBody = z.object({
   refreshToken: z.string().min(10),
 });
 
-const syncPushBody = z.object({
-  collection: z.literal("notes"),
-  documents: z
-    .array(
-      z.object({
-        id: z.string().uuid(),
-        updatedAt: z.number(),
-        deleted: z.boolean(),
-        version: z.number().int(),
-        title: z.string(),
-        content: z.string(),
-        type: z.enum(["markdown", "text", "code", "image"]),
-      }),
-    )
-    .max(500),
-});
-
 type UserRow = typeof users.$inferSelect;
 
 /**
- * Phase 8: pick the space the access token should carry.
+ * Pick the team the access token should carry as `activeTeamId`.
  * Preference order:
- *   1. lastActiveSpaceByOrg[orgId] (still belongs to that org)
- *   2. lastActiveSpaceId (still belongs to that org)
- *   3. caller-provided fallback (typically getDefaultSpaceIdForOrg).
+ *   1. lastActiveTeamByOrg[orgId] (still belongs to that org)
+ *   2. lastActiveTeamId (still belongs to that org)
+ *   3. caller-provided fallback (typically getDefaultTeamIdForOrg).
  */
-async function resolveSessionSpaceId(
+async function resolveSessionTeamId(
   user: UserRow,
   orgId: string,
-  fallbackSpaceId: string,
+  fallbackTeamId: string,
 ): Promise<string> {
   const candidates: string[] = [];
-  const remembered = (user.lastActiveSpaceByOrg as Record<string, string> | null)?.[orgId];
+  const remembered = (user.lastActiveTeamByOrg as Record<string, string> | null)?.[orgId];
   if (typeof remembered === "string" && isUuid(remembered)) {
     candidates.push(remembered);
   }
   if (
-    typeof user.lastActiveSpaceId === "string" &&
-    isUuid(user.lastActiveSpaceId)
+    typeof user.lastActiveTeamId === "string" &&
+    isUuid(user.lastActiveTeamId)
   ) {
-    candidates.push(user.lastActiveSpaceId);
+    candidates.push(user.lastActiveTeamId);
   }
-  for (const spaceId of candidates) {
+  for (const teamId of candidates) {
     const rows = await getDb()
-      .select({ orgId: spaces.orgId })
-      .from(spaces)
-      .where(eq(spaces.id, spaceId))
+      .select({ orgId: teams.orgId })
+      .from(teams)
+      .where(eq(teams.id, teamId))
       .limit(1);
     if (rows[0]?.orgId === orgId) {
-      return spaceId;
+      return teamId;
     }
   }
-  return fallbackSpaceId;
+  return fallbackTeamId;
 }
 
 export function registerRoutes(
@@ -133,9 +113,7 @@ export function registerRoutes(
   registerBuiltinPluginRoutes(app, { jwtSecret });
   registerMcpDeviceAuthRoutes(app, { jwtSecret });
   registerOrgRoutes(app, { jwtSecret });
-  registerSpaceRoutes(app, { jwtSecret });
   registerTeamRoutes(app, { jwtSecret });
-  registerAnnouncementRoutes(app, { jwtSecret });
   registerAdminRoutes(app, { jwtSecret });
   registerMasterAdminRoutes(app, { jwtSecret });
   registerNotificationsRoutes(app, { jwtSecret });
@@ -143,7 +121,6 @@ export function registerRoutes(
   registerMdxStateWsRoutes(app, { jwtSecret });
   registerMdxSdkSpecRoutes(app);
   registerRealtimeRoutes(app, { jwtSecret });
-  registerSpaceWsRoutes(app, { jwtSecret });
   registerYjsWsRoutes(app, { jwtSecret });
   registerRealtimeDiagnosticsRoute(app, { jwtSecret });
   app.register(
@@ -174,7 +151,7 @@ export function registerRoutes(
     });
     await maybePromoteMasterAdmin(userId, emailLower);
     const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, emailLower);
-    const { spaceId: defaultSpaceId } = await ensureDefaultSpaceForOrg(
+    const { teamId: defaultTeamId } = await ensureDefaultTeamForOrg(
       defaultOrgId,
       userId,
     );
@@ -182,7 +159,7 @@ export function registerRoutes(
       sub: userId,
       email: emailLower,
       activeOrgId: defaultOrgId,
-      activeSpaceId: defaultSpaceId,
+      activeTeamId: defaultTeamId,
     };
     const jti = randomUUID();
     const token = signAccessToken(jwtSecret, payload);
@@ -198,7 +175,7 @@ export function registerRoutes(
       refreshToken,
       userId,
       defaultOrgId,
-      defaultSpaceId,
+      defaultTeamId,
     });
   });
 
@@ -228,7 +205,7 @@ export function registerRoutes(
     const userId = user.id;
     await maybePromoteMasterAdmin(userId, user.email);
     const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, user.email);
-    const { spaceId: defaultSpaceId } = await ensureDefaultSpaceForOrg(
+    const { teamId: defaultTeamId } = await ensureDefaultTeamForOrg(
       defaultOrgId,
       userId,
     );
@@ -237,20 +214,20 @@ export function registerRoutes(
         ? user.lastActiveOrgId
         : null;
     const loginActiveOrgId = lastActiveOrgId ?? defaultOrgId;
-    const fallbackSpaceId =
+    const fallbackTeamId =
       loginActiveOrgId === defaultOrgId
-        ? defaultSpaceId
-        : (await getDefaultSpaceIdForOrg(loginActiveOrgId)) ?? defaultSpaceId;
-    const loginActiveSpaceId = await resolveSessionSpaceId(
+        ? defaultTeamId
+        : (await getDefaultTeamIdForOrg(loginActiveOrgId)) ?? defaultTeamId;
+    const loginActiveTeamId = await resolveSessionTeamId(
       user,
       loginActiveOrgId,
-      fallbackSpaceId,
+      fallbackTeamId,
     );
     const payload = {
       sub: userId,
       email: user.email,
       activeOrgId: loginActiveOrgId,
-      activeSpaceId: loginActiveSpaceId,
+      activeTeamId: loginActiveTeamId,
     };
     const jti = randomUUID();
     const sessionVariant = parsed.data.client === "mcp" ? "mcp" : "default";
@@ -278,7 +255,7 @@ export function registerRoutes(
       refreshToken,
       userId,
       defaultOrgId,
-      defaultSpaceId,
+      defaultTeamId,
       mustSetPassword: user.mustSetPassword === true,
     });
   });
@@ -349,21 +326,21 @@ export function registerRoutes(
         (typeof user.defaultOrgId === "string" && user.defaultOrgId.length > 0
           ? user.defaultOrgId
           : undefined);
-      let refreshedActiveSpaceId: string | undefined;
+      let refreshedActiveTeamId: string | undefined;
       if (refreshedActiveOrgId) {
-        const fallbackSpaceId =
-          (await getDefaultSpaceIdForOrg(refreshedActiveOrgId)) ?? "";
-        const resolved = await resolveSessionSpaceId(
+        const fallbackTeamId =
+          (await getDefaultTeamIdForOrg(refreshedActiveOrgId)) ?? "";
+        const resolved = await resolveSessionTeamId(
           user,
           refreshedActiveOrgId,
-          fallbackSpaceId,
+          fallbackTeamId,
         );
-        refreshedActiveSpaceId = resolved.length > 0 ? resolved : undefined;
+        refreshedActiveTeamId = resolved.length > 0 ? resolved : undefined;
       } else if (
-        typeof user.lastActiveSpaceId === "string" &&
-        user.lastActiveSpaceId.length > 0
+        typeof user.lastActiveTeamId === "string" &&
+        user.lastActiveTeamId.length > 0
       ) {
-        refreshedActiveSpaceId = user.lastActiveSpaceId;
+        refreshedActiveTeamId = user.lastActiveTeamId;
       }
       const token = signAccessToken(
         jwtSecret,
@@ -371,7 +348,7 @@ export function registerRoutes(
           sub: p.sub,
           email: p.email,
           ...(refreshedActiveOrgId ? { activeOrgId: refreshedActiveOrgId } : {}),
-          ...(refreshedActiveSpaceId ? { activeSpaceId: refreshedActiveSpaceId } : {}),
+          ...(refreshedActiveTeamId ? { activeTeamId: refreshedActiveTeamId } : {}),
         },
         sessionVariant,
       );
@@ -387,71 +364,6 @@ export function registerRoutes(
         .status(401)
         .send({ error: "Invalid or expired refresh token" });
     }
-  });
-
-  // Legacy /sync/{push,pull} use the legacy `notes` table (0 rows in dump,
-  // schema preserved for round-tripping). Endpoints kept for back-compat.
-  app.post("/sync/push", async (request, reply) => {
-    const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) return;
-    const parsed = syncPushBody.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.status(400).send({ error: parsed.error.flatten() });
-    }
-    const userId = auth.sub;
-    const accepted: string[] = [];
-    const conflicts: Omit<typeof legacyNotes.$inferSelect, "userId">[] = [];
-
-    for (const doc of parsed.data.documents) {
-      const existingRows = await db()
-        .select()
-        .from(legacyNotes)
-        .where(and(eq(legacyNotes.id, doc.id), eq(legacyNotes.userId, userId)))
-        .limit(1);
-      const existing = existingRows[0];
-      if (existing && existing.updatedAt > doc.updatedAt) {
-        const { userId: _u, ...rest } = existing;
-        void _u;
-        conflicts.push(rest);
-        continue;
-      }
-      await db()
-        .insert(legacyNotes)
-        .values({ ...doc, userId })
-        .onConflictDoUpdate({
-          target: [legacyNotes.id, legacyNotes.userId],
-          set: { ...doc },
-        });
-      accepted.push(doc.id);
-    }
-    return reply.send({ accepted, conflicts });
-  });
-
-  app.get("/sync/pull", async (request, reply) => {
-    const auth = await requireAuth(request, reply, jwtSecret);
-    if (!auth) return;
-    const q = z
-      .object({
-        collection: z.literal("notes"),
-        since: z.coerce.number(),
-      })
-      .safeParse(request.query);
-    if (!q.success) {
-      return reply.status(400).send({ error: q.error.flatten() });
-    }
-    const userId = auth.sub;
-    const list = await db()
-      .select()
-      .from(legacyNotes)
-      .where(
-        and(eq(legacyNotes.userId, userId), gt(legacyNotes.updatedAt, q.data.since)),
-      )
-      .orderBy(legacyNotes.updatedAt);
-    const documents = list.map(({ userId: _u, ...rest }) => {
-      void _u;
-      return rest;
-    });
-    return reply.send({ documents, lastSync: Date.now() });
   });
 
   app.get("/health", async (_request, reply) => {

@@ -2,7 +2,7 @@
  * Auth boundary translation.
  *
  * Some pre-existing JWTs and MCP device tokens carry 24-char legacy hex IDs
- * in `sub`, `activeOrgId`, `activeSpaceId`. Each entity has a UUID PK and a
+ * in `sub`, `activeOrgId`, `activeTeamId`. Each entity has a UUID PK and a
  * permanent `legacy_object_id_map` entry that lets the boundary translate
  * the legacy form to its UUID equivalent so handlers downstream see UUIDs
  * only. Tokens issued with UUID `sub` skip translation; an LRU in
@@ -51,8 +51,8 @@ export async function verifyAndTranslateRefresh(
 
 /**
  * In-place translation of every id field that may carry a legacy ObjectId hex.
- * Currently: `sub` (users), `activeOrgId` (organizations), `activeSpaceId`
- * (spaces). Returns a *new* object — does not mutate the input.
+ * Currently: `sub` (users), `activeOrgId` (organizations), `activeTeamId`
+ * (teams). Returns a *new* object — does not mutate the input.
  */
 export async function translatePayloadIds<T extends JwtPayload>(payload: T): Promise<T> {
   // Work on a shallow copy so callers don't see mid-translation state if
@@ -62,8 +62,8 @@ export async function translatePayloadIds<T extends JwtPayload>(payload: T): Pro
   if (typeof payload.activeOrgId === "string" && payload.activeOrgId.length > 0) {
     out.activeOrgId = await ensureUuid("organizations", payload.activeOrgId);
   }
-  if (typeof payload.activeSpaceId === "string" && payload.activeSpaceId.length > 0) {
-    out.activeSpaceId = await ensureUuid("spaces", payload.activeSpaceId);
+  if (typeof payload.activeTeamId === "string" && payload.activeTeamId.length > 0) {
+    out.activeTeamId = await ensureUuid("teams", payload.activeTeamId);
   }
   return out;
 }

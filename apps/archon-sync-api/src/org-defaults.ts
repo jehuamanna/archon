@@ -1,25 +1,39 @@
 /**
- * Default-org / default-space scaffolding.
+ * Default-org / default-department / default-team scaffolding.
  *
- * `ensureUserHasDefaultOrg` and `ensureDefaultSpaceForOrg` are idempotent
- * helpers invoked on demand when org-routes need to land a new user into a
- * sane default. Migration state is owned by drizzle-kit.
+ * Idempotent helpers invoked when a user first lands without a usable
+ * Org/Team context. Migration state itself is owned by drizzle-kit; these
+ * helpers only do row inserts.
+ *
+ * Bootstrap chain for a brand-new user:
+ *   ensureUserHasDefaultOrg
+ *     → creates org + admin org_membership
+ *     → calls ensureDefaultDepartmentForOrg (creates "General" department)
+ *     → calls ensureDefaultTeamForOrg (creates "Default" team in General +
+ *       admin team_membership for the owner)
+ *     → stamps users.default_org_id
+ *
+ * The Department layer is NOT NULL on `teams.department_id`, so every team
+ * needs one. We auto-create a single "General" department per org rather
+ * than forcing the user to think about departments before they've created
+ * anything.
  */
 import { randomUUID } from "node:crypto";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { getDb, withTx } from "./pg.js";
 import {
+  departmentMemberships,
+  departments,
   organizations,
   orgMemberships,
-  spaceMemberships,
-  spaces,
+  teamMemberships,
+  teams,
   users,
-  wpnExplorerState,
-  wpnNotes,
-  wpnProjects,
-  wpnWorkspaces,
 } from "./db/schema.js";
 import { isUuid } from "./db/legacy-id-map.js";
+
+const DEFAULT_DEPARTMENT_NAME = "General";
+const DEFAULT_TEAM_NAME = "Default";
 
 function deriveSlugCandidate(email: string): string {
   const local = email.split("@", 1)[0] ?? email;
@@ -31,99 +45,138 @@ function deriveSlugCandidate(email: string): string {
 }
 
 /**
- * Looks up the default-kind space id for an org. Returns `null` when the
- * org has no default space (unusual; normally created at first user-default
- * resolution time).
+ * Look up the org's default-named department id. Returns null when none
+ * exists; callers that need it created should use `ensureDefaultDepartmentForOrg`.
  */
-export async function getDefaultSpaceIdForOrg(
+export async function getDefaultDepartmentIdForOrg(
   orgId: string,
 ): Promise<string | null> {
   if (!isUuid(orgId)) return null;
   const rows = await getDb()
-    .select({ id: spaces.id })
-    .from(spaces)
-    .where(and(eq(spaces.orgId, orgId), eq(spaces.kind, "default")))
+    .select({ id: departments.id })
+    .from(departments)
+    .where(
+      and(eq(departments.orgId, orgId), eq(departments.name, DEFAULT_DEPARTMENT_NAME)),
+    )
     .limit(1);
   return rows[0]?.id ?? null;
 }
 
 /**
- * Idempotent: returns the org's default-kind space, creating it if missing
- * and enrolling `ownerUserId` as Space Owner. Also stamps any legacy WPN
- * docs owned by `ownerUserId` (no `org_id` / `space_id`) with the resolved
- * pair so scope filters keep matching post-cutover.
+ * Look up the default team id for an org — the team named `DEFAULT_TEAM_NAME`
+ * inside the org's default department. Returns null if either is missing.
  */
-export async function ensureDefaultSpaceForOrg(
+export async function getDefaultTeamIdForOrg(orgId: string): Promise<string | null> {
+  if (!isUuid(orgId)) return null;
+  const rows = await getDb()
+    .select({ id: teams.id })
+    .from(teams)
+    .where(and(eq(teams.orgId, orgId), eq(teams.name, DEFAULT_TEAM_NAME)))
+    .limit(1);
+  return rows[0]?.id ?? null;
+}
+
+/**
+ * Idempotent: returns the org's "General" department id, creating it and
+ * enrolling `ownerUserId` as admin if missing.
+ */
+export async function ensureDefaultDepartmentForOrg(
   orgId: string,
   ownerUserId: string,
-): Promise<{ spaceId: string; created: boolean }> {
+): Promise<{ departmentId: string; created: boolean }> {
   return withTx(async (tx) => {
     const existing = await tx
-      .select({ id: spaces.id })
-      .from(spaces)
-      .where(and(eq(spaces.orgId, orgId), eq(spaces.kind, "default")))
+      .select({ id: departments.id })
+      .from(departments)
+      .where(
+        and(
+          eq(departments.orgId, orgId),
+          eq(departments.name, DEFAULT_DEPARTMENT_NAME),
+        ),
+      )
       .limit(1);
-    let spaceId = existing[0]?.id;
+    let departmentId = existing[0]?.id;
     let created = false;
-    if (!spaceId) {
-      spaceId = randomUUID();
-      await tx.insert(spaces).values({
-        id: spaceId,
+    if (!departmentId) {
+      departmentId = randomUUID();
+      await tx.insert(departments).values({
+        id: departmentId,
         orgId,
-        name: "Default",
-        kind: "default",
+        name: DEFAULT_DEPARTMENT_NAME,
+        colorToken: null,
         createdByUserId: ownerUserId,
         createdAt: new Date(),
       });
       created = true;
     }
     await tx
-      .insert(spaceMemberships)
+      .insert(departmentMemberships)
       .values({
-        spaceId,
+        departmentId,
         userId: ownerUserId,
-        role: "owner",
+        role: "admin",
         addedByUserId: ownerUserId,
         joinedAt: new Date(),
       })
       .onConflictDoNothing({
-        target: [spaceMemberships.spaceId, spaceMemberships.userId],
+        target: [departmentMemberships.departmentId, departmentMemberships.userId],
       });
-    // Stamp legacy WPN docs lacking org/space scope.
+    return { departmentId, created };
+  });
+}
+
+/**
+ * Idempotent: returns the org's "Default" team id, creating it (under the
+ * org's default department) and enrolling `ownerUserId` as admin if missing.
+ * Auto-creates the default department if it doesn't exist yet.
+ */
+export async function ensureDefaultTeamForOrg(
+  orgId: string,
+  ownerUserId: string,
+): Promise<{ teamId: string; departmentId: string; created: boolean }> {
+  const { departmentId } = await ensureDefaultDepartmentForOrg(orgId, ownerUserId);
+  return withTx(async (tx) => {
+    const existing = await tx
+      .select({ id: teams.id })
+      .from(teams)
+      .where(and(eq(teams.orgId, orgId), eq(teams.name, DEFAULT_TEAM_NAME)))
+      .limit(1);
+    let teamId = existing[0]?.id;
+    let created = false;
+    if (!teamId) {
+      teamId = randomUUID();
+      await tx.insert(teams).values({
+        id: teamId,
+        orgId,
+        departmentId,
+        name: DEFAULT_TEAM_NAME,
+        colorToken: null,
+        createdByUserId: ownerUserId,
+        createdAt: new Date(),
+      });
+      created = true;
+    }
     await tx
-      .update(wpnWorkspaces)
-      .set({ orgId, spaceId })
-      .where(
-        and(eq(wpnWorkspaces.userId, ownerUserId), sql`${wpnWorkspaces.orgId} IS NULL`),
-      );
-    await tx
-      .update(wpnProjects)
-      .set({ orgId, spaceId })
-      .where(
-        and(eq(wpnProjects.userId, ownerUserId), sql`${wpnProjects.orgId} IS NULL`),
-      );
-    await tx
-      .update(wpnNotes)
-      .set({ orgId, spaceId })
-      .where(and(eq(wpnNotes.userId, ownerUserId), sql`${wpnNotes.orgId} IS NULL`));
-    await tx
-      .update(wpnExplorerState)
-      .set({ orgId, spaceId })
-      .where(
-        and(
-          eq(wpnExplorerState.userId, ownerUserId),
-          sql`${wpnExplorerState.orgId} IS NULL`,
-        ),
-      );
-    return { spaceId, created };
+      .insert(teamMemberships)
+      .values({
+        teamId,
+        userId: ownerUserId,
+        role: "admin",
+        addedByUserId: ownerUserId,
+        joinedAt: new Date(),
+      })
+      .onConflictDoNothing({
+        target: [teamMemberships.teamId, teamMemberships.userId],
+      });
+    return { teamId, departmentId, created };
   });
 }
 
 /**
  * Idempotent: ensures `userId` has a `default_org_id`. If they already do,
- * returns it. Otherwise creates an Org + admin membership + default space
- * and stamps the user. Slug collisions are resolved by appending a random
- * suffix.
+ * returns it. Otherwise creates an Org + admin membership + default
+ * department + default team and stamps the user. Slug collisions are
+ * resolved by appending a random suffix.
  */
 export async function ensureUserHasDefaultOrg(
   userId: string,
@@ -175,6 +228,6 @@ export async function ensureUserHasDefaultOrg(
     .update(users)
     .set({ defaultOrgId: orgId })
     .where(eq(users.id, userId));
-  await ensureDefaultSpaceForOrg(orgId, userId);
+  await ensureDefaultTeamForOrg(orgId, userId);
   return { orgId, created: true };
 }
