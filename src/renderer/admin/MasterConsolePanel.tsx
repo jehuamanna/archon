@@ -128,18 +128,28 @@ function MasterAdminsSection(): React.ReactElement {
       <ul>
         {admins.map((a) => {
           const isSelf = a.userId === cloudAuth.userId;
+          const canDemote = !isSelf && !a.isBootstrap && admins.length > 1;
+          let lockReason: string | null = null;
+          if (a.isBootstrap) lockReason = "Bootstrap master";
+          else if (isSelf) lockReason = "Cannot demote self";
+          else if (admins.length <= 1) lockReason = "Last master";
           return (
             <li key={a.userId} className={row}>
               <div className="flex min-w-0 flex-col">
                 <span className="truncate text-[12px]">
                   {a.displayName ?? a.email}
+                  {a.isBootstrap ? (
+                    <span className="ml-2 rounded bg-amber-500/20 px-1 text-[10px] text-amber-700 dark:text-amber-200">
+                      first master
+                    </span>
+                  ) : null}
                 </span>
                 <span className={muted}>
                   {a.email}
                   {isSelf ? " · you" : ""}
                 </span>
               </div>
-              {admins.length > 1 && !isSelf ? (
+              {canDemote ? (
                 <button
                   type="button"
                   className={btnDanger}
@@ -148,9 +158,7 @@ function MasterAdminsSection(): React.ReactElement {
                   Demote
                 </button>
               ) : (
-                <span className={muted}>
-                  {admins.length <= 1 ? "Last master" : "Cannot demote self"}
-                </span>
+                <span className={muted}>{lockReason}</span>
               )}
             </li>
           );

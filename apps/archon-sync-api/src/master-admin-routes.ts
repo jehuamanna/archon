@@ -13,7 +13,7 @@ import {
   sql,
 } from "drizzle-orm";
 import { z } from "zod";
-import { requireMasterAdmin } from "./admin-auth.js";
+import { isBootstrapMasterAdminEmail, requireMasterAdmin } from "./admin-auth.js";
 import { getDb } from "./pg.js";
 import {
   masterInvites,
@@ -111,6 +111,7 @@ export function registerMasterAdminRoutes(
         userId: u.id,
         email: u.email,
         displayName: u.displayName ?? null,
+        isBootstrap: isBootstrapMasterAdminEmail(u.email),
       })),
     });
   });
@@ -156,9 +157,19 @@ export function registerMasterAdminRoutes(
       .where(eq(users.email, email))
       .limit(1);
     if (existingRows[0]) {
-      return reply.status(409).send({
-        error:
-          "Email already registered; pass userId to promote the existing account",
+      // Email already maps to a user — promote-in-place instead of forcing
+      // the operator to look up a UUID. Idempotent if they're already a
+      // master admin.
+      const u = existingRows[0];
+      await db()
+        .update(users)
+        .set({ isMasterAdmin: true })
+        .where(eq(users.id, u.id));
+      return reply.send({
+        userId: u.id,
+        email: u.email,
+        isMasterAdmin: true,
+        createdUser: false,
       });
     }
     const password = parsed.data.password ?? generateTempPassword();
@@ -180,7 +191,17 @@ export function registerMasterAdminRoutes(
     });
   });
 
-  /** Master-only: demote another master admin. Blocks removing the last one. */
+  /**
+   * Master-only: demote another master admin.
+   *
+   * Two safety rails:
+   *  - Cannot demote the bootstrap admin (the account whose email matches
+   *    `ARCHON_MASTER_ADMIN_EMAIL`). `ensureMasterAdmin` re-promotes that row
+   *    on every boot, so demoting it would either be churn-only or, if the
+   *    env var is later changed, leave the platform without its operator.
+   *  - Cannot demote the last remaining master admin (count guard kept as a
+   *    fallback for deployments that boot without the env var set).
+   */
   app.delete("/master/admins/:userId", async (request, reply) => {
     const ctx = await requireMasterAdmin(request, reply, jwtSecret);
     if (!ctx) return;
@@ -188,20 +209,30 @@ export function registerMasterAdminRoutes(
     if (!isUuid(userId)) {
       return reply.status(400).send({ error: "Invalid user id" });
     }
+    const targetRows = await db()
+      .select({ id: users.id, email: users.email, isMasterAdmin: users.isMasterAdmin })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const target = targetRows[0];
+    if (!target || target.isMasterAdmin !== true) {
+      return reply.status(404).send({ error: "Master admin not found" });
+    }
+    if (isBootstrapMasterAdminEmail(target.email)) {
+      return reply
+        .status(409)
+        .send({ error: "Cannot demote the bootstrap master admin" });
+    }
     const total = await countMasterAdmins();
     if (total <= 1) {
       return reply
         .status(409)
         .send({ error: "Cannot demote the last master admin" });
     }
-    const result = await db()
+    await db()
       .update(users)
       .set({ isMasterAdmin: null })
-      .where(and(eq(users.id, userId), eq(users.isMasterAdmin, true)))
-      .returning({ id: users.id });
-    if (result.length === 0) {
-      return reply.status(404).send({ error: "Master admin not found" });
-    }
+      .where(eq(users.id, target.id));
     return reply.status(204).send();
   });
 
@@ -287,24 +318,26 @@ export function registerMasterAdminRoutes(
         .where(eq(users.email, email))
         .limit(1);
       if (existing[0]) {
-        return reply.status(409).send({
-          error:
-            "Email already registered; pass userId to promote that account",
+        // Email already maps to a user (e.g. another org's member, or a
+        // master admin). Promote-in-place instead of forcing the operator
+        // to look up a UUID — the audit action below stays `promote`,
+        // distinct from `create_with_password`, so attribution is clean.
+        userId = existing[0].id;
+      } else {
+        const password = parsed.data.password ?? generateTempPassword();
+        const passwordHash = await bcrypt.hash(password, 12);
+        userId = randomUUID();
+        await db().insert(users).values({
+          id: userId,
+          email,
+          passwordHash,
+          mustSetPassword: parsed.data.password ? false : true,
+          lockedOrgId: orgId,
+          defaultOrgId: orgId,
         });
+        createdUser = true;
+        mintedPassword = parsed.data.password ? undefined : password;
       }
-      const password = parsed.data.password ?? generateTempPassword();
-      const passwordHash = await bcrypt.hash(password, 12);
-      userId = randomUUID();
-      await db().insert(users).values({
-        id: userId,
-        email,
-        passwordHash,
-        mustSetPassword: parsed.data.password ? false : true,
-        lockedOrgId: orgId,
-        defaultOrgId: orgId,
-      });
-      createdUser = true;
-      mintedPassword = parsed.data.password ? undefined : password;
     }
 
     await db()
