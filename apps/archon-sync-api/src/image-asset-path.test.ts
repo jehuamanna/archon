@@ -9,31 +9,26 @@ import {
 
 const VALID_PARTS = {
   orgId: "org_abc-123",
-  spaceId: "space_def-456",
-  workspaceId: "11111111-1111-4111-8111-111111111111",
   projectId: "22222222-2222-4222-8222-222222222222",
   noteId: "33333333-3333-4333-8333-333333333333",
 };
 
-test("buildImageAssetKey returns the documented 5-segment shape (no extension)", () => {
+test("buildImageAssetKey returns the documented 3-segment shape (no extension)", () => {
   const key = buildImageAssetKey(VALID_PARTS);
   assert.strictEqual(
     key,
-    "org_abc-123/space_def-456/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333",
+    "org_abc-123/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333",
   );
-  assert.strictEqual(key.split("/").length, 5);
+  assert.strictEqual(key.split("/").length, 3);
 });
 
-test("buildImageAssetKey rejects path traversal in orgId / spaceId", () => {
+test("buildImageAssetKey rejects path traversal in orgId", () => {
   assert.throws(() => buildImageAssetKey({ ...VALID_PARTS, orgId: "../evil" }));
-  assert.throws(() => buildImageAssetKey({ ...VALID_PARTS, spaceId: "a/b" }));
+  assert.throws(() => buildImageAssetKey({ ...VALID_PARTS, orgId: "a/b" }));
   assert.throws(() => buildImageAssetKey({ ...VALID_PARTS, orgId: "" }));
 });
 
-test("buildImageAssetKey rejects non-UUID workspace/project/note ids", () => {
-  assert.throws(() =>
-    buildImageAssetKey({ ...VALID_PARTS, workspaceId: "not-a-uuid" }),
-  );
+test("buildImageAssetKey rejects non-UUID project/note ids", () => {
   assert.throws(() =>
     buildImageAssetKey({ ...VALID_PARTS, projectId: "11111111" }),
   );
@@ -52,13 +47,13 @@ test("parseImageAssetKey round-trips a built key", () => {
 
 test("parseImageAssetKey rejects malformed keys", () => {
   assert.strictEqual(parseImageAssetKey(""), null);
-  assert.strictEqual(parseImageAssetKey("a/b/c/d"), null);
+  assert.strictEqual(parseImageAssetKey("a/b"), null);
   assert.strictEqual(
-    parseImageAssetKey("org/space/ws/proj/note/extra"),
+    parseImageAssetKey("org/proj/note/extra/extra2"),
     null,
   );
   assert.strictEqual(
-    parseImageAssetKey("org/space/not-uuid/proj/note"),
+    parseImageAssetKey("org/not-uuid/note"),
     null,
   );
 });
@@ -67,9 +62,9 @@ test("buildImageAssetKey with variant=thumb appends the /thumb segment", () => {
   const key = buildImageAssetKey({ ...VALID_PARTS, variant: "thumb" });
   assert.strictEqual(
     key,
-    "org_abc-123/space_def-456/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333/thumb",
+    "org_abc-123/22222222-2222-4222-8222-222222222222/33333333-3333-4333-8333-333333333333/thumb",
   );
-  assert.strictEqual(key.split("/").length, 6);
+  assert.strictEqual(key.split("/").length, 4);
 });
 
 test("parseImageAssetKey round-trips a thumb key and distinguishes from an original", () => {
@@ -85,7 +80,7 @@ test("parseImageAssetKey round-trips a thumb key and distinguishes from an origi
   });
 });
 
-test("parseImageAssetKey rejects a 6-segment key whose final segment is not 'thumb'", () => {
+test("parseImageAssetKey rejects a 4-segment key whose final segment is not 'thumb'", () => {
   const base = buildImageAssetKey({ ...VALID_PARTS, variant: "original" });
   assert.strictEqual(parseImageAssetKey(`${base}/other`), null);
 });

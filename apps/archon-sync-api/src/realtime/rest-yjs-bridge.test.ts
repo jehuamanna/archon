@@ -9,7 +9,7 @@
  * inside one transaction. This test asserts:
  *   1. an open Hocuspocus client receives the new content via Yjs
  *      broadcast within the configured debounce window;
- *   2. once the autosave fires, `wpn_notes.content` matches the REST-
+ *   2. once the autosave fires, `notes.content` matches the REST-
  *      written value (i.e. the bridge no longer reverts the row).
  */
 import "../load-root-env.js";
@@ -23,14 +23,15 @@ import { eq } from "drizzle-orm";
 import { ARCHON_SYNC_API_V1_PREFIX } from "../api-v1-prefix.js";
 import { buildSyncApiApp } from "../build-app.js";
 import { getDb } from "../pg.js";
-import { wpnNotes } from "../db/schema.js";
+import { notes } from "../db/schema.js";
 import {
   setupPgTestSchema,
   type TestPgSchemaContext,
   factoryUser,
   factoryOrg,
-  factorySpace,
-  factoryWorkspace,
+  factoryDepartment,
+  factoryTeam,
+  factoryTeamMembership,
   factoryProject,
 } from "../test-pg-helper.js";
 import { signToken } from "../auth.js";
@@ -72,31 +73,44 @@ test(
     const userEmail = `mcp-race-${Date.now()}@p4.test`;
     const userId = await factoryUser({ email: userEmail });
     const orgId = await factoryOrg({ ownerUserId: userId });
-    const spaceId = await factorySpace({ orgId, ownerUserId: userId });
-    const workspaceId = await factoryWorkspace({ userId, orgId, spaceId });
-    const projectId = await factoryProject({
-      userId,
-      workspaceId,
+    const departmentId = await factoryDepartment({
       orgId,
-      spaceId,
+      createdByUserId: userId,
+    });
+    const teamId = await factoryTeam({
+      orgId,
+      departmentId,
+      createdByUserId: userId,
+    });
+    await factoryTeamMembership({
+      teamId,
+      userId,
+      addedByUserId: userId,
+      role: "admin",
+    });
+    const projectId = await factoryProject({
+      orgId,
+      creatorUserId: userId,
+      teamId,
+      teamRole: "owner",
     });
     const noteId = randomUUID();
     const t0 = Date.now();
     const seedContent = "seed body before MCP write";
-    await getDb().insert(wpnNotes).values({
+    await getDb().insert(notes).values({
       id: noteId,
-      userId,
       orgId,
-      spaceId,
-      project_id: projectId,
-      parent_id: null,
+      projectId,
+      parentId: null,
+      createdByUserId: userId,
+      updatedByUserId: userId,
       type: "markdown",
       title: "Race test note",
       content: seedContent,
-      sibling_index: 0,
-      created_at_ms: t0,
-      updated_at_ms: t0,
-      deleted: false,
+      metadata: null,
+      siblingIndex: 0,
+      createdAtMs: t0,
+      updatedAtMs: t0,
     });
 
     const app = await buildSyncApiApp({
@@ -108,6 +122,9 @@ test(
     const addr = app.server.address() as AddressInfo;
     const wsBase = `ws://127.0.0.1:${addr.port}/api/v1/ws/yjs`;
 
+    // The `typ: "spaceWs"` JWT name is vestigial after the spaces squash —
+    // identity-only token. Per-note authorisation runs at WS open in
+    // yjs-ws.ts onAuthenticate.
     const wsToken = signToken(
       jwtSecret,
       {
@@ -116,7 +133,6 @@ test(
         typ: "spaceWs",
         principal: { type: "user" },
         activeOrgId: orgId,
-        activeSpaceId: spaceId,
       },
       "5m",
     );
@@ -128,7 +144,6 @@ test(
         typ: "access",
         principal: { type: "user" },
         activeOrgId: orgId,
-        activeSpaceId: spaceId,
       },
       "5m",
     );
@@ -148,7 +163,7 @@ test(
     try {
       await waitFor(() => provClient.synced && provClient.isConnected, 8000);
       // After sync, the server's onLoadDocument seeded Y.Text("content")
-      // from `wpn_notes.content`, so the client sees the seed body.
+      // from `notes.content`, so the client sees the seed body.
       assert.strictEqual(
         docClient.getText("content").toString(),
         seedContent,
@@ -175,15 +190,15 @@ test(
       );
 
       // Assertion 2: after the autosave debounce fires, the bridge keeps
-      // wpn_notes.content in sync with the (REST-written) Yjs state — the
+      // notes.content in sync with the (REST-written) Yjs state — the
       // pre-fix bug was that this would revert to the editor's stale
       // in-memory copy of seedContent.
       await waitFor(
         async () => {
           const rows = await getDb()
-            .select({ content: wpnNotes.content })
-            .from(wpnNotes)
-            .where(eq(wpnNotes.id, noteId))
+            .select({ content: notes.content })
+            .from(notes)
+            .where(eq(notes.id, noteId))
             .limit(1);
           return rows[0]?.content === newContent;
         },
@@ -195,15 +210,15 @@ test(
       await new Promise((r) => setTimeout(r, 600));
       const finalRow = (
         await getDb()
-          .select({ content: wpnNotes.content })
-          .from(wpnNotes)
-          .where(eq(wpnNotes.id, noteId))
+          .select({ content: notes.content })
+          .from(notes)
+          .where(eq(notes.id, noteId))
           .limit(1)
       )[0];
       assert.strictEqual(
         finalRow?.content,
         newContent,
-        "wpn_notes.content reverted after autosave — Bug-8fa027 regressed",
+        "notes.content reverted after autosave — Bug-8fa027 regressed",
       );
     } finally {
       provClient.disconnect();
