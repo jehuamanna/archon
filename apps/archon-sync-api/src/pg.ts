@@ -22,23 +22,27 @@ let connectInFlight: Promise<NodePgDatabase<typeof schema>> | null = null;
 function pgPoolOptions(): PoolConfig {
   const serverless =
     process.env.VERCEL === "1" || process.env.ARCHON_SYNC_API_SERVERLESS === "1";
-  const connectionString =
+  const rawConnectionString =
     (typeof process.env.DATABASE_URL === "string" && process.env.DATABASE_URL.trim()) ||
     "postgres://archon:archon@localhost:5432/archon_sync";
   // Managed Postgres providers (Supabase, Neon, Railway, Heroku, RDS w/o
   // bundled CA) speak TLS but their intermediate certs aren't in Node's
   // built-in CA bundle — pg-connection-string ≥3 maps `sslmode=require`
   // to `verify-full`, which then fails with `SELF_SIGNED_CERT_IN_CHAIN`.
-  // Honor that intent explicitly: encrypt the wire, but skip CA pinning
-  // unless the operator opted into strict mode with `verify-ca`/`verify-full`.
-  const lc = connectionString.toLowerCase();
-  const wantsTls = /[?&]sslmode=(require|prefer|no-verify)\b/.test(lc);
+  // Strip the `sslmode` query param so pg-connection-string doesn't derive
+  // its own ssl config (which would override our explicit one), then drive
+  // TLS exclusively from the `ssl` field below. Strict mode is opt-in via
+  // `sslmode=verify-ca` / `verify-full` — those we leave on the URL so the
+  // strict path still takes effect.
+  const lc = rawConnectionString.toLowerCase();
+  const wantsRelaxedTls = /[?&]sslmode=(require|prefer|no-verify)\b/.test(lc);
   const strictTls = /[?&]sslmode=(verify-ca|verify-full)\b/.test(lc);
-  const ssl = strictTls
-    ? undefined
-    : wantsTls
-      ? { rejectUnauthorized: false }
-      : undefined;
+  let connectionString = rawConnectionString;
+  let ssl: PoolConfig["ssl"];
+  if (wantsRelaxedTls && !strictTls) {
+    connectionString = stripSslmode(rawConnectionString);
+    ssl = { rejectUnauthorized: false };
+  }
   return {
     connectionString,
     ...(ssl ? { ssl } : {}),
@@ -47,6 +51,19 @@ function pgPoolOptions(): PoolConfig {
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 10_000,
   };
+}
+
+/** Remove `sslmode=…` from a Postgres URL's query string. Preserves all other params. */
+function stripSslmode(url: string): string {
+  const qIdx = url.indexOf("?");
+  if (qIdx === -1) return url;
+  const base = url.slice(0, qIdx);
+  const query = url.slice(qIdx + 1);
+  const kept = query
+    .split("&")
+    .filter((p) => !/^sslmode=/i.test(p))
+    .join("&");
+  return kept.length > 0 ? `${base}?${kept}` : base;
 }
 
 /**
