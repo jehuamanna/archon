@@ -159,30 +159,43 @@ export function registerRoutes(
     }
     const userId = user.id;
     await maybePromoteMasterAdmin(userId, user.email);
-    const { orgId: defaultOrgId } = await ensureUserHasDefaultOrg(userId, user.email);
-    const { teamId: defaultTeamId } = await ensureDefaultTeamForOrg(
-      defaultOrgId,
-      userId,
-    );
+    // Master admins are platform-wide; no auto-personal-org. Their JWT
+    // lands without an org/team claim and they switch into a real org via
+    // the master console (and create the org's first admin via
+    // POST /master/orgs/:orgId/admins). Re-read the master flag because
+    // maybePromoteMasterAdmin may have just flipped it.
+    const refreshedUserRows = await db()
+      .select({ isMasterAdmin: users.isMasterAdmin })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
+    const isMaster = refreshedUserRows[0]?.isMasterAdmin === true;
+    const defaultOrgId = isMaster
+      ? ""
+      : (await ensureUserHasDefaultOrg(userId, user.email)).orgId;
+    const defaultTeamId =
+      defaultOrgId.length > 0
+        ? (await ensureDefaultTeamForOrg(defaultOrgId, userId)).teamId
+        : "";
     const lastActiveOrgId =
       typeof user.lastActiveOrgId === "string" && user.lastActiveOrgId.length > 0
         ? user.lastActiveOrgId
         : null;
-    const loginActiveOrgId = lastActiveOrgId ?? defaultOrgId;
-    const fallbackTeamId =
-      loginActiveOrgId === defaultOrgId
-        ? defaultTeamId
-        : (await getDefaultTeamIdForOrg(loginActiveOrgId)) ?? defaultTeamId;
-    const loginActiveTeamId = await resolveSessionTeamId(
-      user,
-      loginActiveOrgId,
-      fallbackTeamId,
-    );
+    const loginActiveOrgId = lastActiveOrgId ?? (defaultOrgId.length > 0 ? defaultOrgId : null);
+    const loginActiveTeamId = loginActiveOrgId
+      ? await resolveSessionTeamId(
+          user,
+          loginActiveOrgId,
+          loginActiveOrgId === defaultOrgId
+            ? defaultTeamId
+            : (await getDefaultTeamIdForOrg(loginActiveOrgId)) ?? defaultTeamId,
+        )
+      : "";
     const payload = {
       sub: userId,
       email: user.email,
-      activeOrgId: loginActiveOrgId,
-      activeTeamId: loginActiveTeamId,
+      ...(loginActiveOrgId ? { activeOrgId: loginActiveOrgId } : {}),
+      ...(loginActiveTeamId ? { activeTeamId: loginActiveTeamId } : {}),
     };
     const jti = randomUUID();
     const sessionVariant = parsed.data.client === "mcp" ? "mcp" : "default";
@@ -209,8 +222,8 @@ export function registerRoutes(
       token,
       refreshToken,
       userId,
-      defaultOrgId,
-      defaultTeamId,
+      defaultOrgId: defaultOrgId.length > 0 ? defaultOrgId : null,
+      defaultTeamId: defaultTeamId.length > 0 ? defaultTeamId : null,
       mustSetPassword: user.mustSetPassword === true,
     });
   });

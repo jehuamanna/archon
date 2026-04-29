@@ -148,11 +148,11 @@ export function OrgSwitcher(): React.ReactElement | null {
             })
           )}
           <div className="my-1 border-t border-border/50" />
-          {orgState.lockedOrgId ? (
-            <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-              Organization creation is disabled for invited members.
-            </div>
-          ) : creating ? (
+          {/* Org creation is master-only. Org admins manage their own org's
+              membership; sibling orgs are provisioned platform-wide via the
+              master console. The footer below only renders for master admins;
+              everyone else just sees the org list above. */}
+          {!cloudAuth.isMasterAdmin ? null : creating ? (
             <form
               className="flex items-center gap-1 px-2 py-1.5"
               onSubmit={handleCreate}

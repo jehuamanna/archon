@@ -177,6 +177,13 @@ export async function ensureDefaultTeamForOrg(
  * returns it. Otherwise creates an Org + admin membership + default
  * department + default team and stamps the user. Slug collisions are
  * resolved by appending a random suffix.
+ *
+ * Skipped for master admins: under admin-driven onboarding (public signup
+ * disabled, only master admins create orgs via `POST /orgs`), a master
+ * admin is platform-wide by design and shouldn't get an auto-created
+ * "personal org" sneaked in via login. Returns `{orgId: "", created:false}`
+ * for masters; callers that need a default-org-on-record for the master
+ * should mint one explicitly via the master console.
  */
 export async function ensureUserHasDefaultOrg(
   userId: string,
@@ -186,13 +193,20 @@ export async function ensureUserHasDefaultOrg(
     throw new Error("ensureUserHasDefaultOrg: userId must be a uuid");
   }
   const existingRows = await getDb()
-    .select({ defaultOrgId: users.defaultOrgId })
+    .select({
+      defaultOrgId: users.defaultOrgId,
+      isMasterAdmin: users.isMasterAdmin,
+    })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
   const existing = existingRows[0];
   if (existing?.defaultOrgId) {
     return { orgId: existing.defaultOrgId, created: false };
+  }
+  if (existing?.isMasterAdmin === true) {
+    // Master admins manage orgs from the master console; no auto-personal org.
+    return { orgId: "", created: false };
   }
   const baseSlug = deriveSlugCandidate(email);
   let slug = baseSlug;
