@@ -54,14 +54,13 @@ export function buildContentSecurityPolicy(): string {
     ...r2Sources,
   ];
   if (process.env.NODE_ENV !== "production") {
-    connectParts.push(
-      "ws://localhost:*",
-      "ws://127.0.0.1:*",
-      "wss://localhost:*",
-      "wss://127.0.0.1:*",
-      "http://localhost:*",
-      "http://127.0.0.1:*",
-    );
+    /**
+     * Scheme-only sources allow any `http:` / `ws:` origin so dev access from
+     * LAN IPs (e.g. `http://172.16.5.144:3000` hitting sync-api on the same
+     * host:4010) isn't blocked. Production keeps the explicit `syncOrigin`
+     * allowlist above.
+     */
+    connectParts.push("http:", "https:", "ws:", "wss:");
   }
 
   const imgParts = ["'self'", "data:", "blob:", "archon-asset:", ...r2Sources];

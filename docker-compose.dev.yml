@@ -1,0 +1,128 @@
+# One-click dev stack: Postgres + Redis + sync-api (tsx watch) + web (next dev).
+# Mirrors `npm run dev:full` but with PG + Redis containerised so the host doesn't
+# need a local Postgres or Redis install. Source is bind-mounted from the repo,
+# so file edits hot-reload via `tsx watch` and `next dev`.
+#
+# Prereq (one-time, on host):
+#   npm install        # installs node_modules used by the bind-mounted containers
+#
+# Up:    npm run dev:up         (foreground, tail logs)
+#        npm run dev:up:detached
+# Down:  npm run dev:down
+# Logs:  npm run dev:logs
+#
+# Ports:
+#   web:      http://localhost:3000
+#   sync-api: http://localhost:4010 (health: /health, API: /api/v1/...)
+#   postgres: localhost:5432  (user/pass: archon/archon, db: archon_sync)
+#   redis:    localhost:6379
+#
+# Override defaults via repo-root `.env` (Compose reads it automatically).
+
+name: archon-dev
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: archon-dev-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-archon}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-archon}
+      POSTGRES_DB: ${POSTGRES_DB:-archon_sync}
+    ports:
+      - "${ARCHON_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - archon-dev-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-archon} -d ${POSTGRES_DB:-archon_sync}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: archon-dev-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "no", "--save", ""]
+    ports:
+      - "${ARCHON_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  sync-api:
+    image: node:22-bookworm-slim
+    container_name: archon-dev-sync-api
+    restart: unless-stopped
+    working_dir: /app
+    user: "1000:1000"
+    # `tsx watch` reloads on file changes. Mounting the repo gives us hot reload
+    # without rebuilding an image. Host must have `npm install` run already.
+    command: ["npm", "run", "dev", "-w", "@archon/sync-api"]
+    environment:
+      HOST: 0.0.0.0
+      PORT: "4010"
+      NODE_ENV: development
+      DATABASE_URL: ${DATABASE_URL:-postgres://archon:archon@postgres:5432/archon_sync}
+      JWT_SECRET: ${JWT_SECRET:-dev-only-archon-sync-secret-min-32-chars!!}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      ARCHON_REPLICA_ID: ${ARCHON_REPLICA_ID:-dev-sync-api-1}
+      ARCHON_BUNDLED_DOCS_DIR: /app/docs/bundled-plugin-authoring
+      CORS_ORIGIN: ${CORS_ORIGIN:-true}
+    volumes:
+      - .:/app
+    ports:
+      - "${ARCHON_SYNC_API_PORT:-4010}:4010"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:4010/health',(r)=>{r.resume();r.on('end',()=>process.exit(r.statusCode===200?0:1));}).on('error',()=>process.exit(1));",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  web:
+    image: node:22-bookworm-slim
+    container_name: archon-dev-web
+    restart: unless-stopped
+    working_dir: /app
+    user: "1000:1000"
+    # `next dev` provides HMR. `dev:web` script also runs the iframe-token /
+    # video-js sync helpers before booting Next.
+    command: ["npm", "run", "dev:web"]
+    environment:
+      # The browser hits sync-api at this URL. localhost works because Compose
+      # publishes :4010 on the host. If accessing from a LAN peer, set this to
+      # http://<host-lan-ip>:4010/api/v1 in your .env.
+      NEXT_PUBLIC_ARCHON_SYNC_API_URL: ${NEXT_PUBLIC_ARCHON_SYNC_API_URL:-http://localhost:4010/api/v1}
+      NEXT_PUBLIC_ARCHON_WPN_USE_SYNC_API: "1"
+      NEXT_PUBLIC_ARCHON_WEB_BACKEND: sync-only
+      NEXT_PUBLIC_ARCHON_API_SAME_ORIGIN: "0"
+      # `next dev` binds to localhost by default; override so the dev server is
+      # reachable from outside the container (Compose maps :3000 → host).
+      HOSTNAME: 0.0.0.0
+    volumes:
+      - .:/app
+    ports:
+      - "${ARCHON_WEB_PORT:-3000}:3000"
+    depends_on:
+      sync-api:
+        condition: service_healthy
+
+volumes:
+  archon-dev-postgres-data:

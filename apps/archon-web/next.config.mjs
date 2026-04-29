@@ -53,7 +53,7 @@ const nextConfig = {
    * Electron and some browsers load `http://127.0.0.1:3000` while dev defaults to `localhost`;
    * without this, Next 16 blocks `/_next/*` dev assets and the app can break or show wrong UI.
    */
-  allowedDevOrigins: ["127.0.0.1", "localhost", "0.0.0.0"],
+  allowedDevOrigins: ["127.0.0.1", "localhost", "172.16.5.144"],
   transpilePackages: [
     "@archon/platform",
     "@archon/mdx-sdk-runtime",
