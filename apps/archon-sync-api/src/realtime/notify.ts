@@ -10,7 +10,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "drizzle-orm";
 import { getDb } from "../pg.js";
-import { channelForSpace, type RealtimeEvent } from "./events.js";
+import { channelForOrg, type RealtimeEvent } from "./events.js";
 
 /** PG NOTIFY hard cap is 8000 bytes; leave headroom for protocol overhead. */
 const PAYLOAD_CAP = 7 * 1024;
@@ -27,15 +27,15 @@ export function currentClientOpId(): string | undefined {
 }
 
 /**
- * Fire a realtime event to every subscriber on the given space's channel.
+ * Fire a realtime event to every subscriber on the given org's channel.
  * Best-effort: if the payload is oversized or the SQL fails, we log and
  * return — the structural mutation has already committed.
  */
 export async function notifyRealtime(
-  spaceId: string,
+  orgId: string,
   evt: RealtimeEvent,
 ): Promise<void> {
-  const channel = channelForSpace(spaceId);
+  const channel = channelForOrg(orgId);
   const filled: RealtimeEvent = {
     ...evt,
     clientOpId: evt.clientOpId ?? currentClientOpId(),

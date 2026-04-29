@@ -14,10 +14,9 @@
  * (`#/w/...`) are deferred to a future resolver — they don't break
  * correctness, only completeness.
  *
- * Realtime fanout: events go to a per-org channel (`channelForSpace` is
- * vestigial naming; the key passed is the project's `org_id`). The
- * per-event ACL filter in `realtime/filter.ts` does the project-level
- * read check before delivery.
+ * Realtime fanout: events go to a per-org channel via `notifyRealtime`
+ * with the project's `org_id` as the key. The per-event ACL filter in
+ * `realtime/filter.ts` does the project-level read check before delivery.
  */
 import * as crypto from "node:crypto";
 import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";

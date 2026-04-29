@@ -1,5 +1,5 @@
 /**
- * In-memory presence map for the realtime stack. Each space carries a map of
+ * In-memory presence map for the realtime stack. Each org carries a map of
  * `userId → state`; subscribers register a callback and receive snapshots on
  * every change. The 30s TTL reap is the safety net for connections that
  * disappear without firing the WS close handler.
@@ -24,10 +24,10 @@ type Subscriber = (
 ) => void;
 const subscribers = new Map<string, Set<Subscriber>>();
 
-function notifySpace(spaceId: string): void {
-  const subs = subscribers.get(spaceId);
+function notifyOrg(orgId: string): void {
+  const subs = subscribers.get(orgId);
   if (!subs || subs.size === 0) return;
-  const snapshot = snapshotPresence(spaceId);
+  const snapshot = snapshotPresence(orgId);
   for (const cb of subs) {
     try {
       cb(snapshot);
@@ -38,32 +38,32 @@ function notifySpace(spaceId: string): void {
 }
 
 export function setPresence(
-  spaceId: string,
+  orgId: string,
   userId: string,
   state: Omit<PresenceState, "lastSeenAt">,
 ): void {
-  let inner = presenceMap.get(spaceId);
+  let inner = presenceMap.get(orgId);
   if (!inner) {
     inner = new Map();
-    presenceMap.set(spaceId, inner);
+    presenceMap.set(orgId, inner);
   }
   inner.set(userId, { ...state, lastSeenAt: Date.now() });
-  notifySpace(spaceId);
+  notifyOrg(orgId);
 }
 
-export function dropPresence(spaceId: string, userId: string): void {
-  const inner = presenceMap.get(spaceId);
+export function dropPresence(orgId: string, userId: string): void {
+  const inner = presenceMap.get(orgId);
   if (!inner) return;
   if (inner.delete(userId)) {
-    if (inner.size === 0) presenceMap.delete(spaceId);
-    notifySpace(spaceId);
+    if (inner.size === 0) presenceMap.delete(orgId);
+    notifyOrg(orgId);
   }
 }
 
 export function snapshotPresence(
-  spaceId: string,
+  orgId: string,
 ): Array<{ userId: string; state: PresenceState }> {
-  const inner = presenceMap.get(spaceId);
+  const inner = presenceMap.get(orgId);
   if (!inner) return [];
   const out: Array<{ userId: string; state: PresenceState }> = [];
   for (const [userId, state] of inner) {
@@ -72,23 +72,23 @@ export function snapshotPresence(
   return out;
 }
 
-export function onPresenceChange(spaceId: string, cb: Subscriber): () => void {
-  let set = subscribers.get(spaceId);
+export function onPresenceChange(orgId: string, cb: Subscriber): () => void {
+  let set = subscribers.get(orgId);
   if (!set) {
     set = new Set();
-    subscribers.set(spaceId, set);
+    subscribers.set(orgId, set);
   }
   set.add(cb);
   return () => {
     set?.delete(cb);
-    if (set && set.size === 0) subscribers.delete(spaceId);
+    if (set && set.size === 0) subscribers.delete(orgId);
   };
 }
 
 /** Drop entries older than `PRESENCE_TTL_MS`; called by the reap interval. */
 export function reapPresence(): void {
   const cutoff = Date.now() - PRESENCE_TTL_MS;
-  for (const [spaceId, inner] of presenceMap) {
+  for (const [orgId, inner] of presenceMap) {
     let dirty = false;
     for (const [userId, state] of inner) {
       if (state.lastSeenAt < cutoff) {
@@ -96,8 +96,8 @@ export function reapPresence(): void {
         dirty = true;
       }
     }
-    if (inner.size === 0) presenceMap.delete(spaceId);
-    if (dirty) notifySpace(spaceId);
+    if (inner.size === 0) presenceMap.delete(orgId);
+    if (dirty) notifyOrg(orgId);
   }
 }
 
