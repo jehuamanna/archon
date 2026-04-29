@@ -33,6 +33,7 @@ COPY docs/bundled-plugin-authoring ./docs/bundled-plugin-authoring
 COPY tsconfig.json ./
 
 RUN npm ci --ignore-scripts \
+  && npm run build -w @nodex-studio/mdx-sdk \
   && npm run build -w @archon/web \
   && npm prune --omit=dev
 
