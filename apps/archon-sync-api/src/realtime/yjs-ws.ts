@@ -5,14 +5,14 @@
  * the Postgres adapter from `yjs-pg-adapter.ts` provides the snapshot +
  * incremental log persistence.
  *
- * Auth: short-TTL `typ: "spaceWs"` JWT token in the WS query string. We
- * resolve the note's space (directly from `wpn_notes.spaceId`, falling back
- * to its project's workspace's space for older rows that pre-date the
- * denormalised column) and gate on `effectiveRoleInSpace`.
+ * Auth: short-TTL `typ: "spaceWs"` JWT in the WS query string proves identity.
+ * Authorisation resolves the note's project (`notes.projectId`) and gates on
+ * `effectiveRoleInProject`, matching the rest of the post-squash auth model
+ * (`spaces` was dropped — projects are the canonical access scope now).
  *
  * Initial state seeding: when the snapshot is empty (first connection ever
  * on a note), we seed the Y.Text channel `content` with the existing
- * `wpn_notes.content` so the first editor sees the body they expect.
+ * `notes.content` so the first editor sees the body they expect.
  */
 import type { FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
@@ -20,11 +20,11 @@ import { Server } from "@hocuspocus/server";
 import { Redis as RedisExtension } from "@hocuspocus/extension-redis";
 import IORedis from "ioredis";
 import * as Y from "yjs";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { verifyAndTranslate } from "../auth-translate.js";
-import { effectiveRoleInSpace } from "../permission-resolver.js";
+import { effectiveRoleInProject } from "../permission-resolver.js";
 import { getDb, withTx } from "../pg.js";
-import { wpnNotes, wpnProjects, wpnWorkspaces } from "../db/schema.js";
+import { notes } from "../db/schema.js";
 import { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";
 
 let _sharedAdapter: YjsPgAdapter | null = null;
@@ -37,9 +37,9 @@ const REVOKE_REVERIFY_INTERVAL_MS = 10_000;
 
 /**
  * Per-connection revoke-reverify timers, keyed by Hocuspocus socketId. The
- * `connected` hook attaches an interval that re-checks `effectiveRoleInSpace`
- * and force-closes the connection when role disappears; `onDisconnect` clears
- * it so closed sockets don't leak timers.
+ * `connected` hook attaches an interval that re-checks `effectiveRoleInProject`
+ * and force-closes the connection when the role disappears; `onDisconnect`
+ * clears it so closed sockets don't leak timers.
  */
 const revokeReverifyTimers = new Map<string, NodeJS.Timeout>();
 
@@ -49,6 +49,16 @@ const revokeReverifyTimers = new Map<string, NodeJS.Timeout>();
  * unbounded slice of the Hocuspocus instance with parallel tabs.
  */
 const userConnections = new Map<string, Set<string>>();
+
+/**
+ * Y.Map("metadata") keys that flow live across the Hocuspocus connection.
+ * Confined to user-editable text fields so structural / asset fields
+ * (`r2Key`, `mimeType`, `sizeBytes`, thumbs) keep their REST-managed
+ * last-write-wins semantics — those are set by single-actor flows
+ * (upload, thumbnail regen) and don't benefit from CRDT merge.
+ */
+const COLLABORATIVE_METADATA_KEYS = ["altText", "caption"] as const;
+type CollaborativeMetadataKey = (typeof COLLABORATIVE_METADATA_KEYS)[number];
 
 let _sharedServer: ReturnType<typeof Server.configure> | null = null;
 /**
@@ -71,11 +81,11 @@ export async function _shutdownYjsServerForTests(): Promise<void> {
 
 /**
  * Apply a server-side rewrite of `Y.Text("content")` for `noteId` so that
- * REST writes (e.g. `PATCH /wpn/notes/:id` from the MCP tool) reach the
+ * REST writes (e.g. `PATCH /notes/:id` from the MCP tool) reach the
  * live Yjs document instead of being clobbered by the next autosave.
  *
  * Without this, `onStoreDocument` periodically flushes the connected
- * editor's *current* in-memory Y.Doc state back to `wpn_notes.content`,
+ * editor's *current* in-memory Y.Doc state back to `notes.content`,
  * silently overwriting any HTTP PATCH that landed in between.
  *
  * Routing the REST write through `openDirectConnection` instead:
@@ -83,14 +93,14 @@ export async function _shutdownYjsServerForTests(): Promise<void> {
  *   - replaces `Y.Text("content")` inside one transaction,
  *   - causes Hocuspocus to broadcast the diff to every connected editor,
  *   - schedules the bridge in `onStoreDocument` to write the matching
- *     content to `wpn_notes.content` (so the persisted snapshot and the
+ *     content to `notes.content` (so the persisted snapshot and the
  *     row stay in sync).
  *
  * No-ops when the Hocuspocus server isn't configured (the same process
  * may host non-realtime API instances or run in tests that don't mount
  * `/v1/ws/yjs`). Errors are swallowed: a failed direct-doc update must
  * not fail the underlying REST PATCH that already succeeded against
- * `wpn_notes`.
+ * `notes`.
  */
 export async function applyContentToYjsDoc(
   noteId: string,
@@ -120,30 +130,13 @@ export async function applyContentToYjsDoc(
   }
 }
 
-async function resolveSpaceForNote(noteId: string): Promise<string | null> {
+async function resolveProjectForNote(noteId: string): Promise<string | null> {
   const noteRows = await getDb()
-    .select({ projectId: wpnNotes.project_id, spaceId: wpnNotes.spaceId })
-    .from(wpnNotes)
-    .where(eq(wpnNotes.id, noteId))
+    .select({ projectId: notes.projectId })
+    .from(notes)
+    .where(eq(notes.id, noteId))
     .limit(1);
-  const note = noteRows[0];
-  if (!note) return null;
-  if (note.spaceId) return note.spaceId;
-  // Fallback through project → workspace for legacy rows.
-  const projRows = await getDb()
-    .select({ workspaceId: wpnProjects.workspace_id, spaceId: wpnProjects.spaceId })
-    .from(wpnProjects)
-    .where(eq(wpnProjects.id, note.projectId))
-    .limit(1);
-  const proj = projRows[0];
-  if (!proj) return null;
-  if (proj.spaceId) return proj.spaceId;
-  const wsRows = await getDb()
-    .select({ spaceId: wpnWorkspaces.spaceId })
-    .from(wpnWorkspaces)
-    .where(eq(wpnWorkspaces.id, proj.workspaceId))
-    .limit(1);
-  return wsRows[0]?.spaceId ?? null;
+  return noteRows[0]?.projectId ?? null;
 }
 
 export function registerYjsWsRoutes(
@@ -210,30 +203,30 @@ export function registerYjsWsRoutes(
       if (payload.typ !== "spaceWs") {
         throw new Error("wrong token typ");
       }
-      const spaceId = await resolveSpaceForNote(documentName);
-      if (!spaceId) {
-        throw new Error("note has no resolvable space");
+      const projectId = await resolveProjectForNote(documentName);
+      if (!projectId) {
+        throw new Error("note has no resolvable project");
       }
-      const role = await effectiveRoleInSpace(payload.sub, spaceId);
-      if (!role) throw new Error("no access to space");
-      // Stash spaceId in the connection context so the `connected` hook can
+      const role = await effectiveRoleInProject(payload.sub, projectId);
+      if (!role) throw new Error("no access to project");
+      // Stash projectId in the connection context so the `connected` hook can
       // attach a periodic revocation check tied to the same role evaluation.
       return {
         user: { id: payload.sub, email: payload.email, role },
-        spaceId,
+        projectId,
       };
     },
     async connected({ context, socketId, connectionInstance }) {
       // Mid-session permission revocation. Mirrors the 10s reverify loop in
-      // `ws-skeleton.ts` for the space WS so a user removed from a space
-      // mid-edit can't keep writing through their open Yjs socket until the
-      // browser disconnects on its own.
+      // `ws-skeleton.ts` for the space WS so a user whose project access is
+      // revoked mid-edit can't keep writing through their open Yjs socket
+      // until the browser disconnects on its own.
       const ctx = context as
-        | { user?: { id?: string }; spaceId?: string }
+        | { user?: { id?: string }; projectId?: string }
         | undefined;
       const userId = ctx?.user?.id;
-      const spaceId = ctx?.spaceId;
-      if (!userId || !spaceId) return;
+      const projectId = ctx?.projectId;
+      if (!userId || !projectId) return;
       // Per-user connection cap. Closing here (rather than in `onAuthenticate`)
       // is intentional: socketId is allocated by Hocuspocus on accept, so we
       // can only key the user's slot table reliably once the connection has
@@ -254,7 +247,7 @@ export function registerYjsWsRoutes(
       const interval = setInterval(() => {
         void (async () => {
           try {
-            const role = await effectiveRoleInSpace(userId, spaceId);
+            const role = await effectiveRoleInProject(userId, projectId);
             if (!role) {
               connectionInstance.close({
                 code: 4403,
@@ -292,15 +285,31 @@ export function registerYjsWsRoutes(
         Y.applyUpdate(document, stored);
         return document;
       }
-      // Q4 default: seed Y.Text 'content' from wpn_notes.content if any.
+      // Q4 default: seed Y.Text 'content' from notes.content if any, and
+      // seed the collaborative subset of `metadata` into Y.Map("metadata") so
+      // image notes pick up their existing alt/caption on first WS open.
       const noteRows = await getDb()
-        .select({ content: wpnNotes.content })
-        .from(wpnNotes)
-        .where(eq(wpnNotes.id, noteId))
+        .select({
+          content: notes.content,
+          metadata: notes.metadata,
+        })
+        .from(notes)
+        .where(eq(notes.id, noteId))
         .limit(1);
       const seedText = noteRows[0]?.content ?? "";
       if (seedText.length > 0) {
         document.getText("content").insert(0, seedText);
+      }
+      const seedMeta = noteRows[0]?.metadata as
+        | Record<string, unknown>
+        | null
+        | undefined;
+      if (seedMeta) {
+        const ymap = document.getMap<unknown>("metadata");
+        for (const key of COLLABORATIVE_METADATA_KEYS) {
+          const v = seedMeta[key];
+          if (typeof v === "string") ymap.set(key, v);
+        }
       }
       return document;
     },
@@ -308,20 +317,20 @@ export function registerYjsWsRoutes(
       const noteId = documentName;
       const text = document.getText("content").toString();
       // Refuse to persist an empty Y.Doc that would clobber existing
-      // `wpn_notes.content`. Hocuspocus may invoke onStoreDocument early
+      // `notes.content`. Hocuspocus may invoke onStoreDocument early
       // in the connection lifecycle (before sync completes) or after a
       // client mounted with an empty Y.Text shadow; persisting the empty
       // state then would replace the seed with "" both in `yjs_state`
-      // and in `wpn_notes.content`, and the next open would `applyUpdate`
+      // and in `notes.content`, and the next open would `applyUpdate`
       // the 2-byte empty state and skip the seed branch — losing content
       // forever. If the editor genuinely cleared the note, that is
       // expressed as a non-empty Y.Doc with delete-set entries, so the
       // empty-string check here is a strict guard, not a false positive.
       if (text.length === 0) {
         const noteRows = await getDb()
-          .select({ content: wpnNotes.content })
-          .from(wpnNotes)
-          .where(eq(wpnNotes.id, noteId))
+          .select({ content: notes.content })
+          .from(notes)
+          .where(eq(notes.id, noteId))
           .limit(1);
         if ((noteRows[0]?.content ?? "").length > 0) {
           // eslint-disable-next-line no-console
@@ -347,26 +356,54 @@ export function registerYjsWsRoutes(
         });
         return;
       }
-      // Persist the Yjs snapshot AND the materialised `wpn_notes.content`
-      // view in a single transaction. If either side fails, both roll back
-      // and the next debounced `onStoreDocument` tick retries cleanly —
-      // preventing a silent split where `yjs_state` advances but the legacy
-      // HTTP readers (detail / list / export) keep returning stale text.
+      // Pull the collaborative subset of Y.Map("metadata") for merge-back
+      // into `wpn_notes.metadata`. We merge rather than overwrite so REST-
+      // managed fields (r2Key, thumbKey, sizeBytes, …) survive a Yjs flush.
+      const ymeta = document.getMap<unknown>("metadata");
+      const metaPatch: Partial<Record<CollaborativeMetadataKey, string>> = {};
+      let metaPatchHasKeys = false;
+      for (const key of COLLABORATIVE_METADATA_KEYS) {
+        if (!ymeta.has(key)) continue;
+        const v = ymeta.get(key);
+        if (typeof v !== "string") continue;
+        metaPatch[key] = v;
+        metaPatchHasKeys = true;
+      }
+
+      // Persist the Yjs snapshot AND the materialised `notes.content`
+      // view (and any collab-flow metadata) in a single transaction. If any
+      // side fails, all roll back and the next debounced `onStoreDocument`
+      // tick retries cleanly — preventing a silent split where `yjs_state`
+      // advances but the legacy HTTP readers (detail / list / export) keep
+      // returning stale text.
       try {
         const editorUserId =
           (context as { user?: { id?: string } } | undefined)?.user?.id;
         const t = Date.now();
         const setFields: Record<string, unknown> = {
           content: text,
-          updated_at_ms: t,
+          updatedAtMs: t,
         };
-        if (editorUserId) setFields.updated_by_user_id = editorUserId;
+        if (editorUserId) setFields.updatedByUserId = editorUserId;
         await withTx(async (tx) => {
           await adapter.storeDoc(noteId, fullState, tx);
-          await tx
-            .update(wpnNotes)
-            .set(setFields)
-            .where(eq(wpnNotes.id, noteId));
+          if (metaPatchHasKeys) {
+            // jsonb merge keeps existing keys (r2Key, etc.) intact; the
+            // patch overwrites only the collaborative subset.
+            await tx.execute(sql`
+              UPDATE notes
+              SET metadata = COALESCE(metadata, '{}'::jsonb) || ${JSON.stringify(metaPatch)}::jsonb,
+                  content = ${text},
+                  updated_at_ms = ${t}
+                  ${editorUserId ? sql`, updated_by_user_id = ${editorUserId}::uuid` : sql``}
+              WHERE id = ${noteId}::uuid
+            `);
+          } else {
+            await tx
+              .update(notes)
+              .set(setFields)
+              .where(eq(notes.id, noteId));
+          }
         });
       } catch (err) {
         // eslint-disable-next-line no-console

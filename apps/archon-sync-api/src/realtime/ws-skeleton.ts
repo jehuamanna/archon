@@ -1,16 +1,18 @@
 /**
- * Phase 1 WebSocket skeleton at `GET /v1/ws/space/:spaceId`.
+ * WebSocket skeleton at `GET /v1/ws/space/:spaceId`.
  *
- * Authenticates the short-TTL `typ: "spaceWs"` token via `verifyAndTranslate`,
- * gates on `effectiveRoleInSpace`, then keeps the socket alive with a 20s
- * ping and a 10s revoke-aware reverify loop. Phase 3 wires actual event
- * subscription via `realtime/listen-pool.ts`; for now the connection
- * accepts the handshake and idles.
+ * Authenticates the short-TTL `typ: "spaceWs"` token via `verifyAndTranslate`.
+ * Per-event ACL is in `filter.ts` (`userCanReadProject`), so the route
+ * accepts any valid `spaceWs` token and the per-event filter handles
+ * read-rights. The `:spaceId` URL parameter is now a vestigial channel key
+ * — kept for client compatibility while the post-migration routing settles.
+ *
+ * Heartbeat is a 20s ping; the legacy 10s space-reverify loop is gone with
+ * the spaces table.
  */
 import type { FastifyInstance } from "fastify";
 import type { JwtPayload } from "../auth.js";
 import { verifyAndTranslate } from "../auth-translate.js";
-import { effectiveRoleInSpace } from "../permission-resolver.js";
 import { acquireChannel } from "./listen-pool.js";
 import { channelForSpace, type RealtimeEvent } from "./events.js";
 import { canDeliverToSubscriber } from "./filter.js";
@@ -87,24 +89,28 @@ export function registerSpaceWsRoutes(
         socket.close(4401, "space mismatch");
         return;
       }
-      const role = await effectiveRoleInSpace(payload.sub, spaceId);
-      if (!role) {
-        socket.close(4403, "no access to space");
-        return;
-      }
+      // Identity is enough to open the structural-event WS; per-event
+      // delivery is gated by `canDeliverToSubscriber` in `filter.ts`, which
+      // checks project read rights for every event before forwarding. The
+      // pre-squash space-membership check is gone with the spaces table —
+      // the route's `:spaceId` URL parameter is now a vestigial channel key,
+      // kept for client compatibility while the broader auth migration
+      // settles. Token validity (above) still proves principal.
       app.log.info(
-        { spaceId, sub: payload.sub, role },
+        { spaceId, sub: payload.sub },
         "realtime: ws/space opened",
       );
 
       // Subscribe to the space channel; route delivered events through the
       // ACL filter and onto the socket. Held until the close handler runs.
+      // The token's `activeSpaceId` is preserved on its own type so the
+      // protocol stays stable; the JwtPayload we hand `canDeliverToSubscriber`
+      // only carries identity — per-event filtering does its own project
+      // lookup via `userCanReadProject`.
       const authPayload: JwtPayload = {
         sub: payload.sub,
         email: payload.email,
         typ: payload.typ,
-        activeOrgId: payload.activeSpaceId,
-        activeSpaceId: payload.activeSpaceId,
       };
       const release = await acquireChannel(channelForSpace(spaceId), (raw) => {
         let evt: RealtimeEvent;
@@ -159,16 +165,10 @@ export function registerSpaceWsRoutes(
         }
       });
 
-      const reverify = setInterval(() => {
-        void (async () => {
-          try {
-            const r = await effectiveRoleInSpace(payload.sub, spaceId);
-            if (!r) socket.close(4403, "access revoked");
-          } catch {
-            /* ignore — reverify failures shouldn't tear the socket down */
-          }
-        })();
-      }, REVERIFY_INTERVAL_MS);
+      // Per-event ACL lives in `filter.ts` (`userCanReadProject`), so a user
+      // whose project access is revoked simply stops seeing events on this
+      // socket. The space-level reverify loop is gone with the spaces table.
+      // Heartbeat keeps the connection alive for liveness detection.
       const heartbeat = setInterval(() => {
         try {
           socket.ping?.();
@@ -178,7 +178,6 @@ export function registerSpaceWsRoutes(
       }, HEARTBEAT_MS);
 
       socket.on("close", () => {
-        clearInterval(reverify);
         clearInterval(heartbeat);
         unsubscribePresence();
         dropPresence(spaceId, payload.sub);
