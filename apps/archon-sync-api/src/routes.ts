@@ -21,6 +21,7 @@ import { registerBundledDocsPublicRoutes } from "./bundled-docs-routes.js";
 import { registerMeAssetsRoutes } from "./me-assets-routes.js";
 import { registerMeRoutes } from "./me-routes.js";
 import { registerAdminRoutes } from "./admin-routes.js";
+import { registerDepartmentRoutes } from "./department-routes.js";
 import { registerOrgRoutes } from "./org-routes.js";
 import { registerTeamRoutes } from "./team-routes.js";
 import { registerWpnBatchRoutes } from "./wpn-batch-routes.js";
@@ -113,6 +114,7 @@ export function registerRoutes(
   registerBuiltinPluginRoutes(app, { jwtSecret });
   registerMcpDeviceAuthRoutes(app, { jwtSecret });
   registerOrgRoutes(app, { jwtSecret });
+  registerDepartmentRoutes(app, { jwtSecret });
   registerTeamRoutes(app, { jwtSecret });
   registerAdminRoutes(app, { jwtSecret });
   registerMasterAdminRoutes(app, { jwtSecret });
