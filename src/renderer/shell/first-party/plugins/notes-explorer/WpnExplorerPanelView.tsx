@@ -2646,6 +2646,8 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
           data-wpn-select-row
           data-wpn-explorer-active-note={currentNoteId === n.id ? "" : undefined}
           className={`group relative flex min-h-7 w-full items-center gap-0.5 border-b border-border/30 text-[11px] ${
+            isRenamingNote ? "cursor-text" : "cursor-pointer"
+          } ${
             noteSelected
               ? ""
               : currentNoteId === n.id
