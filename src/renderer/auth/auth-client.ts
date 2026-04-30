@@ -907,6 +907,29 @@ export async function listOrgTeams(orgId: string): Promise<TeamRow[]> {
   return r.teams;
 }
 
+export type MyTeamRow = {
+  teamId: string;
+  orgId: string;
+  departmentId: string;
+  name: string;
+  colorToken: string | null;
+  createdAt: string;
+  role: TeamMembershipRole;
+  joinedAt: string;
+};
+
+export async function listMyTeams(): Promise<MyTeamRow[]> {
+  const token = getAccessToken();
+  if (!token) {
+    throw new Error("Unauthorized");
+  }
+  const r = await requestJson<{ teams: MyTeamRow[] }>(`/teams/me`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return r.teams;
+}
+
 export async function createTeam(payload: {
   orgId: string;
   departmentId: string;

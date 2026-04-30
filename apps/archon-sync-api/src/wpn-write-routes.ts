@@ -17,7 +17,7 @@ import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { resolveActiveOrgId } from "./org-auth.js";
 import { getDb } from "./pg.js";
-import { notes, projects } from "./db/schema.js";
+import { notes, projects, teamMemberships, teams } from "./db/schema.js";
 import {
   assertCanManageProject,
   assertCanReadProject,
@@ -118,13 +118,69 @@ const projectSettingsPatchBody = z.object({
   settings: z.record(z.unknown()),
 });
 
+/**
+ * Pick a default team to grant on a brand-new project when the caller didn't
+ * pass an explicit `teamId`. Without this, the project would be created with
+ * no `team_projects` row — invisible to non-admin users via the standard
+ * `getEffectiveProjectRoles` path even though they were the creator.
+ *
+ * Resolution order:
+ *   1. JWT `activeTeamId`, if the user is a member of it and the team belongs
+ *      to the active org.
+ *   2. The user's first team membership in the active org (alphabetical by
+ *      team name to keep the choice deterministic).
+ *
+ * Returns null when the user has zero team memberships in the active org —
+ * the route then leaves the project un-granted (admin-only visibility).
+ */
+async function resolveDefaultTeamForCreate(
+  userId: string,
+  orgId: string,
+  activeTeamId: string | undefined,
+): Promise<string | null> {
+  const db = getDb();
+  if (activeTeamId && isUuid(activeTeamId)) {
+    const rows = await db
+      .select({ id: teams.id })
+      .from(teams)
+      .innerJoin(
+        teamMemberships,
+        and(
+          eq(teamMemberships.teamId, teams.id),
+          eq(teamMemberships.userId, userId),
+        ),
+      )
+      .where(and(eq(teams.id, activeTeamId), eq(teams.orgId, orgId)))
+      .limit(1);
+    if (rows[0]) return rows[0].id;
+  }
+  const fallback = await db
+    .select({ id: teams.id, name: teams.name })
+    .from(teams)
+    .innerJoin(
+      teamMemberships,
+      and(
+        eq(teamMemberships.teamId, teams.id),
+        eq(teamMemberships.userId, userId),
+      ),
+    )
+    .where(eq(teams.orgId, orgId))
+    .orderBy(teams.name)
+    .limit(1);
+  return fallback[0]?.id ?? null;
+}
+
 export function registerWpnWriteRoutes(
   app: FastifyInstance,
   opts: { jwtSecret: string },
 ): void {
   const { jwtSecret } = opts;
 
-  /** Create a project (optionally attached to a team via team_projects). */
+  /** Create a project (optionally attached to a team via team_projects).
+   *
+   * When the caller doesn't pass `teamId`, the handler picks one for them via
+   * `resolveDefaultTeamForCreate` so the new project lands inside their
+   * working scope instead of being invisible to everyone but admins. */
   app.post("/wpn/projects", async (request, reply) => {
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
@@ -139,9 +195,17 @@ export function registerWpnWriteRoutes(
     if (!isUuid(auth.sub)) {
       return reply.status(401).send({ error: "Invalid session" });
     }
+    let teamId = parsed.data.teamId;
+    if (!teamId) {
+      teamId = (await resolveDefaultTeamForCreate(
+        auth.sub,
+        orgId,
+        auth.activeTeamId,
+      )) ?? undefined;
+    }
     const project = await pgWpnCreateProject(orgId, parsed.data.name, {
       creatorUserId: auth.sub,
-      teamId: parsed.data.teamId,
+      teamId,
       teamRole: parsed.data.teamRole,
     });
     return reply.send({ project });
@@ -194,7 +258,8 @@ export function registerWpnWriteRoutes(
     const auth = await requireAuth(request, reply, jwtSecret);
     if (!auth) return;
     const { id } = request.params as { id: string };
-    if (!(await assertCanReadProject(reply, auth, id))) return;
+    const sourceProject = await assertCanReadProject(reply, auth, id);
+    if (!sourceProject) return;
     const parsed = duplicateProjectBody.safeParse(request.body);
     if (!parsed.success) {
       return reply.status(400).send({ error: parsed.error.flatten() });
@@ -202,10 +267,18 @@ export function registerWpnWriteRoutes(
     if (!isUuid(auth.sub)) {
       return reply.status(401).send({ error: "Invalid session" });
     }
+    let teamId = parsed.data.teamId;
+    if (!teamId) {
+      teamId = (await resolveDefaultTeamForCreate(
+        auth.sub,
+        sourceProject.orgId,
+        auth.activeTeamId,
+      )) ?? undefined;
+    }
     const result = await pgWpnDuplicateProject(id, {
       newName: parsed.data.newName,
       creatorUserId: auth.sub,
-      teamId: parsed.data.teamId,
+      teamId,
     });
     return reply.send(result);
   });

@@ -6,6 +6,8 @@
  * team↔resource edge in the new model is a `team_projects` row.
  *
  * Routes:
+ *   GET    /teams/me                           — caller's team memberships in
+ *                                                the active org
  *   GET    /orgs/:orgId/teams                  — list teams in org
  *   POST   /orgs/:orgId/teams                  — admin: create team under a dept
  *   PATCH  /teams/:teamId                      — admin: rename / recolor / move
@@ -34,7 +36,7 @@ import {
   teams,
   users,
 } from "./db/schema.js";
-import { requireOrgRole } from "./org-auth.js";
+import { requireOrgRole, resolveActiveOrgId } from "./org-auth.js";
 import { recordAudit } from "./audit.js";
 import {
   addTeamMemberBody,
@@ -80,6 +82,46 @@ export function registerTeamRoutes(
 ): void {
   const { jwtSecret } = opts;
   const db = (): ReturnType<typeof getDb> => getDb();
+
+  /**
+   * List the caller's team memberships in the active org.
+   *
+   * Resolves the active org via `X-Archon-Org` or JWT `activeOrgId`; without
+   * one, returns 400 so the renderer doesn't silently render an empty list.
+   * Joins `team_memberships` with `teams` so each row includes the role the
+   * caller holds on the team plus the team's own metadata. Static path —
+   * registered before any `/teams/:teamId` so Fastify never tries to parse
+   * `me` as a UUID.
+   */
+  app.get("/teams/me", async (request, reply) => {
+    const auth = await requireAuth(request, reply, jwtSecret);
+    if (!auth) return;
+    const orgId = resolveActiveOrgId(request, auth);
+    if (!orgId) {
+      return reply.status(400).send({ error: "Active org required" });
+    }
+    if (!isUuid(auth.sub)) {
+      return reply.status(401).send({ error: "Invalid session" });
+    }
+    const rows = await db()
+      .select({
+        teamId: teams.id,
+        orgId: teams.orgId,
+        departmentId: teams.departmentId,
+        name: teams.name,
+        colorToken: teams.colorToken,
+        createdAt: teams.createdAt,
+        role: teamMemberships.role,
+        joinedAt: teamMemberships.joinedAt,
+      })
+      .from(teamMemberships)
+      .innerJoin(teams, eq(teams.id, teamMemberships.teamId))
+      .where(
+        and(eq(teamMemberships.userId, auth.sub), eq(teams.orgId, orgId)),
+      )
+      .orderBy(teams.name);
+    return reply.send({ teams: rows });
+  });
 
   /** List teams in an org. Org members see all teams; non-members get 404. */
   app.get("/orgs/:orgId/teams", async (request, reply) => {

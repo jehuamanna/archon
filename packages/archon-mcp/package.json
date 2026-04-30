@@ -1,6 +1,6 @@
 {
   "name": "@archon-studio/mcp",
-  "version": "0.0.13",
+  "version": "0.0.14",
   "description": "MCP server (stdio / SSE / Streamable HTTP) for Archon WPN — cloud sync-api or Electron loopback",
   "type": "module",
   "files": [
