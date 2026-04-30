@@ -467,8 +467,11 @@ export function MdxNoteEditor({
   // to `yText` directly via `yCollab(...)` (see cmExtensions below) and the
   // server bridges Y.Text → wpn_notes.content. When not connected, the
   // editor falls back to debounced HTTP PATCH.
-  const activeSpaceId = useSelector(
-    (s: RootState) => s.spaceMembership.activeSpaceId,
+  //
+  // Use `orgMembership.activeOrgId` — see MarkdownNoteEditor for the
+  // post-migration null-trap on `activeSpaceId`.
+  const activeOrgId = useSelector(
+    (s: RootState) => s.orgMembership.activeOrgId,
   );
   const collabUser: CollabUser | null = useMemo(() => {
     if (auth.state.status !== "authed") return null;
@@ -483,7 +486,7 @@ export function MdxNoteEditor({
   ]);
   const yjsBody = useYjsBodyShadow(
     persist ? note.id : null,
-    activeSpaceId,
+    activeOrgId ?? null,
     collabUser,
   );
   const yjsBodyRef = useRef(yjsBody);

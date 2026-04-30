@@ -24,7 +24,7 @@ const resolveSyncBase = createSyncBaseUrlResolver();
 
 /**
  * Stable Y.Doc cache keyed by `noteId`. The hook's effect re-runs every
- * time `spaceId` changes (e.g. on auth / membership flicker), and React
+ * time `orgId` changes (e.g. on auth / membership flicker), and React
  * StrictMode mounts effects twice in dev — both produce hook re-runs.
  * If we created a fresh Y.Doc on every re-run, the editor's yCollab
  * extension would briefly see a Y.Text whose `parent`/`doc` chain has
@@ -141,7 +141,7 @@ export interface YjsBodyShadow {
   doc: Y.Doc | null;
   /** Live `Y.Text("content")` bound to this note. Stable across hook
    * re-runs for the same noteId — pass to `yCollab()` as the first
-   * argument. Null while the hook is inert (no `noteId` / no `spaceId`). */
+   * argument. Null while the hook is inert (no `noteId` / no `orgId`). */
   yText: Y.Text | null;
   /** True once the Hocuspocus handshake completes. Drives the editor's
    * HTTP autosave fallback: when false, the editor saves via REST
@@ -178,10 +178,17 @@ export function colorForUserId(userId: string): string {
  * `yCollab(yText, null)` in its CodeMirror extensions; remote diffs (other
  * tabs, MCP `archon_write_note`, etc.) flow into the visible editor with no
  * intermediate React state.
+ *
+ * Pass the active org id, not a team/space id — post-migration the legacy
+ * redux `spaceMembership.activeSpaceId` is an alias for `activeTeamId`,
+ * which is often null until team membership lands. Gating the hook on that
+ * leaves the editor inert with no Yjs WS, falling back to debounced REST
+ * PATCH for every keystroke and silently dropping live cursors / collab.
+ * `orgMembership.activeOrgId` is the canonical scope.
  */
 export function useYjsBodyShadow(
   noteId: string | null,
-  spaceId: string | null,
+  orgId: string | null,
   user?: CollabUser | null,
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
@@ -195,11 +202,11 @@ export function useYjsBodyShadow(
   const yText = cachedEntry?.ytext ?? null;
 
   useEffect(() => {
-    if (!noteId || !spaceId) {
+    if (!noteId || !orgId) {
       // eslint-disable-next-line no-console
       console.debug("[yjs-body] inert", {
         noteId: !!noteId,
-        spaceId: !!spaceId,
+        orgId: !!orgId,
       });
       setConnected(false);
       return;
@@ -214,10 +221,10 @@ export function useYjsBodyShadow(
         setConnected(false);
         return;
       }
-      const token = await mintRealtimeWsToken(syncBase, spaceId);
+      const token = await mintRealtimeWsToken(syncBase, orgId);
       if (cancelled || !token) {
         // eslint-disable-next-line no-console
-        console.debug("[yjs-body] token mint failed", { spaceId, syncBase });
+        console.debug("[yjs-body] token mint failed", { orgId, syncBase });
         setConnected(false);
         return;
       }
@@ -257,7 +264,7 @@ export function useYjsBodyShadow(
         // eslint-disable-next-line no-console
         console.warn(
           "[yjs-body] no collabUser at WS open — peers won't render this caret. Check auth.state.status in MarkdownNoteEditor.",
-          { noteId, spaceId },
+          { noteId, orgId },
         );
       }
       if (!cancelled) setAwareness(provider.awareness ?? null);
@@ -313,7 +320,7 @@ export function useYjsBodyShadow(
     // (rename, etc.) are rare and would force a needless WS reconnect.
     // Identity refresh is handled via the dedicated effect below.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [noteId, spaceId]);
+  }, [noteId, orgId]);
 
   // Refresh local awareness identity in place when `user` changes without
   // tearing down the provider. Useful when display name / color is set
