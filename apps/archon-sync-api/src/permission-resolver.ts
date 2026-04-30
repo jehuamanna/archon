@@ -83,6 +83,30 @@ export async function effectiveRoleInProject(
   return roles.get(projectId) ?? null;
 }
 
+/**
+ * Like {@link effectiveRoleInProject} but also honours the master-admin and
+ * org-admin bypasses that REST handlers apply via `userCanReadProject` /
+ * `assertCanWriteProject`. Returns "owner" for either bypass so callers can
+ * treat the result as a real `ProjectRole` without branching.
+ *
+ * Use this for surfaces (e.g. Yjs WS auth, periodic revoke-reverify) where
+ * the only access check is the role lookup. Without the bypass, a master /
+ * org admin who has no `team_projects` grant gets rejected — the symptom
+ * looks like `permission-denied` on the WS even though every REST endpoint
+ * accepts the same principal. Any place that mirrors REST authorisation
+ * should call this, not the raw team-grant variant.
+ */
+export async function effectiveAccessRoleInProject(
+  userId: string,
+  projectId: string,
+): Promise<ProjectRole | null> {
+  if (await isMasterAdmin(userId)) return "owner";
+  const project = await findProjectById(projectId);
+  if (!project) return null;
+  if (await isOrgAdmin(userId, project.orgId)) return "owner";
+  return effectiveRoleInProject(userId, projectId);
+}
+
 export async function userCanReadProject(
   userId: string,
   projectId: string,

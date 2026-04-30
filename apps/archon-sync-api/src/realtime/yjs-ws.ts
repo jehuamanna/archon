@@ -22,7 +22,7 @@ import IORedis from "ioredis";
 import * as Y from "yjs";
 import { eq, sql } from "drizzle-orm";
 import { verifyAndTranslate } from "../auth-translate.js";
-import { effectiveRoleInProject } from "../permission-resolver.js";
+import { effectiveAccessRoleInProject } from "../permission-resolver.js";
 import { getDb, withTx } from "../pg.js";
 import { notes } from "../db/schema.js";
 import { createYjsPgAdapter, type YjsPgAdapter } from "./yjs-pg-adapter.js";
@@ -207,7 +207,13 @@ export function registerYjsWsRoutes(
       if (!projectId) {
         throw new Error("note has no resolvable project");
       }
-      const role = await effectiveRoleInProject(payload.sub, projectId);
+      // Use the access-role variant: master admin / org admin must be allowed
+      // here for parity with REST. The raw team-grant lookup would reject
+      // the bootstrap admin (no team_projects row) even though every REST
+      // PATCH from the same principal succeeds — the bug manifests as
+      // `permission-denied` on the Yjs WS while the editor silently falls
+      // back to debounced PATCH on every keystroke.
+      const role = await effectiveAccessRoleInProject(payload.sub, projectId);
       if (!role) throw new Error("no access to project");
       // Stash projectId in the connection context so the `connected` hook can
       // attach a periodic revocation check tied to the same role evaluation.
@@ -247,7 +253,9 @@ export function registerYjsWsRoutes(
       const interval = setInterval(() => {
         void (async () => {
           try {
-            const role = await effectiveRoleInProject(userId, projectId);
+            // Same bypass-aware check as `onAuthenticate`; otherwise an
+            // org / master admin would get force-closed every 10 s.
+            const role = await effectiveAccessRoleInProject(userId, projectId);
             if (!role) {
               connectionInstance.close({
                 code: 4403,
