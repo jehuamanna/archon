@@ -862,6 +862,15 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
             </SortableContext>
           </DndContext>
           <div className="flex shrink-0 items-center gap-1">
+            {auth.state.status === "authed" && auth.state.user ? (
+              <span
+                className="mr-1 hidden truncate text-[11px] text-muted-foreground sm:inline-block"
+                title={auth.state.user.email ?? auth.state.user.username}
+              >
+                Welcome{" "}
+                <span className="font-medium text-foreground">{auth.state.user.username}</span>
+              </span>
+            ) : null}
             {!isElectronUserAgent() && isWebScratchSession() ? (
               <>
                 <button
