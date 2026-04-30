@@ -173,12 +173,15 @@ export function ImageNoteEditor({
   // Open the same Hocuspocus room the markdown editors use so alt+caption
   // edits CRDT-merge with whoever else is viewing this image. Identity is
   // skipped (no caret presence on a static image surface), so we pass null.
-  const activeSpaceId = useSelector(
-    (s: RootState) => s.spaceMembership.activeSpaceId,
+  //
+  // Use `orgMembership.activeOrgId` — see MarkdownNoteEditor for the
+  // post-migration null-trap on `activeSpaceId`.
+  const activeOrgId = useSelector(
+    (s: RootState) => s.orgMembership.activeOrgId,
   );
   const yjsBody = useYjsBodyShadow(
     persist ? note.id : null,
-    activeSpaceId,
+    activeOrgId ?? null,
     null,
   );
   const metadataMap = useMemo<Y.Map<unknown> | null>(

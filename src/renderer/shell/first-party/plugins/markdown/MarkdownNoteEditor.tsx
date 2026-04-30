@@ -463,8 +463,15 @@ export function MarkdownNoteEditor({
   // to `yText` directly via `yCollab(...)` (see cmExtensions below) and the
   // server bridges Y.Text → wpn_notes.content. When not connected, the
   // editor falls back to debounced HTTP PATCH.
-  const activeSpaceId = useSelector(
-    (s: RootState) => s.spaceMembership.activeSpaceId,
+  //
+  // Use `orgMembership.activeOrgId` — not `spaceMembership.activeSpaceId`,
+  // which post-migration is an alias for `activeTeamId` and can land null
+  // before team membership loads. A null id makes `useYjsBodyShadow` go
+  // inert, so the editor never opens the Yjs WS, never binds yCollab, and
+  // every keystroke spills out as a debounced REST PATCH while two browsers
+  // silently see no live cursors / edits from each other.
+  const activeOrgId = useSelector(
+    (s: RootState) => s.orgMembership.activeOrgId,
   );
   // Identity for Yjs awareness: peers see my caret labelled with this name
   // and tinted with this color. Memoised so a new object reference doesn't
@@ -482,7 +489,7 @@ export function MarkdownNoteEditor({
   ]);
   const yjsBody = useYjsBodyShadow(
     persist ? note.id : null,
-    activeSpaceId,
+    activeOrgId ?? null,
     collabUser,
   );
   const yjsBodyRef = useRef(yjsBody);
