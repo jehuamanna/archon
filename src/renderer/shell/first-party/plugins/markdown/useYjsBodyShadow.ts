@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import * as Y from "yjs";
 import { HocuspocusProvider } from "@hocuspocus/provider";
 import type { Awareness } from "y-protocols/awareness";
@@ -159,6 +159,24 @@ export interface CollabUser {
   color: string;
 }
 
+function publishAwarenessUser(
+  provider: HocuspocusProvider | null,
+  user: CollabUser | null | undefined,
+): boolean {
+  if (!provider || !user) return false;
+  try {
+    provider.awareness?.setLocalStateField("user", {
+      name: user.name,
+      color: user.color,
+      colorLight: user.color,
+      id: user.id,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Deterministic per-user color via hash → HSL. Stable across reloads so a
  * given collaborator always gets the same caret hue.
@@ -193,6 +211,8 @@ export function useYjsBodyShadow(
 ): YjsBodyShadow {
   const [connected, setConnected] = useState(false);
   const [awareness, setAwareness] = useState<Awareness | null>(null);
+  const userRef = useRef<CollabUser | null>(user ?? null);
+  userRef.current = user ?? null;
 
   // The Y.Doc + Y.Text are derived directly from noteId via the stable cache —
   // no useState, no re-render flicker. yCollab in the editor's extensions
@@ -249,18 +269,7 @@ export function useYjsBodyShadow(
       // color, colorLight}` for its remote-selections theme — without these
       // fields, peers receive the awareness packet but yRemoteSelectionsTheme
       // skips the caret decoration, so the cursor is silently invisible.
-      if (user) {
-        try {
-          provider.awareness?.setLocalStateField("user", {
-            name: user.name,
-            color: user.color,
-            colorLight: user.color,
-            id: user.id,
-          });
-        } catch {
-          /* awareness may be null in degenerate test harnesses */
-        }
-      } else {
+      if (!publishAwarenessUser(provider, userRef.current)) {
         // eslint-disable-next-line no-console
         console.warn(
           "[yjs-body] no collabUser at WS open — peers won't render this caret. Check auth.state.status in MarkdownNoteEditor.",
@@ -270,6 +279,9 @@ export function useYjsBodyShadow(
       if (!cancelled) setAwareness(provider.awareness ?? null);
       const onStatus = (): void => {
         if (cancelled || !provider) return;
+        // Reassert awareness identity on reconnect/sync transitions so peers
+        // keep rendering this user's caret even after provider reconnects.
+        void publishAwarenessUser(provider, userRef.current);
         const ok = provider.synced && provider.isConnected;
         // Snapshot peer count + whether each peer carries a `user` field so
         // a missing remote caret is diagnosable from the console alone.
