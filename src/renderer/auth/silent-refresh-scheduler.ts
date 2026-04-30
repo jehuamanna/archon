@@ -160,7 +160,10 @@ function detachDocHandlers(): void {
 
 export function startSilentRefreshScheduler(): void {
   if (running) {
-    console.warn(`${LOG_TAG} silent-refresh: start called while already running`);
+    // Idempotent: callers (e.g., auth bootstrap, login thunk) re-invoke after
+    // token rotation. Re-schedule against the freshly stored token instead of
+    // warning, so a second call behaves like restartSilentRefreshScheduler().
+    scheduleFromStoredToken();
     return;
   }
   running = true;

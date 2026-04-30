@@ -14,7 +14,6 @@ import { setAccessToken, setActiveOrgId, setActiveSpaceId } from "../auth/auth-s
 import { decodeJwtPayload } from "../auth/jwt-exp";
 import {
   refreshNowIfExpired,
-  restartSilentRefreshScheduler,
   startSilentRefreshScheduler,
   stopSilentRefreshScheduler,
 } from "../auth/silent-refresh-scheduler";
@@ -246,7 +245,6 @@ export const cloudRestoreSessionThunk = createAsyncThunk<
     };
 
     startSilentRefreshScheduler();
-    restartSilentRefreshScheduler();
 
     // Defer heavy operations to macrotask queue to allow UI to render first
     setTimeout(() => {
@@ -339,7 +337,6 @@ export const cloudLoginThunk = createAsyncThunk<
   }
   void dispatch(fetchNotificationsThunk());
   startSilentRefreshScheduler();
-  restartSilentRefreshScheduler();
   return {
     userId,
     email: email.toLowerCase(),
