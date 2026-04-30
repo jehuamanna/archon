@@ -820,7 +820,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   // top of the component; we just feed the hook's flag through.)
   const wsRefreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { connected: realtimeConnected } = useRealtimeSpaceEvents(
-    activeSpaceId,
+    activeOrgId,
     (evt) => {
       if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS)
         return;
