@@ -28,6 +28,8 @@ function bumpContentSaveSeqAfterExternalLoad(noteId: string): number {
 
 interface NotesState {
   currentNote: Note | null;
+  /** Background-warmed note details keyed by id. */
+  notePrefetchById: Record<string, Note>;
   notesList: NoteListItem[];
   /** Sidebar / tree list fetch */
   listLoading: boolean;
@@ -53,6 +55,7 @@ interface NotesState {
 
 const initialState: NotesState = {
   currentNote: null,
+  notePrefetchById: {},
   notesList: [],
   listLoading: false,
   detailLoading: false,
@@ -76,6 +79,14 @@ export const fetchAllNotes = createAsyncThunk<
   NotesThunkConfig
 >("notes/fetchAllNotes", async (_, { extra }) => {
   return await extra.localStore.notes.getAllNotes();
+});
+
+export const prefetchNote = createAsyncThunk<
+  Note | null,
+  string,
+  NotesThunkConfig
+>("notes/prefetchNote", async (noteId, { extra }) => {
+  return await extra.localStore.notes.getNote(noteId);
 });
 
 export const createNote = createAsyncThunk<
@@ -215,9 +226,16 @@ const notesSlice = createSlice({
   },
   extraReducers: (builder) => {
     builder
-      .addCase(fetchNote.pending, (state) => {
+      .addCase(fetchNote.pending, (state, action) => {
         state.detailLoading = true;
         state.error = null;
+        const requestedId = action.meta.arg;
+        if (requestedId) {
+          const cached = state.notePrefetchById[requestedId];
+          if (cached) {
+            state.currentNote = cached;
+          }
+        }
       })
       .addCase(fetchNote.fulfilled, (state, action) => {
         state.detailLoading = false;
@@ -230,6 +248,7 @@ const notesSlice = createSlice({
           state.error = null;
         }
         if (note?.id) {
+          state.notePrefetchById[note.id] = note;
           const bar = bumpContentSaveSeqAfterExternalLoad(note.id);
           state.noteContentSaveAppliedSeq[note.id] = bar;
         }
@@ -249,6 +268,11 @@ const notesSlice = createSlice({
       .addCase(fetchAllNotes.rejected, (state, action) => {
         state.listLoading = false;
         state.error = action.error.message || "Failed to fetch notes list";
+      })
+      .addCase(prefetchNote.fulfilled, (state, action) => {
+        const note = action.payload;
+        if (!note?.id) return;
+        state.notePrefetchById[note.id] = note;
       })
       .addCase(createNote.fulfilled, (state) => {
         state.error = null;

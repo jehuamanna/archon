@@ -12,7 +12,13 @@ import type { WpnNoteListItem, WpnProjectRow, WpnWorkspaceRow } from "../../../.
 import type { WpnImportConflictPolicy } from "../../../../../shared/wpn-import-export-types";
 import type { AppDispatch, RootState } from "../../../../store";
 import { useAuth } from "../../../../auth/AuthContext";
-import { clearNoteTitleDraft, fetchNote, setNoteTitleDraft } from "../../../../store/notesSlice";
+import {
+  clearNoteTitleDraft,
+  fetchNote,
+  patchNoteMetadata,
+  prefetchNote,
+  setNoteTitleDraft,
+} from "../../../../store/notesSlice";
 import {
   markNotePendingDelete,
   unmarkNotePendingDelete,
@@ -59,7 +65,6 @@ import {
 } from "../../../../../shared/note-vfs-path";
 import { useToast } from "../../../../toast/ToastContext";
 import { createChildImageNote } from "../image-notes/upload-image-asset";
-import { patchNoteMetadata } from "../../../../store/notesSlice";
 import {
   ADMIN_CMD_OPEN_PROJECT_SHARES,
   ADMIN_CMD_OPEN_WORKSPACE_SHARES,
@@ -573,6 +578,8 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const [menu, setMenu] = useState<MenuState>(null);
   const [typePicker, setTypePicker] = useState<TypePickerState>(null);
   const [renaming, setRenaming] = useState<RenamingState>(null);
+  const renamingRef = useRef<RenamingState>(null);
+  renamingRef.current = renaming;
   const [selection, dispatchSelection] = useReducer(selectionReducer, EMPTY_SELECTION);
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
@@ -822,6 +829,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const { connected: realtimeConnected } = useRealtimeSpaceEvents(
     activeOrgId,
     (evt) => {
+      if (renamingRef.current) return;
       if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS)
         return;
       // Coalesce bursts (rapid moves, multi-edge updates) to a single fetch.
@@ -853,6 +861,7 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
     if (!selectedProjectId || !projectOpen || !syncWpnNotesBackend()) return;
     if (wpnRealtimeConnected) return;
     const id = window.setInterval(() => {
+      if (renamingRef.current) return;
       if (Date.now() - lastMutationAtRef.current < WPN_MUTATION_POLL_QUIET_MS) return;
       void refreshProjectNotesFromServer(selectedProjectId);
     }, WPN_SYNC_REMOTE_POLL_INTERVAL_MS);
@@ -941,6 +950,8 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
 
   const performWpnNoteMove = useCallback(
     async (projectId: string, draggedId: string, targetId: string, placement: NoteMovePlacement) => {
+      lastMutationAtRef.current = Date.now();
+      beginWpnSync();
       const snapshot = notesRef.current;
       const optimistic = optimisticWpnNotesAfterMove(snapshot, draggedId, targetId, placement);
       if (optimistic) {
@@ -956,11 +967,16 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
       }
       try {
         await getArchon().wpnMoveNote({ projectId, draggedId, targetId, placement });
+        markWpnSyncOk();
+        // Let the optimistic tree stand while backend/realtime propagation settles,
+        // then reconcile from source of truth.
+        window.setTimeout(() => {
+          void loadProjectTree(projectId);
+        }, 400);
       } catch (e) {
+        markWpnSyncError(e);
         setNotes(snapshot);
         window.alert(e instanceof Error ? e.message : String(e));
-      } finally {
-        void loadProjectTree(projectId);
       }
     },
     [loadProjectTree, persistExpandedNotes],
@@ -1285,11 +1301,32 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
 
   const noteParentsMap = useMemo(() => {
     const m = new Map<string, string | null>();
-    for (const n of notes) {
-      m.set(n.id, n.parent_id ?? null);
-    }
+    for (const n of notes) m.set(n.id, n.parent_id ?? null);
     return m;
   }, [notes]);
+
+  useEffect(() => {
+    if (!projectOpen || !selectedProjectId || notes.length === 0) return;
+    if (renamingRef.current) return;
+    const visibleIds: string[] = [];
+    for (const n of notes) {
+      if (n.depth > 0 && !isNoteVisibleInTree(n.id, noteParentsMap, expandedNoteParents)) {
+        continue;
+      }
+      visibleIds.push(n.id);
+      if (visibleIds.length >= 12) break;
+    }
+    for (const id of visibleIds) {
+      void dispatch(prefetchNote(id));
+    }
+  }, [
+    dispatch,
+    expandedNoteParents,
+    noteParentsMap,
+    notes,
+    projectOpen,
+    selectedProjectId,
+  ]);
 
   const workspaceOrderedIds = useMemo(() => workspaces.map((w) => w.id), [workspaces]);
 
@@ -2677,6 +2714,10 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
             setWpnNoteDropHint((h) => (h?.targetId === n.id ? null : h));
           }}
           onDrop={(e) => void onDropOnNote(e, projectId, n.id)}
+          onMouseEnter={() => {
+            if (renamingRef.current) return;
+            void dispatch(prefetchNote(n.id));
+          }}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
