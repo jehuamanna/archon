@@ -1,6 +1,7 @@
 import React from "react";
 import { useSelector } from "react-redux";
 import { AuditLogPanel } from "../../../../admin/AuditLogPanel";
+import { DepartmentsPanel } from "../../../../admin/DepartmentsPanel";
 import { MasterConsolePanel } from "../../../../admin/MasterConsolePanel";
 import { MyAccountPanel } from "../../../../admin/MyAccountPanel";
 import { PeoplePanel } from "../../../../admin/PeoplePanel";
@@ -120,21 +121,16 @@ export function AdminMainView(
         </div>
       );
     case "org-departments":
-      // Department CRUD lives inline in `TeamsPanel`'s department picker
-      // until a dedicated DepartmentsPanel ships in a follow-up. Showing
-      // the Teams panel keeps the admin flow continuous.
       return (
         <div className={wrap}>
           <header>
             <h1 className={heading}>Departments</h1>
             <p className={muted}>
-              Departments group teams within an org. Manage them from the
-              Teams panel below — pick a team chip to see its parent
-              department, and use the department selector when creating a
-              new team.
+              Departments group teams within an org. Every team belongs to
+              exactly one department.
             </p>
           </header>
-          <TeamsPanel />
+          <DepartmentsPanel />
         </div>
       );
     case "org-activity":
