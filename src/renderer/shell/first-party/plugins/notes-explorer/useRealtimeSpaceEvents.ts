@@ -3,11 +3,17 @@ import { createSyncBaseUrlResolver } from "@archon/platform";
 import { authedFetch } from "../../../../auth/auth-retry";
 
 /**
- * Subscribe to realtime structural events on the active space's WebSocket
+ * Subscribe to realtime structural events on the active org's WebSocket
  * channel. Replaces 8 s polling for the WPN tree — when the server
  * fans out a `note.created / moved / renamed / deleted` (or
- * `edge.added/removed`) event for a space we're connected to, the caller
+ * `edge.added/removed`) event for the org we're connected to, the caller
  * receives it immediately and can refetch only what changed.
+ *
+ * The URL slot is `:orgId` and the server enforces that the JWT's
+ * `activeOrgId` claim matches it (a mismatch closes 4401 "scope mismatch"
+ * and triggers a tight reconnect loop). Callers must pass the active org
+ * id, not a team/space id — post-migration the legacy redux
+ * `spaceMembership.activeSpaceId` is an alias for `activeTeamId`.
  *
  * Lifecycle:
  *   1. Mint a 5 min `typ: "wsClient"` JWT via `POST /v1/realtime/ws-token`.
@@ -137,7 +143,7 @@ export interface UseRealtimeSpaceEventsResult {
  * a refresh effect off `lastEventAt`.
  */
 export function useRealtimeSpaceEvents(
-  spaceId: string | null,
+  orgId: string | null,
   onEvent?: (evt: RealtimeStructuralEvent) => void,
 ): UseRealtimeSpaceEventsResult {
   const [connected, setConnected] = useState(false);
@@ -148,7 +154,7 @@ export function useRealtimeSpaceEvents(
   onEventRef.current = onEvent;
 
   useEffect(() => {
-    if (!spaceId) {
+    if (!orgId) {
       setConnected(false);
       return;
     }
@@ -177,7 +183,7 @@ export function useRealtimeSpaceEvents(
       }
       let token: string;
       try {
-        token = await mintRealtimeWsToken(syncBase, spaceId);
+        token = await mintRealtimeWsToken(syncBase, orgId);
       } catch (err) {
         if (cancelled) return;
         attempt++;
@@ -190,7 +196,7 @@ export function useRealtimeSpaceEvents(
       if (cancelled) return;
 
       const wsBase = resolveRealtimeWsBase(syncBase);
-      const url = `${wsBase}/ws/realtime/${encodeURIComponent(spaceId)}?token=${encodeURIComponent(token)}`;
+      const url = `${wsBase}/ws/realtime/${encodeURIComponent(orgId)}?token=${encodeURIComponent(token)}`;
       try {
         socket = new WebSocket(url);
       } catch (err) {
@@ -262,7 +268,7 @@ export function useRealtimeSpaceEvents(
       }
       setConnected(false);
     };
-  }, [spaceId]);
+  }, [orgId]);
 
   return { connected, lastEventAt, lastEvent };
 }
