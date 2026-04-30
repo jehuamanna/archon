@@ -502,6 +502,10 @@ export function MdxNoteEditor({
     const update = (): void => {
       const next = ytext.toString();
       if (latestRef.current === next) return;
+      // Y.Text can be briefly empty before initial sync lands. If this
+      // note already has non-empty content, don't clobber the mirror with
+      // "" and let the seeded state arrive first.
+      if (next === "" && latestRef.current.length > 0) return;
       latestRef.current = next;
       setValue(next);
       setPreviewContent(next);
@@ -511,7 +515,7 @@ export function MdxNoteEditor({
     return () => {
       ytext.unobserve(update);
     };
-  }, [yjsBody.yText]);
+  }, [yjsBody.yText, note.id]);
 
   const flushNow = useCallback(() => {
     if (flushTimerRef.current !== null) {
