@@ -9,6 +9,7 @@ import {
 } from "@archon/ui-types";
 import { PLUGIN_UI_METADATA_KEY } from "../../shared/plugin-state-protocol";
 import { isNotePendingDelete } from "./pendingNoteDeletes";
+import { isPlaceholderNoteId } from "../notes/placeholder-note-id";
 
 type NotesThunkConfig = { extra: ArchonPlatformDeps };
 
@@ -70,6 +71,12 @@ export const fetchNote = createAsyncThunk<
   string | undefined,
   NotesThunkConfig
 >("notes/fetchNote", async (noteId, { extra }) => {
+  // Skip optimistic-create placeholders (`__pending_create__<uuid>`):
+  // they aren't valid Postgres uuids, so the GET would 404 (after the
+  // server-side defensive validator) or 500 (before it). Either way, the
+  // request is wasted — the real id replaces the placeholder when the
+  // create RPC resolves and the next dispatch fetches against that.
+  if (noteId && isPlaceholderNoteId(noteId)) return null;
   return await extra.localStore.notes.getNote(noteId);
 });
 
@@ -86,6 +93,10 @@ export const prefetchNote = createAsyncThunk<
   string,
   NotesThunkConfig
 >("notes/prefetchNote", async (noteId, { extra }) => {
+  // Same gate as fetchNote: the explorer's prefetch loop iterates the
+  // first ~12 visible note ids on every notes-list change, which during
+  // an optimistic create would round-trip the placeholder to the server.
+  if (isPlaceholderNoteId(noteId)) return null;
   return await extra.localStore.notes.getNote(noteId);
 });
 

@@ -635,6 +635,47 @@ export const yjsStateUpdates = pgTable(
   }),
 );
 
+// ---------- note checkpoints (manual snapshots) ----------
+
+/**
+ * User-triggered snapshots of a note's full Y.Doc state. The server reads
+ * its own authoritative Y.Doc (via Hocuspocus' direct connection) when a
+ * checkpoint is requested — clients never upload state, so the live CRDT is
+ * never raced by REST writes. Restore (Phase 2) decodes the snapshot,
+ * computes a text diff against the live Y.Text, and applies it as a single
+ * transaction with origin `restoreOrigin` so per-user undo (yCollab's
+ * YSyncConfig-scoped UndoManager) does not retract someone else's restore.
+ *
+ * `content_text` is denormalised markdown for cheap list/preview rendering
+ * without decoding `yjs_state`. `content_sha256` keys 30s app-level dedupe
+ * for rapid double-clicks.
+ */
+export const noteCheckpoints = pgTable(
+  "note_checkpoints",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    noteId: uuid("note_id")
+      .notNull()
+      .references(() => notes.id, { onDelete: "cascade" }),
+    createdByUserId: uuid("created_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    label: text("label"),
+    pinned: boolean("pinned").notNull().default(false),
+    yjsState: bytea("yjs_state").notNull(),
+    contentText: text("content_text").notNull(),
+    contentSha256: text("content_sha256").notNull(),
+    sizeBytes: integer("size_bytes").notNull(),
+    createdAtMs: bigint("created_at_ms", { mode: "number" }).notNull(),
+  },
+  (t) => ({
+    byNoteCreatedAt: index("note_checkpoints_note_created_idx").on(
+      t.noteId,
+      t.createdAtMs,
+    ),
+  }),
+);
+
 // ---------- type re-exports ----------
 
 export type User = typeof users.$inferSelect;
@@ -653,4 +694,6 @@ export type YjsState = typeof yjsState.$inferSelect;
 export type NewYjsState = typeof yjsState.$inferInsert;
 export type YjsStateUpdate = typeof yjsStateUpdates.$inferSelect;
 export type NewYjsStateUpdate = typeof yjsStateUpdates.$inferInsert;
+export type NoteCheckpoint = typeof noteCheckpoints.$inferSelect;
+export type NewNoteCheckpoint = typeof noteCheckpoints.$inferInsert;
 export type LegacyObjectIdMapRow = typeof legacyObjectIdMap.$inferSelect;

@@ -130,7 +130,114 @@ export async function applyContentToYjsDoc(
   }
 }
 
+/**
+ * Snapshot the live Y.Doc for `noteId`: returns a full-state encoded buffer
+ * (`Y.encodeStateAsUpdate`) plus the current `Y.Text("content")` text. Used
+ * by the checkpoint endpoints — clients never upload state, so the live
+ * CRDT is never raced by REST writes.
+ *
+ * Routes through `openDirectConnection` so any in-memory edits not yet
+ * flushed to `yjs_state` are included. Throws if Hocuspocus isn't mounted —
+ * checkpoint routes report that as 503; tests configure the WS route.
+ */
+export async function snapshotYjsDocForNote(
+  noteId: string,
+): Promise<{ stateBytes: Buffer; contentText: string }> {
+  if (!_sharedServer) {
+    throw new Error("Hocuspocus server not configured");
+  }
+  const conn = await _sharedServer.openDirectConnection(noteId);
+  try {
+    let stateBytes: Buffer | null = null;
+    let contentText = "";
+    await conn.transact((document) => {
+      stateBytes = Buffer.from(Y.encodeStateAsUpdate(document));
+      contentText = document.getText("content").toString();
+    });
+    if (!stateBytes) {
+      throw new Error("snapshotYjsDocForNote: transact did not yield state");
+    }
+    return { stateBytes, contentText };
+  } finally {
+    await conn.disconnect();
+  }
+}
+
+/** Test helper: expose whether Hocuspocus is currently configured. */
+export function isYjsServerConfigured(): boolean {
+  return _sharedServer !== null;
+}
+
+/**
+ * Strict variant of `applyContentToYjsDoc`: replaces `Y.Text("content")` for
+ * `noteId` and throws on failure. Used by the checkpoint restore endpoint
+ * where the caller needs to know the live broadcast actually landed (the
+ * REST-bridge variant deliberately swallows errors because the underlying
+ * notes.content PATCH already succeeded).
+ *
+ * Restore is implemented as full-text replace, not CRDT history merge: the
+ * snapshot's Y.Doc binary is decoded only to extract its text, then the
+ * live document's Y.Text is rewritten inside a Hocuspocus direct connection
+ * transaction. Per the spec this is "Option A — apply-as-diff"; Option B
+ * (`Y.applyUpdate`) merges histories and produces surprising results, so
+ * it is intentionally not used.
+ *
+ * Origin of the resulting transaction is the Hocuspocus direct connection
+ * — explicitly not any client's `YSyncConfig`. That means per-user
+ * `Y.UndoManager` instances (registered via `addTrackedOrigin(syncConf)` in
+ * y-codemirror.next) ignore the restore op, so no collaborator's Cmd-Z can
+ * inadvertently retract someone else's restore.
+ */
+export async function replaceYjsDocContent(
+  noteId: string,
+  content: string,
+): Promise<void> {
+  if (!_sharedServer) {
+    throw new Error("Hocuspocus server not configured");
+  }
+  const conn = await _sharedServer.openDirectConnection(noteId);
+  try {
+    await conn.transact((document) => {
+      const ytext = document.getText("content");
+      const current = ytext.toString();
+      if (current === content) return;
+      ytext.delete(0, ytext.length);
+      if (content.length > 0) ytext.insert(0, content);
+    });
+  } finally {
+    await conn.disconnect();
+  }
+}
+
+/**
+ * Decode a checkpoint's stored Y.Doc state (bytes from
+ * `note_checkpoints.yjs_state`, originally produced by
+ * `Y.encodeStateAsUpdate` inside `snapshotYjsDocForNote`) and return the
+ * snapshot's `Y.Text("content")` value. Restore consumes only the text —
+ * the binary is opaque to the route layer.
+ */
+export function decodeCheckpointContent(stateBytes: Buffer): string {
+  const doc = new Y.Doc();
+  try {
+    Y.applyUpdate(doc, stateBytes);
+    return doc.getText("content").toString();
+  } finally {
+    doc.destroy();
+  }
+}
+
+// Cheap UUID v4 / generic UUID shape check — sufficient to short-circuit
+// before Postgres rejects a non-uuid string with 22P02.
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 async function resolveProjectForNote(noteId: string): Promise<string | null> {
+  // Defensive: WS clients have been seen sending renderer-side
+  // `__pending_create__<uuid>` placeholders during the optimistic-create
+  // window. Without this guard, the SELECT below errors at the uuid cast
+  // and the auth callback throws — turning what should be a clean "no
+  // such note" close into a generic upgrade failure.
+  if (!UUID_RE.test(noteId)) return null;
   const noteRows = await getDb()
     .select({ projectId: notes.projectId })
     .from(notes)

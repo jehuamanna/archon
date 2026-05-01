@@ -5,6 +5,7 @@ import type { Awareness } from "y-protocols/awareness";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { createSyncBaseUrlResolver } from "@archon/platform";
 import { authedFetch } from "../../../../auth/auth-retry";
+import { isPlaceholderNoteId } from "../../../../notes/placeholder-note-id";
 
 /**
  * Per-note Yjs body collaboration hook. Opens a Hocuspocus WebSocket
@@ -231,6 +232,16 @@ export function useYjsBodyShadow(
       setConnected(false);
       return;
     }
+    // Optimistic-create placeholders (`__pending_create__<uuid>`) appear
+    // briefly in the editor while the server is still constructing the
+    // real row. They aren't valid Postgres uuids, so the WS auth callback
+    // would reject them with "note has no resolvable project" and the
+    // browser would retry-loop until the placeholder is swapped for the
+    // real id. Stay inert in that window.
+    if (isPlaceholderNoteId(noteId)) {
+      setConnected(false);
+      return;
+    }
     let cancelled = false;
     let provider: HocuspocusProvider | null = null;
     (async () => {
@@ -318,14 +329,38 @@ export function useYjsBodyShadow(
       // editor's yCollab extension may still hold the Y.Text reference
       // until React reconciles, and the next mount of this hook (e.g.
       // StrictMode re-mount, spaceId flicker) will reuse the same Doc.
-      if (provider) {
+      //
+      // Defer the actual disconnect/destroy by a short window so pending
+      // Y.Doc updates have time to flush over the WS. Without the delay,
+      // a fast type→navigate sequence races: the user's last keystroke
+      // produces a Y.Doc 'update' event that HocuspocusProvider queues
+      // for WS send, and `provider.disconnect()` immediately after closes
+      // the socket before the queued bytes are actually transmitted to
+      // TCP — server never sees the keystroke, and a peer that opens the
+      // note from a different machine sees stale content. (The local Y.Doc
+      // and IndexedDB both retain the keystroke, so the same client
+      // returning to the note still sees it; the loss is server-side and
+      // cross-client.)
+      //
+      // Awareness is published as an empty-state immediately so peers'
+      // yRemoteSelections drop our caret right away, instead of waiting
+      // the full TTL.
+      const p = provider;
+      provider = null;
+      if (p) {
         try {
-          provider.disconnect();
-          provider.destroy();
+          p.awareness?.setLocalState({});
         } catch {
           /* noop */
         }
-        provider = null;
+        setTimeout(() => {
+          try {
+            p.disconnect();
+            p.destroy();
+          } catch {
+            /* noop */
+          }
+        }, 1500);
       }
     };
     // `user` intentionally excluded from deps: identity changes mid-session
