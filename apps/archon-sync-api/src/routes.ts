@@ -27,6 +27,7 @@ import { registerTeamRoutes } from "./team-routes.js";
 import { registerWpnBatchRoutes } from "./wpn-batch-routes.js";
 import { registerWpnReadRoutes } from "./wpn-routes.js";
 import { registerWpnWriteRoutes } from "./wpn-write-routes.js";
+import { registerNoteCheckpointsRoutes } from "./note-checkpoints-routes.js";
 import { registerMcpDeviceAuthRoutes } from "./mcp-device-auth-routes.js";
 import { registerNotificationsRoutes } from "./notifications-routes.js";
 import { registerWpnImportExportRoutes } from "./wpn-import-export-routes.js";
@@ -106,6 +107,7 @@ export function registerRoutes(
   registerBundledDocsPublicRoutes(app);
   registerWpnReadRoutes(app, { jwtSecret });
   registerWpnWriteRoutes(app, { jwtSecret });
+  registerNoteCheckpointsRoutes(app, { jwtSecret });
   registerWpnBatchRoutes(app, { jwtSecret });
   registerMeRoutes(app, { jwtSecret });
   app.register(async (scoped) => registerMeAssetsRoutes(scoped, { jwtSecret }));

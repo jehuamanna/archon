@@ -4,6 +4,7 @@ import NoteViewer from "../../components/NoteViewer";
 import { workspaceFolderPathForNote } from "../../../shared/note-workspace";
 import type { AppDispatch, RootState } from "../../store";
 import { clearNoteTitleDraft, fetchAllNotes, fetchNote, renameNote } from "../../store/notesSlice";
+import { isPlaceholderNoteId } from "../../notes/placeholder-note-id";
 import {
   runWpnNoteTitleRenameWithVfsDependentsFlow,
   useVfsDependentTitleRenameChoice,
@@ -33,7 +34,12 @@ export function NoteEditorShellView(_props: ShellViewComponentProps): React.Reac
 
   const prevNoteIdRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    if (noteId) {
+    // Skip placeholder ids (e.g. `__pending_create__<uuid>` from the
+    // explorer's optimistic create flow) — they aren't valid Postgres
+    // uuids and the GET /wpn/notes/:id query would otherwise round-trip
+    // a 22P02 / 500 from the server. The real id replaces the placeholder
+    // once the create call resolves; this effect re-runs at that point.
+    if (noteId && !isPlaceholderNoteId(noteId)) {
       void dispatch(fetchNote(noteId));
     }
   }, [dispatch, noteId]);

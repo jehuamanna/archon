@@ -7,7 +7,7 @@
 #
 # What it does:
 #   - Detects current active color from deploy/nginx-active-web.upstream.conf
-#   - Builds the web image (Dockerfile.web -> archon-web:local)
+#   - Builds the web image (Dockerfile target=web -> archon-web:local)
 #   - Recreates the *inactive* color container on the archon_default network
 #   - Waits until the UI responds on :3000 (HTTP GET to 127.0.0.1 inside the web container via
 #     docker exec — avoids cross-container DNS/IPv6 issues; no Docker HEALTHCHECK on docker-run
@@ -82,7 +82,7 @@ fi
 echo "[archon] Deploying UI: ${current} -> ${next}"
 
 echo "[archon] Building web image (${IMAGE})..."
-(cd "$REPO_ROOT" && docker build -t "$IMAGE" -f Dockerfile.web .)
+(cd "$REPO_ROOT" && DOCKER_BUILDKIT=1 docker build --target web -t "$IMAGE" -f Dockerfile .)
 
 target_container="archon-web-${next}"
 old_container="archon-web-${current}"

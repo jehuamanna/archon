@@ -12,7 +12,7 @@
  * dependency on `src/shared/`.
  */
 import type { FastifyInstance } from "fastify";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import { requireAuth } from "./auth.js";
 import { resolveActiveOrgId } from "./org-auth.js";
@@ -383,7 +383,12 @@ export function registerWpnWriteRoutes(
       .from(notes)
       .where(
         and(
-          sql`${notes.projectId} = ANY(${projectIds})`,
+          // `inArray` serializes the JS array as a parameterised
+          // `IN (...)` list. The previous `sql\`= ANY(${projectIds})\``
+          // unwrapped the array and passed the first element as a single
+          // text param — Postgres then tried to read it as an array
+          // literal and threw 22P02 ("malformed array literal").
+          inArray(notes.projectId, projectIds),
           sql`${notes.deleted} IS NOT TRUE`,
         ),
       );

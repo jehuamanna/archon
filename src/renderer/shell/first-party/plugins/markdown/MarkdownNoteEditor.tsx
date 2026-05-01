@@ -1,6 +1,6 @@
 import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
-import type { EditorView } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import { keymap, type EditorView } from "@codemirror/view";
+import { EditorState, Prec } from "@codemirror/state";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
@@ -26,6 +26,8 @@ import type { WpnNoteWithContextListItem } from "../../../../../shared/wpn-v2-ty
 import type { InternalMarkdownNoteLink } from "../../../../utils/markdown-internal-note-href";
 import { MarkdownNoteLinkPickerModal } from "./MarkdownNoteLinkPickerModal";
 import { MarkdownNoteLinkAutocompletePopover } from "./MarkdownNoteLinkAutocompletePopover";
+import { NoteCheckpointSaveModal } from "./NoteCheckpointSaveModal";
+import { NoteCheckpointHistoryPanel } from "./NoteCheckpointHistoryPanel";
 import { ARCHON_MARKDOWN_OPEN_NOTE_LINK_PICKER_EVENT } from "./markdownNoteLinkEvents";
 import { findActiveWikiLinkTrigger } from "./markdownWikiLinkTrigger";
 import {
@@ -34,7 +36,7 @@ import {
   type MarkdownNoteSelectionSyncRef,
   type MarkdownNoteWikiKeymapState,
 } from "./markdown-note-editor-codemirror";
-import { yCollab } from "y-codemirror.next";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { useArchonNoteModeLine } from "../../../useArchonNoteModeLine";
 import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -104,6 +106,16 @@ export function MarkdownNoteEditor({
   const onBlurRef: MarkdownNoteOnBlurRef = useRef(null);
 
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  const [checkpointSaveOpen, setCheckpointSaveOpen] = useState(false);
+  const [checkpointHistoryOpen, setCheckpointHistoryOpen] = useState(false);
+  // Tracks the most recent noteId for which yCollab has actually bound. Once
+  // set, the React `value` prop for that note is stale forever — Y.Text is
+  // the canonical source of truth — so any ExternalChange tx targeting that
+  // note must be dropped, not just length-shrink ones. Reset is implicit:
+  // navigating to a different note leaves the ref pointing at the OLD id, so
+  // the new note's pre-bind ExternalChange (REST content load) passes
+  // through normally until the new note's yCollab binds and updates the ref.
+  const lastYCollabBoundNoteIdRef = useRef<string | null>(null);
   const [sel, setSel] = useState({ start: 0, end: 0 });
   const [wikiDismissed, setWikiDismissed] = useState(false);
   const [wikiRows, setWikiRows] = useState<WpnNoteLinkRow[]>([]);
@@ -705,25 +717,47 @@ export function MarkdownNoteEditor({
       imagePasteCtxRef,
     });
     // @uiw/react-codemirror's value-effect occasionally dispatches an
-    // `ExternalChange`-annotated transaction with `insert: ""` (a stale
-    // forceUpdate closure capturing an empty `value` prop). When yCollab
-    // is bound, that transaction propagates through ySyncPlugin and wipes
-    // Y.Text — which the server then persists, destroying the note. Drop
-    // any ExternalChange transaction that would shrink a non-empty doc:
-    // full empties (newLen === 0) are the original wipe; partial shrinks
-    // (newLen < startLen) happen when a stale React `value` prop, lagging
-    // behind Y.Text, is fed back through CodeMirror on a connected→
-    // disconnected flicker. Real user edits never come through ExternalChange.
+    // `ExternalChange`-annotated transaction synthesized from a stale
+    // closure over the React `value` prop — most often during a
+    // connected→disconnected flicker, when `value={connected ? undefined :
+    // value}` flips back to `value` and that `value` is lagging behind
+    // Y.Text. Once propagated through ySyncPlugin, this overwrites Y.Text
+    // and the server persists the wrong content (Hocuspocus' onStoreDocument
+    // flushes whatever is in the Y.Doc).
+    //
+    // The original guard dropped only LENGTH SHRINKS, but the same race
+    // produces same-length and grow tx's whenever `value` and Y.Text have
+    // diverged in any direction (peer typed → grew Y.Text; user navigated
+    // and back → React reloaded shorter REST content, etc.). The right
+    // invariant is stronger: once yCollab has bound at least once for this
+    // note, Y.Text is the only legitimate writer — drop EVERY ExternalChange
+    // for this note thereafter, regardless of length delta.
+    //
+    // Pre-bind, ExternalChange is still legitimate (the initial REST content
+    // load propagates through it) so we keep the original shrink-only guard
+    // active in that window as a defensive net for stale forceUpdate races.
     ext.push(
       EditorState.transactionFilter.of((tr) => {
         if (tr.annotation(ExternalChange) !== true) return tr;
         if (!tr.docChanged) return tr;
+        if (lastYCollabBoundNoteIdRef.current === note.id) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[md-editor] dropped post-bind ExternalChange tx (stale value prop)",
+            {
+              noteId: note.id,
+              startLen: tr.startState.doc.length,
+              newLen: tr.newDoc.length,
+            },
+          );
+          return [];
+        }
         const startLen = tr.startState.doc.length;
         const newLen = tr.newDoc.length;
         if (startLen > 0 && newLen < startLen) {
           // eslint-disable-next-line no-console
           console.warn(
-            "[md-editor] dropped ExternalChange shrink tx",
+            "[md-editor] dropped pre-bind ExternalChange shrink tx",
             { noteId: note.id, startLen, newLen },
           );
           return [];
@@ -741,6 +775,14 @@ export function MarkdownNoteEditor({
     // edits are committed to Y.Text with the right transaction origin.
     if (yjsBody.yText && yjsBody.connected) {
       ext.push(yCollab(yjsBody.yText, yjsBody.awareness));
+      // yCollab's UndoManager is already scoped to the local YSyncConfig
+      // origin (see y-undomanager.js: addTrackedOrigin(syncConf)), so its
+      // undo() ignores remote edits. But yCollab does NOT install its
+      // keymap — Cmd-Z falls through to historyKeymap and triggers
+      // CodeMirror's native EditorState undo, which reverts whatever is
+      // visible (remote edits included). Shadow Mod-z/y/Shift-z at higher
+      // precedence so they route to the user-scoped Y.UndoManager.
+      ext.push(Prec.high(keymap.of(yUndoManagerKeymap)));
     }
     return ext;
   }, [
@@ -779,6 +821,46 @@ export function MarkdownNoteEditor({
       cmViewRef.current = null;
     }
   }, [readOnly, viewMode]);
+
+  // Track the most recent noteId that yCollab has bound for — used by the
+  // ExternalChange transaction filter (in cmExtensions) to drop stale
+  // value-prop transactions after the first bind. See the filter's comment
+  // for why post-bind ExternalChange is always stale.
+  useEffect(() => {
+    if (yjsBody.yText && yjsBody.connected) {
+      lastYCollabBoundNoteIdRef.current = note.id;
+    }
+  }, [note.id, yjsBody.yText, yjsBody.connected]);
+
+  // First-connect cursor render fix.
+  //
+  // y-codemirror.next's `yRemoteSelections` ViewPlugin (see
+  // node_modules/y-codemirror.next/src/y-remote-selections.js:122) initialises
+  // `decorations = empty` in its constructor and only re-renders inside
+  // `update()` — which CodeMirror calls in response to ViewUpdates. Its own
+  // awareness listener dispatches an annotation when a peer's state changes,
+  // but explicitly filters out self-only changes.
+  //
+  // During first connect, peers' awareness packets arrive during the
+  // Hocuspocus sync phase, BEFORE yCollab is added to the extension list
+  // (we gate yCollab on `yjsBody.connected` to avoid binding to an empty
+  // Y.Text — see the bind-after-sync memory note). By the time yCollab
+  // mounts, the peer awareness states are already present in
+  // `awareness.getStates()`, but no further `change` event will fire to
+  // trigger the plugin's update(), and self re-publishes are filtered. The
+  // plugin sits with empty decorations until the local user happens to
+  // type / focus / scroll — making remote cursors look invisible on first
+  // connect.
+  //
+  // Dispatching a self-selection transaction once yCollab is bound forces a
+  // ViewUpdate so the plugin's update() runs against the now-populated
+  // awareness state and renders existing peer carets immediately.
+  useEffect(() => {
+    if (!yjsBody.yText || !yjsBody.connected || !yjsBody.awareness) return;
+    const view = cmViewRef.current;
+    if (!view) return;
+    view.dispatch({ selection: view.state.selection });
+  }, [yjsBody.yText, yjsBody.connected, yjsBody.awareness]);
 
   selectionSyncRef.current = (from, to, head) => {
     lastCaretRef.current = { start: from, end: to };
@@ -855,6 +937,27 @@ export function MarkdownNoteEditor({
               >
                 Link to note
               </button>
+              <button
+                type="button"
+                className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted/40"
+                onClick={() => setCheckpointSaveOpen(true)}
+                title="Save a restorable snapshot of the current contents"
+              >
+                Checkpoint
+              </button>
+              <button
+                type="button"
+                aria-pressed={checkpointHistoryOpen}
+                className={`rounded-md border border-border px-2.5 py-1 text-[11px] font-medium hover:bg-muted/40 ${
+                  checkpointHistoryOpen
+                    ? "bg-muted/60 text-foreground"
+                    : "bg-background text-foreground"
+                }`}
+                onClick={() => setCheckpointHistoryOpen((v) => !v)}
+                title="Show checkpoint history"
+              >
+                History
+              </button>
               <div className="text-[11px] text-muted-foreground">Markdown</div>
             </>
           )}
@@ -911,7 +1014,30 @@ export function MarkdownNoteEditor({
             </div>
           </div>
         ) : null}
+
+        {checkpointHistoryOpen ? (
+          <NoteCheckpointHistoryPanel
+            note={note}
+            onClose={() => setCheckpointHistoryOpen(false)}
+          />
+        ) : null}
       </div>
+
+      <NoteCheckpointSaveModal
+        open={checkpointSaveOpen}
+        noteId={note.id}
+        onClose={() => setCheckpointSaveOpen(false)}
+        onSaved={(_cp, deduped) => {
+          // Open the panel so the user sees their new entry; if deduped, the
+          // existing recent row is selected instead of a new duplicate.
+          setCheckpointHistoryOpen(true);
+          if (deduped) {
+            // Subtle signal that no new row was written.
+            // eslint-disable-next-line no-console
+            console.info("[checkpoint] deduped within 30s window");
+          }
+        }}
+      />
 
       <MarkdownNoteLinkPickerModal
         open={linkPickerOpen}

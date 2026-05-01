@@ -1705,6 +1705,11 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   ) => {
     lastMutationAtRef.current = Date.now();
     const tempId = `__pending_create__${crypto.randomUUID()}`;
+    // NB: any consumer that takes a `noteId` and would issue a server
+    // request with it must call `isPlaceholderNoteId(id)` first and skip —
+    // the server's `notes.id` column is a Postgres uuid, so a placeholder
+    // string would surface as a 500 (see assertCanReadProjectForNote /
+    // -ForWrite, which now defensively 404 on non-UUID input).
     const optimistic = optimisticWpnNotesAfterCreate(notesRef.current, {
       newId: tempId,
       projectId,

@@ -13,6 +13,7 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { and, eq, sql } from "drizzle-orm";
 import type { JwtPayload } from "./auth.js";
 import { getDb } from "./pg.js";
+import { isUuid } from "./db/legacy-id-map.js";
 import {
   notes,
   orgMemberships,
@@ -245,6 +246,14 @@ export async function assertCanReadProjectForNote(
   auth: JwtPayload,
   noteId: string,
 ): Promise<ProjectRow | null> {
+  // Validate UUID format before hitting Postgres. Without this, callers
+  // passing renderer-side placeholders (e.g. `__pending_create_<uuid>` for
+  // optimistic note creation) cause a 22P02 from the `notes.id uuid` column
+  // and surface as 500 Internal Server Error instead of a clean 404.
+  if (!isUuid(noteId)) {
+    await reply.status(404).send({ error: "Note not found" });
+    return null;
+  }
   const noteRows = await getDb()
     .select({ projectId: notes.projectId })
     .from(notes)
@@ -264,6 +273,10 @@ export async function assertCanWriteProjectForNote(
   auth: JwtPayload,
   noteId: string,
 ): Promise<ProjectRow | null> {
+  if (!isUuid(noteId)) {
+    await reply.status(404).send({ error: "Note not found" });
+    return null;
+  }
   const noteRows = await getDb()
     .select({ projectId: notes.projectId })
     .from(notes)

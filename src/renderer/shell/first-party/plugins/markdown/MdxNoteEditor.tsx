@@ -1,5 +1,6 @@
-import CodeMirror from "@uiw/react-codemirror";
-import type { EditorView } from "@codemirror/view";
+import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
+import { keymap, type EditorView } from "@codemirror/view";
+import { EditorState, Prec } from "@codemirror/state";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import type { Note } from "@archon/ui-types";
@@ -26,6 +27,8 @@ import type { WpnNoteWithContextListItem } from "../../../../../shared/wpn-v2-ty
 import type { InternalMarkdownNoteLink } from "../../../../utils/markdown-internal-note-href";
 import { MarkdownNoteLinkPickerModal } from "./MarkdownNoteLinkPickerModal";
 import { MarkdownNoteLinkAutocompletePopover } from "./MarkdownNoteLinkAutocompletePopover";
+import { NoteCheckpointSaveModal } from "./NoteCheckpointSaveModal";
+import { NoteCheckpointHistoryPanel } from "./NoteCheckpointHistoryPanel";
 import { ARCHON_MARKDOWN_OPEN_NOTE_LINK_PICKER_EVENT } from "./markdownNoteLinkEvents";
 import { findActiveWikiLinkTrigger } from "./markdownWikiLinkTrigger";
 import {
@@ -34,7 +37,7 @@ import {
   type MdxNoteSelectionSyncRef,
   type MdxNoteWikiKeymapState,
 } from "./mdx-note-editor-codemirror";
-import { yCollab } from "y-codemirror.next";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import { useArchonNoteModeLine } from "../../../useArchonNoteModeLine";
 import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
@@ -102,6 +105,13 @@ export function MdxNoteEditor({
   const onBlurRef: MdxNoteOnBlurRef = useRef(null);
 
   const [linkPickerOpen, setLinkPickerOpen] = useState(false);
+  const [checkpointSaveOpen, setCheckpointSaveOpen] = useState(false);
+  const [checkpointHistoryOpen, setCheckpointHistoryOpen] = useState(false);
+  // Tracks the most recent noteId for which yCollab has actually bound. Used
+  // by the ExternalChange transaction filter (added in cmExtensions below)
+  // to drop stale React-prop transactions once Y.Text owns the doc. See the
+  // matching block in MarkdownNoteEditor for the full root-cause writeup.
+  const lastYCollabBoundNoteIdRef = useRef<string | null>(null);
   const [linkPickerExclude, setLinkPickerExclude] = useState<string>("");
   // Set when an SDK component (e.g. <Slideshow>) opened the picker via
   // shell context. The modal's onPick checks this first; if set, the
@@ -782,12 +792,54 @@ export function MdxNoteEditor({
       selectionSyncRef,
       onBlurRef,
     });
+    // Drop ExternalChange transactions once yCollab has bound for this note.
+    // @uiw/react-codemirror dispatches ExternalChange whenever the `value`
+    // prop changes; while yCollab owns the doc, any such tx is a stale
+    // closure (connected→disconnected flicker, route-back-to-note, etc.)
+    // and would clobber Y.Text. Pre-bind, ExternalChange is legitimate
+    // (REST content load) so we keep a defensive shrink-to-empty guard
+    // active in that window. See MarkdownNoteEditor for the full writeup.
+    ext.push(
+      EditorState.transactionFilter.of((tr) => {
+        if (tr.annotation(ExternalChange) !== true) return tr;
+        if (!tr.docChanged) return tr;
+        if (lastYCollabBoundNoteIdRef.current === note.id) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[mdx-editor] dropped post-bind ExternalChange tx (stale value prop)",
+            {
+              noteId: note.id,
+              startLen: tr.startState.doc.length,
+              newLen: tr.newDoc.length,
+            },
+          );
+          return [];
+        }
+        const startLen = tr.startState.doc.length;
+        const newLen = tr.newDoc.length;
+        if (startLen > 0 && newLen < startLen) {
+          // eslint-disable-next-line no-console
+          console.warn(
+            "[mdx-editor] dropped pre-bind ExternalChange shrink tx",
+            { noteId: note.id, startLen, newLen },
+          );
+          return [];
+        }
+        return tr;
+      }),
+    );
     // Bind CodeMirror to live Y.Text via yCollab when WS provides one.
     if (yjsBody.yText) {
       ext.push(yCollab(yjsBody.yText, yjsBody.awareness));
+      // yCollab's UndoManager already only tracks the local YSyncConfig
+      // origin, but yCollab does not install its keymap. Without this,
+      // Cmd-Z falls through to historyKeymap and runs CodeMirror's native
+      // EditorState undo — which reverts remote edits too. Route Mod-z/y/
+      // Shift-z to the user-scoped Y.UndoManager at higher precedence.
+      ext.push(Prec.high(keymap.of(yUndoManagerKeymap)));
     }
     return ext;
-  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.awareness]);
+  }, [readOnly, resolvedDark, yjsBody.yText, yjsBody.awareness, note.id]);
 
   useEffect(() => {
     const host = cmHostRef.current;
@@ -816,6 +868,27 @@ export function MdxNoteEditor({
       cmViewRef.current = null;
     }
   }, [readOnly, viewMode]);
+
+  // Track the most recent noteId yCollab has bound for — used by the
+  // ExternalChange transaction filter to drop stale value-prop tx after
+  // first bind. See the matching block in MarkdownNoteEditor.
+  useEffect(() => {
+    if (yjsBody.yText) {
+      lastYCollabBoundNoteIdRef.current = note.id;
+    }
+  }, [note.id, yjsBody.yText]);
+
+  // First-connect cursor render fix — see the matching block in
+  // MarkdownNoteEditor for the full root-cause writeup. Forces one
+  // ViewUpdate after yCollab binds so yRemoteSelections' update() walks
+  // the already-populated `awareness.getStates()` and renders pre-existing
+  // peer carets immediately, instead of waiting for an idle local action.
+  useEffect(() => {
+    if (!yjsBody.yText || !yjsBody.awareness) return;
+    const view = cmViewRef.current;
+    if (!view) return;
+    view.dispatch({ selection: view.state.selection });
+  }, [yjsBody.yText, yjsBody.awareness]);
 
   selectionSyncRef.current = (from, to, head) => {
     lastCaretRef.current = { start: from, end: to };
@@ -895,6 +968,27 @@ export function MdxNoteEditor({
             >
               Link to note (path)
             </button>
+            <button
+              type="button"
+              className="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted/40"
+              onClick={() => setCheckpointSaveOpen(true)}
+              title="Save a restorable snapshot of the current contents"
+            >
+              Checkpoint
+            </button>
+            <button
+              type="button"
+              aria-pressed={checkpointHistoryOpen}
+              className={`rounded-md border border-border px-2.5 py-1 text-[11px] font-medium hover:bg-muted/40 ${
+                checkpointHistoryOpen
+                  ? "bg-muted/60 text-foreground"
+                  : "bg-background text-foreground"
+              }`}
+              onClick={() => setCheckpointHistoryOpen((v) => !v)}
+              title="Show checkpoint history"
+            >
+              History
+            </button>
             <div className="text-[11px] text-muted-foreground">MDX</div>
           </div>
         </div>
@@ -956,7 +1050,27 @@ export function MdxNoteEditor({
             </div>
           </div>
         ) : null}
+
+        {checkpointHistoryOpen ? (
+          <NoteCheckpointHistoryPanel
+            note={note}
+            onClose={() => setCheckpointHistoryOpen(false)}
+          />
+        ) : null}
       </div>
+
+      <NoteCheckpointSaveModal
+        open={checkpointSaveOpen}
+        noteId={note.id}
+        onClose={() => setCheckpointSaveOpen(false)}
+        onSaved={(_cp, deduped) => {
+          setCheckpointHistoryOpen(true);
+          if (deduped) {
+            // eslint-disable-next-line no-console
+            console.info("[checkpoint] deduped within 30s window");
+          }
+        }}
+      />
 
       <MarkdownNoteLinkPickerModal
         open={linkPickerOpen}
