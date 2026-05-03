@@ -31,6 +31,8 @@ interface NotesState {
   currentNote: Note | null;
   /** Background-warmed note details keyed by id. */
   notePrefetchById: Record<string, Note>;
+  /** noteIds with an in-flight prefetchNote request. Hover guard de-dupes. */
+  notePrefetchInFlight: Record<string, true>;
   notesList: NoteListItem[];
   /** Sidebar / tree list fetch */
   listLoading: boolean;
@@ -57,6 +59,7 @@ interface NotesState {
 const initialState: NotesState = {
   currentNote: null,
   notePrefetchById: {},
+  notePrefetchInFlight: {},
   notesList: [],
   listLoading: false,
   detailLoading: false,
@@ -92,13 +95,25 @@ export const prefetchNote = createAsyncThunk<
   Note | null,
   string,
   NotesThunkConfig
->("notes/prefetchNote", async (noteId, { extra }) => {
-  // Same gate as fetchNote: the explorer's prefetch loop iterates the
-  // first ~12 visible note ids on every notes-list change, which during
-  // an optimistic create would round-trip the placeholder to the server.
-  if (isPlaceholderNoteId(noteId)) return null;
-  return await extra.localStore.notes.getNote(noteId);
-});
+>(
+  "notes/prefetchNote",
+  async (noteId, { extra }) => {
+    return await extra.localStore.notes.getNote(noteId);
+  },
+  {
+    // Skip the dispatch entirely when:
+    // - the id is an optimistic-create placeholder (would 404/500),
+    // - we already have the note in the prefetch cache,
+    // - or the same id is already in flight (hover sweep / re-hover de-dupe).
+    condition: (noteId, { getState }) => {
+      if (isPlaceholderNoteId(noteId)) return false;
+      const s = (getState() as { notes: NotesState }).notes;
+      if (s.notePrefetchById[noteId]) return false;
+      if (s.notePrefetchInFlight[noteId]) return false;
+      return true;
+    },
+  },
+);
 
 export const createNote = createAsyncThunk<
   { id: string },
@@ -280,10 +295,17 @@ const notesSlice = createSlice({
         state.listLoading = false;
         state.error = action.error.message || "Failed to fetch notes list";
       })
+      .addCase(prefetchNote.pending, (state, action) => {
+        state.notePrefetchInFlight[action.meta.arg] = true;
+      })
       .addCase(prefetchNote.fulfilled, (state, action) => {
+        delete state.notePrefetchInFlight[action.meta.arg];
         const note = action.payload;
         if (!note?.id) return;
         state.notePrefetchById[note.id] = note;
+      })
+      .addCase(prefetchNote.rejected, (state, action) => {
+        delete state.notePrefetchInFlight[action.meta.arg];
       })
       .addCase(createNote.fulfilled, (state) => {
         state.error = null;
