@@ -96,6 +96,9 @@ const DND_NOTE_MIME = "application/archon-wpn-note";
 
 const NOTE_OPEN_DELAY_MS = 260;
 
+/** Hover-intent debounce: only prefetch a note if the cursor lingers on its row this long. Filters cursor sweeps. */
+const HOVER_PREFETCH_DELAY_MS = 200;
+
 /** After a mutation, poll ticks are skipped for this window so stale responses don't clobber optimistic state. */
 const WPN_MUTATION_POLL_QUIET_MS = 3000;
 
@@ -593,6 +596,14 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
   const explorerNoteDragRef = useRef<{ projectId: string; noteId: string } | null>(null);
   const noteOpenTimerRef = useRef<number | null>(null);
   const pendingOpenNoteIdRef = useRef<string | null>(null);
+  const hoverPrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHoverPrefetchTimer = useCallback(() => {
+    if (hoverPrefetchTimerRef.current !== null) {
+      clearTimeout(hoverPrefetchTimerRef.current);
+      hoverPrefetchTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => clearHoverPrefetchTimer, [clearHoverPrefetchTimer]);
   const explorerScrollRef = useRef<HTMLDivElement | null>(null);
   const lastExplorerRevealForNoteIdRef = useRef<string | null>(null);
   const notesRef = useRef<WpnNoteListItem[]>([]);
@@ -2723,8 +2734,13 @@ export function WpnExplorerPanelView(_props: ShellViewComponentProps): React.Rea
           onDrop={(e) => void onDropOnNote(e, projectId, n.id)}
           onMouseEnter={() => {
             if (renamingRef.current) return;
-            void dispatch(prefetchNote(n.id));
+            clearHoverPrefetchTimer();
+            hoverPrefetchTimerRef.current = setTimeout(() => {
+              hoverPrefetchTimerRef.current = null;
+              void dispatch(prefetchNote(n.id));
+            }, HOVER_PREFETCH_DELAY_MS);
           }}
+          onMouseLeave={clearHoverPrefetchTimer}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
