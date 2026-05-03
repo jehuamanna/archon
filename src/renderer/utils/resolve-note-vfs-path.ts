@@ -6,6 +6,7 @@ import {
   isTreeRelativeVfsPath,
   resolveTreeRelativeVfsPath,
 } from "../../shared/note-vfs-path";
+import { fetchWpnNoteLinkIndex } from "../shell/first-party/plugins/markdown/wpnNoteLinkIndex";
 
 /**
  * Resolves explorer-style canonical path `Project/Title`,
@@ -19,8 +20,8 @@ export async function resolveNoteIdFromVfsPath(
   const archon = typeof window !== "undefined" ? getArchon() : undefined;
   if (!archon?.wpnListAllNotesWithContext) return null;
   try {
-    const { notes } = await archon.wpnListAllNotesWithContext();
-    const list = Array.isArray(notes) ? notes : [];
+    const { rawNotes } = await fetchWpnNoteLinkIndex();
+    const list = rawNotes;
     let canonical = vfsPath.trim();
 
     // Tree-relative paths: ../sibling, ../../uncle, ../sibling/child

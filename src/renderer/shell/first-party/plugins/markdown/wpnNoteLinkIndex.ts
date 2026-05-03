@@ -64,11 +64,76 @@ export type WpnNoteLinkIndexResult = {
   rawNotes: WpnNoteWithContextListItem[];
 };
 
+// Module-level cache so a single `wpnListAllNotesWithContext` round-trip is
+// shared by every consumer per session: the markdown/MDX editors' broken-link
+// detection and wiki autocomplete, the link-picker modal, the welcome
+// system-note bootstrap, and the VFS path-cache refresh in ChromeOnlyWorkbench.
+// Without this cache, each note click re-fired the same multi-second request
+// because each consumer kept its own component-local cache that died on
+// unmount. Invalidate via `resetWpnNoteLinkIndex()` when a rename / move /
+// create changes the index — see ChromeOnlyWorkbench's noteRenameEpoch
+// effect.
+let cachedPromise: Promise<WpnNoteLinkIndexResult> | null = null;
+let cachedResult: WpnNoteLinkIndexResult | null = null;
+
+const INVALIDATE_EVENT = "archon:wpn-note-link-index-invalidated";
+
+export function resetWpnNoteLinkIndex(): void {
+  cachedPromise = null;
+  cachedResult = null;
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(INVALIDATE_EVENT));
+  }
+}
+
+/** Subscribe to cache-invalidation events. Listeners typically refetch via
+ * `fetchWpnNoteLinkIndex()` to update their local mirror with the fresh
+ * post-rename / post-move data. Returns an unsubscribe handle. */
+export function subscribeWpnNoteLinkIndexInvalidated(fn: () => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const listener = (): void => {
+    fn();
+  };
+  window.addEventListener(INVALIDATE_EVENT, listener);
+  return () => window.removeEventListener(INVALIDATE_EVENT, listener);
+}
+
+/** Synchronous access to the most recently resolved index, or null if none yet.
+ * Lets components seed `useRef` mirrors on mount without waiting for the
+ * `fetchWpnNoteLinkIndex()` promise to resolve. */
+export function getCachedWpnNoteLinkIndex(): WpnNoteLinkIndexResult | null {
+  return cachedResult;
+}
+
 /**
  * Loads every WPN note (all workspaces and projects, including Documentation) for link insertion.
  * Uses `wpnListAllNotesWithContext` when available; falls back to nested list calls.
+ *
+ * Result is memoised at module scope; callers within the same session share
+ * one round-trip. Empty results aren't cached (treated as "archon host not
+ * ready yet") so subsequent callers retry.
  */
 export async function fetchWpnNoteLinkIndex(): Promise<WpnNoteLinkIndexResult> {
+  if (cachedPromise) return cachedPromise;
+  const p = loadWpnNoteLinkIndex();
+  cachedPromise = p;
+  void p.then(
+    (res) => {
+      // Don't cache the "host not ready" empty case — let the next caller retry.
+      if (res.rows.length === 0 && res.rawNotes.length === 0) {
+        if (cachedPromise === p) cachedPromise = null;
+        return;
+      }
+      cachedResult = res;
+    },
+    () => {
+      if (cachedPromise === p) cachedPromise = null;
+    },
+  );
+  return p;
+}
+
+async function loadWpnNoteLinkIndex(): Promise<WpnNoteLinkIndexResult> {
   const archon = typeof window !== "undefined" ? getArchon() : undefined;
   if (!archon?.wpnListWorkspaces) {
     return { rows: [], rawNotes: [] };

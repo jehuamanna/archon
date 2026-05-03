@@ -42,7 +42,13 @@ import { useShellActiveMainTab } from "../../../ShellActiveTabContext";
 import { useShellRegistries } from "../../../registries/ShellRegistriesContext";
 import { isShellNoteEditorTabType } from "../../shellWorkspaceIds";
 import type { ShellNoteTabState } from "../../../shellTabUrlSync";
-import { fetchWpnNoteLinkIndex, filterWpnNoteLinkRows, type WpnNoteLinkRow } from "./wpnNoteLinkIndex";
+import {
+  fetchWpnNoteLinkIndex,
+  filterWpnNoteLinkRows,
+  getCachedWpnNoteLinkIndex,
+  subscribeWpnNoteLinkIndexInvalidated,
+  type WpnNoteLinkRow,
+} from "./wpnNoteLinkIndex";
 import type { ImagePasteContext } from "../image-notes/markdown-image-paste";
 import { useToast } from "../../../../toast/ToastContext";
 
@@ -91,8 +97,15 @@ export function MarkdownNoteEditor({
   const cmViewRef = useRef<EditorView | null>(null);
   const cmResizeRafRef = useRef(0);
   const lastCaretRef = useRef({ start: 0, end: 0 });
-  const wikiIndexCacheRef = useRef<WpnNoteLinkRow[] | null>(null);
-  const rawNotesCacheRef = useRef<WpnNoteWithContextListItem[] | null>(null);
+  // Seed from the shared module cache so components that mount after the
+  // first link-index fetch get instant `isLinkTargetValid` lookups without
+  // waiting for the (no-op) cache-hit promise to resolve.
+  const wikiIndexCacheRef = useRef<WpnNoteLinkRow[] | null>(
+    getCachedWpnNoteLinkIndex()?.rows ?? null,
+  );
+  const rawNotesCacheRef = useRef<WpnNoteWithContextListItem[] | null>(
+    getCachedWpnNoteLinkIndex()?.rawNotes ?? null,
+  );
   const wikiKeymapRef = useRef<MarkdownNoteWikiKeymapState>({
     readOnly: false,
     active: false,
@@ -118,7 +131,9 @@ export function MarkdownNoteEditor({
   const lastYCollabBoundNoteIdRef = useRef<string | null>(null);
   const [sel, setSel] = useState({ start: 0, end: 0 });
   const [wikiDismissed, setWikiDismissed] = useState(false);
-  const [wikiRows, setWikiRows] = useState<WpnNoteLinkRow[]>([]);
+  const [wikiRows, setWikiRows] = useState<WpnNoteLinkRow[]>(
+    () => getCachedWpnNoteLinkIndex()?.rows ?? [],
+  );
   const [wikiLoading, setWikiLoading] = useState(false);
   const [wikiError, setWikiError] = useState<string | null>(null);
   const [wikiSelected, setWikiSelected] = useState(0);
@@ -209,35 +224,40 @@ export function MarkdownNoteEditor({
     setWikiDismissed(false);
   }, [wikiTrig?.filter]);
 
+  // Reset per-note autocomplete UI state (not the shared link index, which
+  // is project-wide and shouldn't refetch on every navigation).
   useEffect(() => {
-    wikiIndexCacheRef.current = null;
-    rawNotesCacheRef.current = null;
-    setWikiRows([]);
     setWikiError(null);
     setWikiDismissed(false);
   }, [note.id]);
 
-  // Eagerly load the note link index for broken-link detection in the preview.
+  // Eagerly load the note link index for broken-link detection in the preview,
+  // and refresh when ChromeOnlyWorkbench invalidates the shared cache (rename
+  // / structural change). Hits the module-level cache in `wpnNoteLinkIndex.ts`
+  // — at most one network round-trip per session per invalidation.
   useEffect(() => {
-    if (wikiIndexCacheRef.current) {
-      if (wikiRows.length === 0) setWikiRows(wikiIndexCacheRef.current);
-      return;
-    }
     let cancelled = false;
-    void fetchWpnNoteLinkIndex()
-      .then(({ rows: list, rawNotes }) => {
-        if (cancelled) return;
-        wikiIndexCacheRef.current = list;
-        rawNotesCacheRef.current = rawNotes;
-        setWikiRows(list);
-      })
-      .catch(() => {
-        /* broken-link detection degrades gracefully — no error shown */
-      });
+    const refresh = (): void => {
+      void fetchWpnNoteLinkIndex()
+        .then(({ rows: list, rawNotes }) => {
+          if (cancelled) return;
+          wikiIndexCacheRef.current = list;
+          rawNotesCacheRef.current = rawNotes;
+          setWikiRows(list);
+        })
+        .catch(() => {
+          /* broken-link detection degrades gracefully — no error shown */
+        });
+    };
+    if (!wikiIndexCacheRef.current || wikiIndexCacheRef.current.length === 0) {
+      refresh();
+    }
+    const unsub = subscribeWpnNoteLinkIndexInvalidated(refresh);
     return () => {
       cancelled = true;
+      unsub();
     };
-  }, [note.id]);
+  }, []);
 
   useEffect(() => {
     if (!showWiki) return;

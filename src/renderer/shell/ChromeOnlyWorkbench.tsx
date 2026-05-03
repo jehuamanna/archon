@@ -46,6 +46,10 @@ import {
   setNoteIdVfsPathCacheFromWpnNotes,
   subscribeNoteVfsPathCacheInvalidated,
 } from "./noteIdVfsPathCache";
+import {
+  fetchWpnNoteLinkIndex,
+  resetWpnNoteLinkIndex,
+} from "./first-party/plugins/markdown/wpnNoteLinkIndex";
 import { resolveNoteIdFromVfsPath } from "../utils/resolve-note-vfs-path";
 import type { OpenNoteInShellOptions } from "./openNoteInShell";
 import { applyShellTabFromUrlHash, applyShellWelcomeHash } from "./shellRailNavigation";
@@ -533,21 +537,41 @@ export function ChromeOnlyWorkbench(): React.ReactElement {
     lastSyncedHash.current = h;
   }, [tabs]);
 
+  // VFS path cache + shared link-index refresh, driven by structural change
+  // (rename or notesList length change). The first run on mount populates
+  // both caches; subsequent runs invalidate the shared link index first so
+  // editors and the link picker pick up post-rename labels. Both paths share
+  // a single `wpnListAllNotesWithContext` round-trip via the module cache in
+  // `wpnNoteLinkIndex.ts`.
+  const linkIndexDepsRef = useRef({
+    noteRenameEpoch,
+    notesListLength,
+    initialized: false,
+  });
   useEffect(() => {
     if (!projectOpen) {
       return;
     }
-    const archon = getArchon();
-    if (typeof archon.wpnListAllNotesWithContext !== "function") {
-      return;
+    const prev = linkIndexDepsRef.current;
+    if (
+      prev.initialized &&
+      (prev.noteRenameEpoch !== noteRenameEpoch ||
+        prev.notesListLength !== notesListLength)
+    ) {
+      resetWpnNoteLinkIndex();
     }
+    linkIndexDepsRef.current = {
+      noteRenameEpoch,
+      notesListLength,
+      initialized: true,
+    };
     let cancelled = false;
-    void archon
-      .wpnListAllNotesWithContext()
-      .then((res) => {
+    void fetchWpnNoteLinkIndex()
+      .then(({ rawNotes }) => {
         if (cancelled) return;
-        const list = Array.isArray(res?.notes) ? res.notes : [];
-        setNoteIdVfsPathCacheFromWpnNotes(list);
+        if (rawNotes.length > 0) {
+          setNoteIdVfsPathCacheFromWpnNotes(rawNotes);
+        }
       })
       .catch(() => {
         /* no project / backend race — avoid crashing shell */
