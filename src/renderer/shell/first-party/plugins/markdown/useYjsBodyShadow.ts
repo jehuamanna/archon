@@ -267,6 +267,16 @@ export function useYjsBodyShadow(
         name: noteId,
         document: doc,
         token,
+        // Without this, HocuspocusProvider.disconnect() leaves the underlying
+        // HocuspocusProviderWebsocket alive with `shouldConnect = true`. When
+        // the socket eventually closes (server idle / network blip), the
+        // websocket layer auto-reconnects — but the HocuspocusProvider that
+        // owned the auth flow has been destroyed, so nobody sends the
+        // Hocuspocus auth message on the new socket. The server then waits
+        // out its 30 s `closeIdleConnectionTimeout` and closes with
+        // Unauthorized, which surfaces as a "pending" /ws/yjs request that
+        // hangs for exactly 30 s in DevTools.
+        preserveConnection: false,
         onAuthenticationFailed: ({ reason }) => {
           // eslint-disable-next-line no-console
           console.warn("[yjs-body] auth failed:", reason);
@@ -355,7 +365,13 @@ export function useYjsBodyShadow(
         }
         setTimeout(() => {
           try {
-            p.disconnect();
+            // destroy() handles the full teardown: it sends the Hocuspocus
+            // CloseMessage (so the server closes the WS with code 1000
+            // immediately) and then calls disconnect(), which — because
+            // `preserveConnection: false` — also closes the underlying
+            // websocketProvider so no orphan reconnect loop is left behind.
+            // Calling disconnect() before destroy() flips isConnected=false
+            // first, which silently drops the CloseMessage send.
             p.destroy();
           } catch {
             /* noop */
